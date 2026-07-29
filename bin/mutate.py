@@ -560,6 +560,49 @@ MUTATIONS = [
         "test_pipeline.py::test_the_lock_is_released_even_when_the_run_fails",
         "a retained lock making the next claim look like a live sibling, wedging the device",
     ),
+    # ---- the data-driven browser layer ----
+    (
+        "emubackend/selectors.py",
+        "        if not found.resolvable:",
+        "        if False:",
+        "test_selectors_and_phases.py::test_require_fails_loudly_on_an_uncaptured_selector",
+        "an uncaptured selector silently passing, so a step reports success on an untouched page",
+    ),
+    (
+        "emubackend/selectors.py",
+        "            _validate(loaded)",
+        "            pass",
+        "test_selectors_and_phases.py::test_a_typod_key_is_rejected_rather_than_ignored",
+        "a typo'd manifest key sitting in the file doing nothing, with no symptom to trace",
+    ),
+    (
+        "emubackend/phases.py",
+        '        if handle is None:\n            raise ManifestError(\n                f"{self.platform}.{key} did not match anything on the page.',
+        '        if False:\n            raise ManifestError(\n                f"{self.platform}.{key} did not match anything on the page.',
+        "test_selectors_and_phases.py::test_a_selector_that_matches_nothing_names_what_was_tried",
+        "a tap on a selector that matched nothing proceeding as if it worked",
+    ),
+    (
+        "emubackend/phases.py",
+        "            if not verdict.ok:",
+        "            if False:",
+        "test_selectors_and_phases.py::test_p3_raises_when_the_harvest_fails_its_predicate",
+        "the P1 outcome: a run reporting success having harvested nothing",
+    ),
+    (
+        "emubackend/phases.py",
+        "            if handle is None:\n                return False\n            state = await handle.get_attribute(\"aria-pressed\")\n            if state is None:\n                state = await handle.get_attribute(\"aria-checked\")\n            return state == \"false\"",
+        "            state = await handle.get_attribute(\"aria-pressed\")\n            if state is None:\n                state = await handle.get_attribute(\"aria-checked\")\n            return state == \"false\"",
+        "test_selectors_and_phases.py::test_the_off_signal_is_positive_not_the_inverse_of_the_predicate",
+        "an unfindable toggle reading as confirmed-off, authorising a click that switches a live control OFF (#709)",
+    ),
+    (
+        "emubackend/phases.py",
+        "    for css in entry.css:\n        found = await page.query_selector(css)",
+        "    for css in reversed(entry.css):\n        found = await page.query_selector(css)",
+        "test_selectors_and_phases.py::test_resolve_tries_the_css_chain_in_order",
+        "the fallback chain evaluated backwards, so the least specific selector wins",
+    ),
 ]
 
 
