@@ -266,6 +266,42 @@ MUTATIONS = [
         "test_contract_core.py::test_rule2_phase_restart_clears_unconditionally_because_retry_emits_it",
         "scoping phase_restart by agent, so Retry strands a stale card",
     ),
+    # ---- contract core: REST transport ----
+    (
+        "emubackend/contract/rest.py",
+        "AUTH_RETRY_CODES = (401, 403)",
+        "AUTH_RETRY_CODES = (401,)",
+        "test_rest.py::test_an_auth_failure_retries_once_with_a_FORCE_REFRESHED_token",
+        "dropping the 403 heal, so a stale credential kills a run mid-flight",
+    ),
+    (
+        "emubackend/contract/rest.py",
+        "            resp = self._send(method, url, self._token(force=True), json_body)",
+        "            resp = self._send(method, url, self._token(), json_body)",
+        "test_rest.py::test_an_auth_failure_retries_once_with_a_FORCE_REFRESHED_token",
+        "retrying with the SAME cached token, which fails identically",
+    ),
+    (
+        "emubackend/contract/rest.py",
+        '        for field, op in (("ownerUid", "EQUAL"), ("sharedWith", "ARRAY_CONTAINS")):',
+        '        for field, op in (("ownerUid", "EQUAL"),):',
+        "test_rest.py::test_list_devices_issues_two_queries_and_unions_them",
+        "one query instead of two, silently truncating the device list (no cross-field OR)",
+    ),
+    (
+        "emubackend/contract/rest.py",
+        "        mask = values.update_mask_for(fields, delete_paths)",
+        "        mask = list(fields)",
+        "test_rest.py::test_a_deleted_field_is_in_the_mask_and_absent_from_the_body",
+        "omitting deleted paths from the mask, so a field delete silently does nothing",
+    ),
+    (
+        "emubackend/contract/rest.py",
+        "            if doc:\n                out.append(decode_document(doc))",
+        "            out.append(decode_document(doc or {}))",
+        "test_rest.py::test_run_query_tolerates_readtime_only_rows",
+        "treating runQuery's readTime-only rows as documents",
+    ),
 ]
 
 
