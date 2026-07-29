@@ -125,6 +125,22 @@ _DESCRIBE_JS = """
 """
 
 
+#: Keys whose elements only come into existence AFTER a response has been produced.
+#:
+#: ⚠ Discovered by running this against a page with no answer on screen: three of the seven keys
+#: reported "no candidate", which reads as a capture failure when it is simply that the DOM does not
+#: contain those nodes yet. So a capture session needs TWO passes per platform — one on the signed-in
+#: idle page for the composer/send/marker/toggle, and one with a completed answer visible for the rest.
+#: Saying so here costs nothing; discovering it mid-session costs the session.
+POST_RESPONSE_KEYS = {
+    "sources",
+    "response_container",
+    "activity_panel",
+    "artifact_panel",
+    "audio_ready_marker",
+}
+
+
 def capture(udid: str, platform: str, url: str, port: int = 9222) -> dict:
     if platform not in PROBES:
         raise SystemExit(f"unknown platform {platform!r}; known: {sorted(PROBES)}")
@@ -216,7 +232,13 @@ def main() -> int:
         if entry:
             print(f"  ✓ {key:24} {entry['css'][0]}  ({entry['provenance']})")
         else:
-            print(f"  · {key:24} no rank-1..3 visible candidate — review the candidates file")
+            hint = (
+                " — this element does not EXIST until a response has been produced; re-run this "
+                "capture with a completed answer on screen"
+                if key in POST_RESPONSE_KEYS
+                else " — review the candidates file"
+            )
+            print(f"  · {key:24} no rank-1..3 visible candidate{hint}")
     print(
         "\n⚠ These are PROPOSALS. Review them before merging into selectors_mobile.json: a "
         "plausible-but-wrong selector produces a run that reports success having harvested nothing."

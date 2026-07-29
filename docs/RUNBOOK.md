@@ -147,3 +147,40 @@ data-driven browser layer.
 - **A0's failure taxonomy.** Needs the daemon restarted with the observation flags armed
   (`docs/` + recipe §0.5.10). Config only, no code — but it is the owner's machine and a release e2e
   is pending, so never cycle it unilaterally.
+
+## The owner's capture session — the one remaining checkpoint
+
+Everything else in this repo is green and credential-free (`bash bin/all_gates.sh <UDID>`). This is the
+step that needs a human, because the selectors the pipeline drives only exist on a **signed-in** page.
+
+Two passes per platform, and the second one is the part that surprises people: **three of the seven keys
+do not exist until a response has been produced** — `sources`, `response_container`, `activity_panel`.
+On an idle page the capture reports "no candidate" for them, which reads as a tool failure when the DOM
+simply has no such nodes yet.
+
+```bash
+UDID=$(xcrun simctl list devices booted | sed -n 's/.*(\([0-9A-F-]\{36\}\)) (Booted).*/\1/p' | head -1)
+
+# 1. Sign in to the platform in the Simulator's Safari. 2FA, password manager, whatever it needs.
+open -a Simulator
+
+# 2. Pass one — the idle signed-in page. Captures composer / send / logged_in_marker / the toggle.
+.venv/bin/python bin/capture_selectors.py --udid "$UDID" --platform chatgpt --url https://chatgpt.com
+
+# 3. Ask it anything and let the answer finish, with sources visible. Then pass two.
+.venv/bin/python bin/capture_selectors.py --udid "$UDID" --platform chatgpt --url https://chatgpt.com
+
+# 4. Review artifacts/selectors/chatgpt_draft.json and merge into the real manifest. Review is not
+#    ceremony: a plausible-but-wrong selector produces the P1 shape, where every click lands and
+#    extraction returns nothing while the run reports success.
+
+# 5. Then C1 runs against that platform with NO code change, and the coverage gate stops blocking:
+bash bin/c1_in_app.sh "$UDID" chatgpt
+.venv/bin/python bin/coverage_gate.py
+```
+
+While signed in, the other owner-gated question can be answered in the same session: **does the platform
+gate any control the run must drive on `isTrusted`?** In the app's own `WKWebView` a script click cannot
+move such a control (measured — `artifacts/apphost/verdict.json`, the BOUNDARY check); via AXe in the
+Simulator it can. If a needed control is trust-gated, the app is a thin client for that step rather than
+a full device, and that decides C1's final shape.
