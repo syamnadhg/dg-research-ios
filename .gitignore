@@ -28,3 +28,4 @@ DerivedData/
 # Swift
 ios/.build/
 ios/.swiftpm/
+artifacts/apphost/
