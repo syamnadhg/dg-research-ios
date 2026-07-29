@@ -48,9 +48,7 @@ struct LandingView: View {
 
     private var hero: some View {
         VStack(spacing: DS.S.md) {
-            Text("Super Research")
-                .font(DS.F.wordmark)
-                .foregroundStyle(DS.C.accent)
+            Wordmark(size: 28)
             // The frontend's own tagline, verbatim.
             Text("One topic. Three AI agents. Complete research package.")
                 .font(DS.F.body)

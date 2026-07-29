@@ -38,7 +38,8 @@ struct RootView: View {
                             model: model,
                             onSelect: { loginTarget = $0 }
                         )
-                        UsersCard(users: model.snapshot.users)
+                        WorkersCard(snapshot: model.snapshot)
+                        PeopleCard(snapshot: model.snapshot)
                         ControlsCard(model: model)
                     } else if let pairing = model.pairing {
                         // The five-stage flow, matching `superresearch --pair` stage for stage. It
@@ -85,13 +86,32 @@ struct RootView: View {
 ///
 /// The frontend renders it `text-2xl font-bold text-accent`, centered — so 24pt, bold, and in the
 /// accent blue rather than white. It was left-aligned in white here, which is a different brand.
+/// The wordmark, in the frontend's own two tones.
+///
+/// ⚠ Not one colour. The web app renders it as `<span class="text-accent font-bold">Super</span>` then
+/// `<span class="text-text-secondary font-medium">Research</span>` — so **Super** is accent and bold,
+/// **Research** is secondary and medium. Painting the whole thing accent, as the first version did, is
+/// a different mark from the one the product uses everywhere else.
+struct Wordmark: View {
+    var size: CGFloat = 24
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Text("Super")
+                .font(DS.F.sans(size, .bold))
+                .foregroundStyle(DS.C.accent)
+            Text(" Research")
+                .font(DS.F.sans(size, .medium))
+                .foregroundStyle(DS.C.textSecondary)
+        }
+    }
+}
+
 private struct Header: View {
     let snapshot: DeviceSnapshot
     var body: some View {
         VStack(spacing: DS.S.md) {
-            Text("Super Research")
-                .font(DS.F.wordmark)
-                .foregroundStyle(DS.C.accent)
+            Wordmark(size: 24)
             if snapshot.paired {
                 StatusPill(
                     color: snapshot.online ? DS.C.ok : DS.C.textTertiary,
@@ -324,36 +344,155 @@ private struct PlatformsCard: View {
     }
 }
 
-// MARK: - Connected users
+// MARK: - Workers
 
-private struct UsersCard: View {
-    let users: [ConnectedUser]
+/// Live capacity: what each worker is doing, and how much is spare.
+///
+/// Read from the device doc's `workers` map, which **all** workers write — unlike the `currentRun*`
+/// fields, which only worker-1 maintains. On a multi-worker device those fields describe one worker and
+/// call it the device, so this is the only honest view of capacity.
+private struct WorkersCard: View {
+    let snapshot: DeviceSnapshot
 
     var body: some View {
         VStack(alignment: .leading, spacing: DS.S.lg) {
             HStack {
-                SectionLabel(text: "Connected")
+                SectionLabel(text: "Workers")
                 Spacer()
-                Text("\(users.count)").font(DS.F.mono(11)).foregroundStyle(DS.C.textTertiary)
+                Text("\(snapshot.workers.filter(\.isBusy).count)/\(snapshot.workers.count) busy")
+                    .font(DS.F.mono(11)).foregroundStyle(DS.C.textTertiary)
             }
-            if users.isEmpty {
-                Text("No one else has access to this device.")
-                    .font(DS.F.body).foregroundStyle(DS.C.textSecondary)
-            }
-            ForEach(users) { u in
-                HStack {
-                    Text(u.label)
-                        .font(DS.F.body).foregroundStyle(DS.C.textPrimary)
-                        .lineLimit(1).truncationMode(.middle)
+
+            ForEach(snapshot.workers) { worker in
+                HStack(alignment: .firstTextBaseline, spacing: DS.S.lg) {
+                    // Colour AND glyph, so busy/idle survives without colour vision.
+                    Text(worker.isBusy ? "●" : "○")
+                        .font(DS.F.mono(11, .semibold))
+                        .foregroundStyle(worker.isBusy ? DS.C.ok : DS.C.textTertiary)
+                    Text("w\(worker.id)")
+                        .font(DS.F.mono(11)).foregroundStyle(DS.C.textTertiary)
+                        .frame(width: 24, alignment: .leading)
+                    if worker.isBusy {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(worker.title ?? "a run")
+                                .font(DS.F.label).foregroundStyle(DS.C.textPrimary).lineLimit(1)
+                            if let phase = worker.phase {
+                                Text("phase \(phase)"
+                                     + (worker.totalPhases.map { " of \($0)" } ?? ""))
+                                    .font(DS.F.label).foregroundStyle(DS.C.textTertiary)
+                            }
+                        }
+                    } else {
+                        Text("idle").font(DS.F.label).foregroundStyle(DS.C.textTertiary)
+                    }
                     Spacer()
-                    Text(u.isOwner ? "owner" : "shared")
-                        .font(DS.F.label)
-                        .foregroundStyle(u.isOwner ? DS.C.accent : DS.C.textTertiary)
                 }
-                .frame(minHeight: 28)
+                .frame(minHeight: 26)
+            }
+
+            if !snapshot.queue.isEmpty {
+                Divider().overlay(DS.C.border)
+                HStack {
+                    Text("Queued").font(DS.F.label).foregroundStyle(DS.C.textTertiary)
+                    Spacer()
+                    Text("\(snapshot.queue.count)")
+                        .font(DS.F.mono(11)).foregroundStyle(DS.C.textSecondary)
+                }
+                ForEach(snapshot.queue) { queued in
+                    HStack(spacing: DS.S.lg) {
+                        Text("#\(queued.position)")
+                            .font(DS.F.mono(10)).foregroundStyle(DS.C.accent)
+                            .frame(width: 24, alignment: .leading)
+                        Text(queued.title)
+                            .font(DS.F.label).foregroundStyle(DS.C.textSecondary).lineLimit(1)
+                        Spacer()
+                    }
+                    .frame(minHeight: 24)
+                }
             }
         }
         .srCard()
+    }
+}
+
+// MARK: - People
+
+/// Who can use this device, and what each of them is doing on it right now.
+///
+/// The owner plus everyone in `sharedWith`. Each tile carries live state derived from `workers` and
+/// `queueOwners`, because "who has access" and "who is actually using it" are different questions and
+/// the second is the one you ask when a device feels busy.
+private struct PeopleCard: View {
+    let snapshot: DeviceSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DS.S.lg) {
+            HStack {
+                SectionLabel(text: "People")
+                Spacer()
+                Text("\(snapshot.users.count)")
+                    .font(DS.F.mono(11)).foregroundStyle(DS.C.textTertiary)
+            }
+            if snapshot.users.isEmpty {
+                Text("No one else has access to this device.")
+                    .font(DS.F.body).foregroundStyle(DS.C.textSecondary)
+            }
+            ForEach(snapshot.users) { user in
+                PersonRow(user: user, activity: snapshot.activity(for: user.id))
+            }
+        }
+        .srCard()
+    }
+}
+
+private struct PersonRow: View {
+    let user: ConnectedUser
+    let activity: DeviceSnapshot.UserActivity
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DS.S.sm) {
+            HStack {
+                Circle().fill(dotColour).frame(width: 7, height: 7)
+                Text(user.label)
+                    .font(DS.F.body).foregroundStyle(DS.C.textPrimary)
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer()
+                Text(user.isOwner ? "owner" : "shared")
+                    .font(DS.F.label)
+                    .foregroundStyle(user.isOwner ? DS.C.accent : DS.C.textTertiary)
+            }
+            // The live line. Present only when there is something to say — an idle person does not
+            // need a row telling them so twice.
+            switch activity {
+            case .running(let title, let phase, let total):
+                HStack(spacing: DS.S.md) {
+                    Text("running").font(DS.F.label).foregroundStyle(DS.C.ok)
+                    Text(title).font(DS.F.label).foregroundStyle(DS.C.textSecondary).lineLimit(1)
+                    if let phase {
+                        Text("P\(phase)" + (total.map { "/\($0)" } ?? ""))
+                            .font(DS.F.mono(10)).foregroundStyle(DS.C.textTertiary)
+                    }
+                }
+                .padding(.leading, DS.S.lg)
+            case .queued(let position, let title):
+                HStack(spacing: DS.S.md) {
+                    Text("queued #\(position)").font(DS.F.label).foregroundStyle(DS.C.warn)
+                    Text(title).font(DS.F.label).foregroundStyle(DS.C.textSecondary).lineLimit(1)
+                }
+                .padding(.leading, DS.S.lg)
+            case .idle:
+                EmptyView()
+            }
+        }
+        .frame(minHeight: 28)
+    }
+
+    private var dotColour: Color {
+        switch activity {
+        case .running: return DS.C.ok
+        case .queued: return DS.C.warn
+        case .idle: return DS.C.textTertiary
+        }
     }
 }
 

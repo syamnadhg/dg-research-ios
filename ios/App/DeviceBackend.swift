@@ -67,6 +67,10 @@ final class DeviceBackend: AppBackend {
         if case .integer(let count)? = fields["workerCount"] { snapshot.workerCount = Int(count) }
         if case .array(let busy)? = fields["busyWorkerIds"] { snapshot.busyWorkers = busy.count }
 
+        snapshot.workers = Self.workers(from: fields, workerCount: snapshot.workerCount)
+        snapshot.queue = Self.queue(from: fields)
+        if case .string(let version)? = fields["version"] { snapshot.backendVersion = version }
+        if case .string(let newer)? = fields["updateAvailable"] { snapshot.updateAvailable = newer }
         snapshot.users = Self.users(from: fields)
         if let logins = Self.platforms(from: fields) { snapshot.platforms = logins }
         return snapshot
@@ -90,6 +94,64 @@ final class DeviceBackend: AppBackend {
             }
         }
         return users
+    }
+
+    /// Per-worker live state from the `workers` map, padded out to `workerCount`.
+    ///
+    /// Padded on purpose: the map only carries BUSY workers, so a device with two workers and one run
+    /// reports a single entry. Rendering just that entry would make a half-busy device look
+    /// fully-occupied — the idle capacity is exactly what a viewer wants to see.
+    private static func workers(
+        from fields: [String: FirestoreValue], workerCount: Int
+    ) -> [WorkerState] {
+        var busy: [String: WorkerState] = [:]
+        if case .map(let map)? = fields["workers"] {
+            for (id, value) in map {
+                guard case .map(let run) = value else { continue }
+                // `_dead: true` is how the supervisor marks a worker it had to give up on. Reported as
+                // idle rather than dropped, because a dead worker is capacity that is NOT available.
+                busy[id] = WorkerState(
+                    id: id,
+                    uid: string(run["uid"]),
+                    title: string(run["title"]),
+                    phase: integer(run["phase"]).map(Int.init),
+                    totalPhases: integer(run["totalPhases"]).map(Int.init)
+                )
+            }
+        }
+        // Worker ids are conventionally 1-based in this contract.
+        return (1...max(workerCount, busy.count, 1)).map { index in
+            busy["\(index)"] ?? busy["worker-\(index)"]
+                ?? WorkerState(id: "\(index)", uid: nil, title: nil, phase: nil, totalPhases: nil)
+        }
+    }
+
+    /// Queued runs from `queueOwners`, ordered by position.
+    private static func queue(from fields: [String: FirestoreValue]) -> [QueuedRun] {
+        guard case .array(let entries)? = fields["queueOwners"] else { return [] }
+        return entries.compactMap { entry -> QueuedRun? in
+            guard case .map(let run) = entry,
+                  let uid = string(run["uid"]),
+                  let runId = string(run["runId"])
+            else { return nil }
+            return QueuedRun(
+                id: runId,
+                uid: uid,
+                title: string(run["title"]) ?? "a run",
+                position: integer(run["position"]).map(Int.init) ?? 0
+            )
+        }
+        .sorted { $0.position < $1.position }
+    }
+
+    private static func string(_ value: FirestoreValue?) -> String? {
+        if case .string(let text)? = value, !text.isEmpty { return text }
+        return nil
+    }
+
+    private static func integer(_ value: FirestoreValue?) -> Int64? {
+        if case .integer(let number)? = value { return number }
+        return nil
     }
 
     private static func short(_ uid: String) -> String {

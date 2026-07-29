@@ -84,9 +84,6 @@ enum DS {
         }
 
         static let title = sans(17, .semibold)
-        /// The brand wordmark. 24pt bold, matching the frontend's `text-2xl font-bold` exactly —
-        /// Tailwind's `text-2xl` is 1.5rem, which is 24px.
-        static let wordmark = sans(24, .bold)
         static let body = sans(14)
         static let label = sans(11, .medium)
         static let code = mono(13)

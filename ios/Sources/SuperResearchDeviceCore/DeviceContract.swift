@@ -22,6 +22,9 @@ public enum DeviceContract {
         "currentRunId", "currentRunOwnerUid", "currentRunTitle", "currentRunStartedAt",
         "currentRunPhase", "currentRunPhaseStartedAt",
         "workerCount", "busyWorkerIds",
+        // 2026-05-28 / 2026-07-05 additions to the rules' synth allow-list. Absent here, a local
+        // pre-check would refuse writes the rules actually permit — a self-inflicted 403.
+        "workers", "queueOwners", "version", "updateAvailable",
     ]
 
     /// Keys only the **owner** may write. Present so a device-side patch can be checked against

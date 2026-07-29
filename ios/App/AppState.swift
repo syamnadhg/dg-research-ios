@@ -21,6 +21,31 @@ struct OpResult {
     var relayed: Bool = false
 }
 
+extension DeviceSnapshot {
+    /// What this person is doing on this device right now.
+    ///
+    /// Derived rather than stored: the device doc reports workers and the queue independently, and the
+    /// tile wants one answer per person. Running beats queued — someone with a run in flight and
+    /// another waiting is best described by the one that is moving.
+    enum UserActivity: Equatable {
+        case running(title: String, phase: Int?, totalPhases: Int?)
+        case queued(position: Int, title: String)
+        case idle
+    }
+
+    func activity(for uid: String) -> UserActivity {
+        if let worker = workers.first(where: { $0.uid == uid }) {
+            return .running(
+                title: worker.title ?? "a run", phase: worker.phase, totalPhases: worker.totalPhases
+            )
+        }
+        if let queued = queue.filter({ $0.uid == uid }).min(by: { $0.position < $1.position }) {
+            return .queued(position: queued.position, title: queued.title)
+        }
+        return .idle
+    }
+}
+
 struct ConnectedUser: Identifiable, Hashable {
     let id: String
     /// What to show for this person. Named `label`, not `email`, because the device tree stores **uids**
@@ -35,6 +60,30 @@ struct PlatformState: Identifiable, Hashable {
     let name: String
     /// nil = never checked; the UI must not render "not signed in" for "unknown".
     let signedIn: Bool?
+}
+
+/// One worker's live state, from the device doc's `workers` map.
+///
+/// Keyed by worker id → the run that worker is executing. Written by **all** workers, unlike the
+/// `currentRun*` fields which only worker-1 maintains — so this is the only view that sees a
+/// multi-worker device honestly.
+struct WorkerState: Identifiable, Hashable {
+    let id: String
+    /// nil = idle. An idle worker is a real, common state, not missing data.
+    let uid: String?
+    let title: String?
+    let phase: Int?
+    let totalPhases: Int?
+
+    var isBusy: Bool { uid != nil }
+}
+
+/// One queued run, from `queueOwners` — the ordered summary rebuilt on each queue recompute.
+struct QueuedRun: Identifiable, Hashable {
+    let id: String       // runId
+    let uid: String
+    let title: String
+    let position: Int
 }
 
 struct RunState: Hashable {
@@ -59,6 +108,12 @@ struct DeviceSnapshot {
     var users: [ConnectedUser] = []
     var platforms: [PlatformState] = []
     var run: RunState? = nil
+    /// Live per-worker state. Empty when the device has never reported any.
+    var workers: [WorkerState] = []
+    /// Queued runs, in order.
+    var queue: [QueuedRun] = []
+    /// What the backend reports about itself, and whether PyPI has something newer.
+    var updateAvailable: String? = nil
 
     static let unpaired = DeviceSnapshot()
 }
@@ -174,7 +229,23 @@ final class PreviewBackend: AppBackend {
                 elapsedSeconds: 134,
                 agents: ["chatgpt": "done", "gemini": "active", "claude": "pending",
                          "notebooklm": "pending"]
-            )
+            ),
+            // ⚠ Deliberately NOT all-idle and not all-busy. This backend exists so every screen can be
+            // reviewed without a real device, and the states worth reviewing are the mixed ones: one
+            // worker running while another is idle, one person's run in flight while another waits.
+            // A preview showing a quiet device hides exactly the UI that matters.
+            workers: [
+                WorkerState(
+                    id: "1", uid: "u1", title: "Quantum error correction, 2026 review",
+                    phase: 2, totalPhases: 4
+                ),
+                WorkerState(id: "2", uid: nil, title: nil, phase: nil, totalPhases: nil),
+            ],
+            queue: [
+                QueuedRun(
+                    id: "r-9", uid: "u2", title: "Solid-state batteries, 2026 landscape", position: 1
+                )
+            ]
         )
     }
 
