@@ -11,7 +11,7 @@ backend is a **read-only** dependency, reached through `emubackend.berepo`.
 This is enforced, not merely stated:
 
 ```bash
-PYTHONPATH=. .venv/bin/python -m pytest emubackend/tests -q      # 73 tests
+PYTHONPATH=. .venv/bin/python -m pytest emubackend/tests -q      # 186 tests
 PYTHONPATH=. .venv/bin/python -c "from emubackend import purity; purity.assert_pristine()"
 ```
 
@@ -32,7 +32,13 @@ because those are `.gitignore`d in the backend, so a write there is invisible to
 | `emubackend/substrate/runtime_js.py` | the injected in-page runtime (`window.__sr`) |
 | `emubackend/substrate/backend.py` | `BrowserBackend` ABC + `IOSSimulatorBackend` |
 | `emubackend/substrate/page_shim.py` | the Playwright-`Page`-shaped surface ported code calls |
-| `emubackend/contract/` | ⏳ **not yet written** — the vendored Firestore-contract layer |
+| `emubackend/contract/identity.py` | A10 second-device identity; guarded state dir |
+| `emubackend/contract/_keystore_vendored.py` | generated — `bin/vendor_auth.py`, do not hand-edit |
+| `emubackend/contract/values.py` | Firestore REST value encoding |
+| `emubackend/contract/rest.py` | REST transport + the 401/403 credential heal |
+| `emubackend/contract/events.py` | `pipeline_events` shape + the monotonic `seq` guard |
+| `emubackend/contract/pending_decision.py` | the five `pendingDecision` clobber rules |
+| `emubackend/contract/fixtures.py` | golden-fixture capture / normalise / compare |
 | `bin/b0a_gate.py` | the B0a substrate gate |
 | `bin/b1_smoke.py` | the B1 seam smoke test |
 | `bin/mutate.py` | the mutation harness (every guard must be provably breakable) |
@@ -114,20 +120,50 @@ real `<input type=file>` tap opens the native document picker — so NotebookLM 
 stays on the desktop backend), download capture, OS clipboard (in-page `copy` interception
 only), and `mouse.move` (touch has no hover).
 
+## B1 — the contract layer: **done** (2026-07-29)
+
+**A10 device identity.** Measured before copying: of the backend's four `auth/` modules only
+`keystore.py` touches the filesystem (21 refs), so `pairing.py`, `credentials.py` and
+`v2_flow.py` are *imported*, not duplicated. `keystore.py` is vendored by `bin/vendor_auth.py` —
+a programmatic copy with **two** substituted lines and the upstream sha256 recorded, so drift
+raises an alarm. Copied rather than reimplemented because a rewrite drops its subtler behaviours
+(the keyring shadow purge on write, the retry-OSError-but-not-ValueError file loader, the audit
+written *before* deletion), and a credential store is the wrong place to find that out.
+
+**Pointing this keystore at `~/.super-research` is refused, not warned about** — sharing it would
+overwrite the production daemon's device identity, or make this pipeline authenticate as the same
+`deviceId` and race it on one `devices/{id}/queue`.
+
+**The contract core**, as pure tested predicates: REST value encoding (`int` → `integerValue` or
+rules deny it; `datetime` refused rather than coerced; field delete = updateMask-without-body),
+the `pipeline_events` shape (`seq` is epoch-millis-forced-monotonic, **not** a counter; `phase=0`
+is written; `agent=''` and empty `data` are omitted), the five `pendingDecision` clobber rules,
+and the REST transport with the 401/403 credential heal and the two-query device union.
+
+### Two things worth knowing
+
+**Verifying beat trusting.** These were built from `docs/FIRESTORE_CONTRACT.md`, then checked
+against `research.py` — which found a real bug in the first cut: upstream normalises with
+`(agent or "").lower() or None`, so the agent comparison is case-insensitive *and* `''` means an
+unconditional clear. Without both, the keep-guard is inverted for `''` and fires spuriously on a
+casing difference.
+
+**One recipe assumption does not hold.** §0.5.7b says to start capturing real backend runs now.
+`backend.log` is 25 MB and contains no emitted event stream, so there is nothing to mine —
+capturing a real run needs a backend edit (forbidden) or read credentials (owner-gated). The
+engine and our-own-client capture are delivered; that half is a checkpoint.
+
 ### Still owed for B1
 
-- the vendored `emubackend/contract/` layer — **one** cohesive copy, never N one-off helpers
-- `auth/` vendored with its three hardcoded path constants parameterized (A10)
-- the golden-fixture capture harness — start early, fixtures accrue at 1–3 runs/week
-
-The spec for all three is `docs/FIRESTORE_CONTRACT.md`; none of it needs re-deriving from the
-backend.
+- the P0–P3 orchestrator itself (`emubackend/pipeline.py`), with every mutating intent written
+  already wrapped in a `_selfheal_try`-shaped wrapper carrying an `outcome_predicate`
+- a golden fixture captured from a real backend run — **owner-gated**, see above
 
 ## Testing
 
 ```bash
-PYTHONPATH=. .venv/bin/python -m pytest emubackend/tests -q   # 73 tests
-python bin/mutate.py                                          # 18 mutations, all must be CAUGHT
+PYTHONPATH=. .venv/bin/python -m pytest emubackend/tests -q   # 186 tests
+python bin/mutate.py                                          # 43 mutations, all must be CAUGHT
 python bin/b0a_gate.py --udid <UDID>                          # substrate gate, needs a Simulator
 python bin/b1_smoke.py --udid <UDID>                          # seam smoke, needs a Simulator
 ```
