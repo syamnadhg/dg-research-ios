@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// The web app's design tokens, transcribed — not approximated.
 ///
@@ -11,22 +12,42 @@ enum DS {
 
     // MARK: - Colour  (globals.css `--color-*`)
 
+    /// Colour tokens, **theme-aware**.
+    ///
+    /// Every neutral is a dynamic colour built from the frontend's own light/dark pairs in
+    /// `globals.css` (`:root` vs `[data-theme="light"]`), so switching theme here produces the same
+    /// palette the web app produces — not an approximation of it.
+    ///
+    /// Brand and status colours are deliberately NOT dynamic: `#10A37F` is ChatGPT's green in both
+    /// themes, and re-tinting a brand mark per theme would make it a different mark. The one exception
+    /// the web app itself makes is `terminal`, which is slate-200 on dark and slate-400 on light —
+    /// its comment says why: the dark value "disappears against a white surface".
     enum C {
-        static let bg = Color(hex: 0x050A15)
-        static let surface = Color(hex: 0x0A0F1E)
-        /// The web app's `surface-2` — one step up from a card, for pills and chips sitting ON a card.
-        static let surfaceRaised = Color(hex: 0x121A2E)
-        static let border = Color(hex: 0x1A2540)
-        static let borderHover = Color(hex: 0x253556)
-        static let textPrimary = Color(hex: 0xF1F5F9)
-        static let textSecondary = Color(hex: 0x94A3B8)
-        static let textTertiary = Color(hex: 0x4B5C78)
-        static let accent = Color(hex: 0x3B82F6)
-        static let terminal = Color(hex: 0xE2E8F0)
+        /// A colour that resolves per trait collection, so light/dark needs no branching at call sites.
+        private static func dyn(light: UInt32, dark: UInt32) -> Color {
+            Color(UIColor { traits in
+                UIColor(Color(hex: traits.userInterfaceStyle == .dark ? dark : light))
+            })
+        }
 
-        /// Per-platform brand colours, straight from the web app. Used for the same purpose here —
-        /// identifying which agent a row belongs to at a glance — so the two surfaces stay legible
-        /// to someone who has learned one of them.
+        static let bg = dyn(light: 0xF5F7FA, dark: 0x050A15)
+        static let surface = dyn(light: 0xFFFFFF, dark: 0x0A0F1E)
+        /// The web app's `surface-2`, for pills and chips sitting ON a card.
+        static let surfaceRaised = dyn(light: 0xF0F1F5, dark: 0x111B33)
+        static let surfaceHigh = dyn(light: 0xE5E7EC, dark: 0x182444)
+        static let border = dyn(light: 0xE0E2E8, dark: 0x1A2540)
+        static let borderHover = dyn(light: 0xC8CCD4, dark: 0x253556)
+        static let textPrimary = dyn(light: 0x1A1A2E, dark: 0xF1F5F9)
+        static let textSecondary = dyn(light: 0x4A4A5E, dark: 0x94A3B8)
+        static let textTertiary = dyn(light: 0x7A7A8E, dark: 0x4B5C78)
+        static let accent = Color(hex: 0x3B82F6)
+        static let accent2 = Color(hex: 0x7C6CAD)
+        /// Slate-400 on light, slate-200 on dark — the one neutral the web app re-tints, because the
+        /// dark value disappears against a white surface.
+        static let terminal = dyn(light: 0x94A3B8, dark: 0xE2E8F0)
+
+        /// Per-platform brand colours, straight from the web app. Fixed across themes: a brand mark
+        /// re-tinted per theme is a different mark.
         static let chatgpt = Color(hex: 0x10A37F)
         static let gemini = Color(hex: 0x7D6A9E)
         static let claude = Color(hex: 0xD97706)

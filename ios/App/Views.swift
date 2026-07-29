@@ -5,6 +5,7 @@ import SwiftUI
 
 struct RootView: View {
     @StateObject var model: AppModel
+    @ObservedObject var theme: ThemeManager
 
     /// Which platform's login sheet is open, if any.
     @State private var loginTarget: PlatformState?
@@ -20,7 +21,7 @@ struct RootView: View {
             // The landing page owns the whole screen, so it sits outside the dashboard's scroll view
             // and header rather than being squeezed into a card.
             if !model.snapshot.paired, model.screen == .landing, model.pairing != nil {
-                LandingView { model.screen = .notPaired }
+                LandingView(theme: theme) { model.screen = .notPaired }
             } else if !model.snapshot.paired, model.screen == .notPaired, model.pairing != nil {
                 VStack(spacing: 0) {
                     Header(snapshot: model.snapshot, onSettings: nil).padding(DS.S.screen)
@@ -55,7 +56,8 @@ struct RootView: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
+        // Driven by the user's choice; nil means follow the system, which is what makes "System" real.
+        .preferredColorScheme(theme.choice.colorScheme)
         // One transition for the whole pre-pairing journey, so landing → not-paired → flow reads as
         // moving forward through a single thing rather than three unrelated screens swapping out.
         .animation(.spring(response: 0.4, dampingFraction: 0.88), value: model.screen)
@@ -64,7 +66,7 @@ struct RootView: View {
         .overlay(alignment: .bottom) { Toast(text: model.toast) }
         .overlay { ConfirmSheet(model: model) }
         .sheet(isPresented: $settingsOpen) {
-            SettingsSheet(model: model, onClose: { settingsOpen = false })
+            SettingsSheet(theme: theme, model: model, onClose: { settingsOpen = false })
         }
         // An overlay rather than a `.sheet`: a sheet brings its own full-height chrome and grabber,
         // and the frontend's equivalent is a bottom-anchored card floating over a blurred backdrop.
@@ -300,9 +302,20 @@ private struct AgentChip: View {
 
     var body: some View {
         VStack(spacing: DS.S.sm) {
-            Text(glyph)
-                .font(DS.F.mono(12, .semibold))
-                .foregroundStyle(state == "pending" ? DS.C.textTertiary : DS.C.platform(key))
+            // The real brand mark, with the state as a small badge on it. A glyph in the platform's
+            // colour was standing in for the icon, which made every agent the same shape.
+            AgentIcon(id: key, size: 26)
+                .saturation(state == "pending" ? 0.15 : 1)
+                .opacity(state == "pending" ? 0.5 : 1)
+                .overlay(alignment: .bottomTrailing) {
+                    Text(glyph)
+                        .font(DS.F.mono(8, .bold))
+                        .foregroundStyle(state == "pending" ? DS.C.textTertiary : DS.C.platform(key))
+                        .padding(1)
+                        .background(DS.C.surface)
+                        .clipShape(Circle())
+                        .offset(x: 3, y: 3)
+                }
             Text(short).font(DS.F.label).foregroundStyle(DS.C.textTertiary)
         }
         .frame(maxWidth: .infinity)

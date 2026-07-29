@@ -18,6 +18,7 @@ import UIKit
 final class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
     var model: AppModel?
+    let theme = ThemeManager()
 
     /// iOS suspends a backgrounded app, which stops the heartbeat. Resuming on foreground is what makes
     /// "open the app and it is online" true rather than aspirational.
@@ -45,7 +46,9 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         application.isIdleTimerDisabled = true
 
         let window = UIWindow(frame: UIScreen.main.bounds)
-        window.rootViewController = UIHostingController(rootView: RootView(model: model))
+        window.rootViewController = UIHostingController(
+            rootView: RootView(model: model, theme: theme)
+        )
         window.backgroundColor = .black
         window.makeKeyAndVisible()
         self.window = window

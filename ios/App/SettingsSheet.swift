@@ -14,6 +14,7 @@ import SwiftUI
 /// Two things are surfaced above the operations because they are *state*, not actions: On Startup (the
 /// `supervised` flag the frontend's Account toggle reads) and which API keys are present.
 struct SettingsSheet: View {
+    @ObservedObject var theme: ThemeManager
     @ObservedObject var model: AppModel
     let onClose: () -> Void
 
@@ -28,6 +29,7 @@ struct SettingsSheet: View {
             header
             ScrollView {
                 VStack(alignment: .leading, spacing: DS.S.lg * 2) {
+                    appearanceSection
                     deviceSection
                     startupSection
                     keysSection
@@ -59,6 +61,15 @@ struct SettingsSheet: View {
         .padding(.vertical, DS.S.lg)
         .background(DS.C.surface)
         .overlay(alignment: .bottom) { Rectangle().fill(DS.C.border).frame(height: 1) }
+    }
+
+    /// The theme control, in the app's settings — one of the two places the web app offers it.
+    private var appearanceSection: some View {
+        Section(title: "Appearance") {
+            ThemeToggle(theme: theme)
+            Text("Follows the system unless you choose. Defaults to dark, since the rest of the product's signed-in surface is.")
+                .font(DS.F.label).foregroundStyle(DS.C.textTertiary)
+        }
     }
 
     // MARK: - State, not actions
@@ -126,7 +137,7 @@ struct SettingsSheet: View {
             ForEach(model.snapshot.platforms) { platform in
                 Button { loginTarget = platform } label: {
                     HStack {
-                        Circle().fill(DS.C.platform(platform.id)).frame(width: 7, height: 7)
+                        AgentIcon(id: platform.id, size: 20)
                         Text(platform.name).font(DS.F.body).foregroundStyle(DS.C.textPrimary)
                         Spacer()
                         // Three states. "Unknown" is rendered as unknown rather than as "not signed

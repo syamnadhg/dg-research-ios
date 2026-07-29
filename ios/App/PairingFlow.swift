@@ -366,7 +366,7 @@ struct PairingFlowView: View {
             ForEach(controller.platforms) { platform in
                 Button { controller.loginTarget = platform } label: {
                     HStack {
-                        Circle().fill(DS.C.platform(platform.id)).frame(width: 7, height: 7)
+                        AgentIcon(id: platform.id, size: 20)
                         Text(platform.name).font(DS.F.body).foregroundStyle(DS.C.textPrimary)
                         Spacer()
                         let state = controller.loginState[platform.id]

@@ -72,9 +72,9 @@ struct LiveRunView: View {
                 Button { selected = p.id } label: {
                     VStack(spacing: DS.S.sm) {
                         HStack(spacing: DS.S.sm) {
-                            Circle()
-                                .fill(state == "pending" ? DS.C.textTertiary : DS.C.platform(p.id))
-                                .frame(width: 6, height: 6)
+                            AgentIcon(id: p.id, size: 14)
+                                .saturation(state == "pending" ? 0.15 : 1)
+                                .opacity(state == "pending" ? 0.5 : 1)
                             Text(short(p.id))
                                 .font(DS.F.mono(10, .semibold))
                                 .foregroundStyle(

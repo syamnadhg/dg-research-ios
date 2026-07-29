@@ -67,7 +67,7 @@ struct LoginFlowView: View {
 
     private var header: some View {
         HStack(spacing: DS.S.lg) {
-            Circle().fill(DS.C.platform(platform.id)).frame(width: 8, height: 8)
+            AgentIcon(id: platform.id, size: 22)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Sign in to \(platform.name)")
                     .font(DS.F.body.weight(.medium)).foregroundStyle(DS.C.textPrimary)

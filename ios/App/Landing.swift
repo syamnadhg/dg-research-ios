@@ -117,37 +117,59 @@ private let phases: [Phase] = [
 ]
 
 struct LandingView: View {
+    @ObservedObject var theme: ThemeManager
     let onGetStarted: () -> Void
 
     var body: some View {
         ScrollView {
             VStack(spacing: DS.S.lg * 2) {
-                Wordmark(size: 20)
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, DS.S.lg)
-                ctaCard
-                tagline
+                header
+                hero
                 timeline
-                closingCTA
+                footerLink
             }
             .padding(DS.S.screen)
         }
         .background(DS.C.bg)
     }
 
-    /// The primary CTA, at the top — where the web page puts it.
-    private var ctaCard: some View {
+    /// Wordmark plus the theme control, at the top — the two things the web page puts in its header.
+    private var header: some View {
+        HStack {
+            Wordmark(size: 20)
+            Spacer()
+            ThemeToggle(theme: theme, compact: true)
+        }
+        .padding(.top, DS.S.lg)
+    }
+
+    /// Everything explanatory, said ONCE.
+    ///
+    /// ⚠ An earlier version had a CTA card at the top and a near-identical one at the bottom, which read
+    /// as the same pitch twice. The explanation and the button live here; the bottom carries a link out
+    /// to the web app instead of repeating itself.
+    private var hero: some View {
         VStack(spacing: DS.S.lg) {
-            VStack(spacing: DS.S.sm) {
-                Text("Run Research Here")
-                    .font(DS.F.sans(16, .bold))
+            VStack(spacing: DS.S.md) {
+                Text("Run research on this iPhone")
+                    .font(DS.F.sans(20, .bold))
                     .foregroundStyle(DS.C.textPrimary)
-                Text("This iPhone becomes a Super Research backend.")
+                    .multilineTextAlignment(.center)
+                // The frontend's own tagline, verbatim.
+                Text("One topic. Three AI agents. Complete research package.")
+                    .font(DS.F.body)
+                    .foregroundStyle(DS.C.textSecondary)
+                    .multilineTextAlignment(.center)
+                Text("Research is fired from the web app, and a backend does the work — driving the AI platforms in a real browser and reporting back. That backend is normally a Mac. Pair this iPhone and it becomes one: phases 0 to 3 run here, on this device.")
                     .font(DS.F.label)
                     .foregroundStyle(DS.C.textTertiary)
                     .multilineTextAlignment(.center)
             }
             SRButton(title: "Get started", role: .primary, action: onGetStarted)
+            Text("Pair code, a sign-in per platform, and the app left open. About two minutes.")
+                .font(DS.F.label)
+                .foregroundStyle(DS.C.textTertiary)
+                .multilineTextAlignment(.center)
         }
         .padding(DS.S.lg * 2)
         .frame(maxWidth: .infinity)
@@ -156,36 +178,41 @@ struct LandingView: View {
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(DS.C.border, lineWidth: 1))
     }
 
-    private var tagline: some View {
-        Text("One topic. Three AI agents. Complete research package.")
-            .font(DS.F.body)
-            .foregroundStyle(DS.C.textSecondary)
-            .multilineTextAlignment(.center)
-            .frame(maxWidth: .infinity)
-    }
-
+    /// Alternating left/right around a centre rail, as the web page does.
+    ///
+    /// The earlier left-rail version was a list, and a list loses what the alternation is FOR: the
+    /// zig-zag is what makes six steps read as a path rather than six items. At 402pt the cards take
+    /// ~62% of the width and lean to their side, which keeps the alternation legible without the web's
+    /// dead `0.3fr` stub.
     private var timeline: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(spacing: 0) {
             ForEach(phases) { phase in
-                PhaseRow(phase: phase, isLast: phase.id == phases.last?.id)
+                PhaseRow(
+                    phase: phase,
+                    isLast: phase.id == phases.last?.id,
+                    onLeft: phase.id.isMultiple(of: 2)
+                )
             }
         }
     }
 
-    private var closingCTA: some View {
-        VStack(spacing: DS.S.lg) {
-            VStack(spacing: DS.S.sm) {
-                Text("Super Research for iOS")
-                    .font(DS.F.sans(16, .bold)).foregroundStyle(DS.C.textPrimary)
-                Text("Pair it to your account, sign in to the platforms once, and the web app can send it research — phases 0 to 3, in a real browser, on this device.")
-                    .font(DS.F.label)
-                    .foregroundStyle(DS.C.textSecondary)
-                    .multilineTextAlignment(.center)
+    /// The bottom of the page: a way out to the web app, not a second pitch.
+    private var footerLink: some View {
+        VStack(spacing: DS.S.md) {
+            Link(destination: URL(string: AppConfig.frontendBaseURL)!) {
+                HStack(spacing: DS.S.md) {
+                    Text("Open the web app")
+                        .font(DS.F.label.weight(.medium)).foregroundStyle(DS.C.accent)
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(DS.C.accent)
+                }
+                .frame(minHeight: DS.S.touch)
             }
-            SRButton(title: "Get started", role: .primary, action: onGetStarted)
-            Text("Takes about two minutes.")
-                .font(DS.F.label).foregroundStyle(DS.C.textTertiary)
+            Text(AppConfig.frontendBaseURL.replacingOccurrences(of: "https://", with: ""))
+                .font(DS.F.mono(9)).foregroundStyle(DS.C.textTertiary)
         }
+        .frame(maxWidth: .infinity)
         .padding(.bottom, DS.S.lg * 2)
     }
 }
@@ -194,20 +221,33 @@ struct LandingView: View {
 private struct PhaseRow: View {
     let phase: Phase
     let isLast: Bool
+    /// Even phases sit left of the rail, odd ones right — the web page's zig-zag.
+    let onLeft: Bool
     @State private var expanded = false
 
     @State private var appeared = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: DS.S.lg) {
-            rail
-            card
+        // Alternating around the rail. The zig-zag is what makes six steps read as a path rather than
+        // six list items — which is exactly what the earlier left-rail version lost.
+        HStack(alignment: .top, spacing: DS.S.md) {
+            if onLeft {
+                card
+                rail
+                Spacer(minLength: 0).frame(width: 20)
+            } else {
+                Spacer(minLength: 0).frame(width: 20)
+                rail
+                card
+            }
         }
         // The web page reveals each phase on scroll with `useInView`; this is the same idea with the
         // means available — a short rise-and-fade on first appearance. Staggered by phase so the
         // timeline reads as a sequence being laid down rather than six cards arriving at once.
         .opacity(appeared ? 1 : 0)
-        .offset(y: appeared ? 0 : 12)
+        // Rises AND leans in from its own side, so the reveal reinforces which side the card belongs
+        // to rather than fighting it.
+        .offset(x: appeared ? 0 : (onLeft ? -14 : 14), y: appeared ? 0 : 12)
         .onAppear {
             withAnimation(
                 .easeOut(duration: 0.35).delay(Double(phase.id) * 0.06)
@@ -259,7 +299,12 @@ private struct PhaseRow: View {
             if !phase.agents.isEmpty { agentCards }
 
             HStack(spacing: DS.S.sm) {
-                ForEach(phase.tags, id: \.self) { Pill(text: $0, tone: .accent) }
+                // A tag identical to the duration is dropped: phase 0 carries both `Instant` as a tag
+                // and `Instant` as its duration, and showing the same word twice in adjacent pills
+                // reads as a rendering bug rather than as data.
+                ForEach(phase.tags.filter { $0 != phase.duration }, id: \.self) {
+                    Pill(text: $0, tone: .accent)
+                }
                 Pill(text: phase.duration, tone: .violet)
                 Spacer()
                 Button { expanded.toggle() } label: {
@@ -304,15 +349,9 @@ private struct PhaseRow: View {
         HStack(spacing: DS.S.md) {
             ForEach(phase.agents, id: \.id) { agent in
                 VStack(spacing: DS.S.sm) {
-                    Circle()
-                        .fill(DS.C.platform(agent.id).opacity(0.12))
-                        .overlay(Circle().stroke(DS.C.platform(agent.id).opacity(0.35), lineWidth: 1))
-                        .overlay(
-                            Text(String(agent.name.prefix(1)))
-                                .font(DS.F.sans(13, .bold))
-                                .foregroundStyle(DS.C.platform(agent.id))
-                        )
-                        .frame(width: 34, height: 34)
+                    // The real brand mark. A letter in a tinted circle made all three agents the same
+                    // component with a different character in it.
+                    AgentIcon(id: agent.id, size: 30)
                     Text(agent.name)
                         .font(DS.F.sans(11, .semibold))
                         .foregroundStyle(DS.C.textPrimary)

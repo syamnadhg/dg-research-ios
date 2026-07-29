@@ -79,6 +79,13 @@ else
   echo "==> NOTE: no GoogleService-Info.plist — the Firebase path will be unavailable"
 fi
 
+# Brand icons, copied out of the frontend's public/icons at repo-setup time. Loose resources rather
+# than an asset catalog, because this bundle is assembled by hand and has no catalog to compile.
+if [ -d "$REPO/ios/Assets" ]; then
+  cp "$REPO"/ios/Assets/*.png "$APP/" 2>/dev/null || true
+  echo "==> bundled $(ls "$REPO/ios/Assets"/*.png 2>/dev/null | wc -l | tr -d ' ') brand icons"
+fi
+
 echo "==> ad-hoc signing"
 codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 || codesign --force --sign - "$APP"
 
