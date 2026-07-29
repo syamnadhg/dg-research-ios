@@ -202,10 +202,64 @@ def test_a_testid_target_is_accepted_without_the_uniqueness_condition(cap):
         "why": "data-testid",
         "matches": None,
         "visible": True,
+        "tag": "button",
     }
     entries = _draft(cap, {"send": [entry]}, response_present=False)
     assert entries["send"]["css"] == ['[data-testid="send-button"]']
     assert "weak" not in entries["send"]["provenance"]
+
+
+def test_a_tapped_key_will_not_accept_a_wrapper_div(cap):
+    """Gemini puts the testid on `send-button-container` and only an aria-label on the button.
+
+    Rank alone therefore preferred the wrapper — a div — over the button that was successfully driven.
+    Requiring a control settles it without a name heuristic: you tap controls, not their boxes.
+    """
+    wrapper = {
+        "suggested": '[data-test-id="send-button-container"]',
+        "rank": 1,
+        "why": "data-test-id",
+        "matches": 1,
+        "visible": True,
+        "tag": "div",
+        "role": None,
+    }
+    entries = _draft(cap, {"send": [wrapper]}, response_present=False)
+    assert "send" not in entries
+
+
+def test_a_role_button_counts_as_a_control(cap):
+    """Not every control is a <button> element; Angular Material and Gemini both use role=button."""
+    div_button = {
+        "suggested": '[data-test-id="x"]',
+        "rank": 1,
+        "why": "data-test-id",
+        "matches": 1,
+        "visible": True,
+        "tag": "div",
+        "role": "button",
+    }
+    entries = _draft(cap, {"send": [div_button]}, response_present=False)
+    assert entries["send"]["css"] == ['[data-test-id="x"]']
+
+
+def test_a_read_key_does_not_require_a_control(cap):
+    """The gate is scoped to tapped keys — a response container is a div and must stay acceptable."""
+    assert "response_container" not in cap.TAPPED_KEYS
+    assert "sources" not in cap.TAPPED_KEYS
+    assert "logged_in_marker" not in cap.TAPPED_KEYS
+
+
+def test_an_attribute_marker_probe_is_a_durable_handle(cap):
+    """Claude's assistant turn is identified by `div[data-is-streaming]` and nothing else.
+
+    Sixteen testids on the page with an answer up, none of them on the response — and
+    `[data-testid*=message]` matched `user-message`, so the capture proposed the user's own prompt as
+    the response container.
+    """
+    assert cap.durable_probe("div[data-is-streaming]")
+    assert cap.durable_probe("[data-is-streaming]")
+    assert not cap.durable_probe("div[class]")
 
 
 def test_an_invisible_candidate_is_rejected(cap):
@@ -346,6 +400,27 @@ def test_the_composer_scope_is_applied_in_the_describe_script(cap):
     js = cap._DESCRIBE_JS
     assert "anchor.closest('form')" in js
     assert "root.querySelectorAll(probe)" in js
+
+
+def test_the_composer_scope_walks_up_when_there_is_no_form(cap):
+    """ChatGPT wraps its composer in a <form>; Claude and Gemini do not.
+
+    With `|| parentElement` as the fallback the scope collapsed to the contenteditable's immediate
+    parent, which holds no buttons — so both platforms reported "no controls appeared" after a
+    *successful* fill. That reads as the platform having no send button rather than as the scope being
+    wrong, which is the worst kind of wrong: a confident negative.
+    """
+    js = cap._DESCRIBE_JS
+    assert "node.querySelectorAll('button,[role=button]').length > 0" in js, (
+        "the scope must walk up to an ancestor that actually contains controls"
+    )
+
+
+def test_the_driver_shares_the_same_composer_root_rule():
+    """Two implementations of one rule is two chances to fix it in one place."""
+    driver = (REPO / "bin" / "drive_selectors.py").read_text()
+    assert "function composerRoot" in driver
+    assert "node.querySelectorAll('button,[role=button]').length > 0" in driver
 
 
 def test_every_platform_with_composer_scoped_keys_has_an_anchor(cap):

@@ -135,7 +135,9 @@ PROBES: dict[str, dict[str, list[str]]] = {
         "research_toggle": ['button[aria-label*="research" i]', '[data-testid*="research" i]'],
         "artifact_panel": ['[data-testid*="artifact" i]', '[aria-label*="artifact" i]'],
         "sources": ['[data-testid*="citation" i]', "a[href^=http]"],
-        "response_container": ["[data-testid*=message]", "div[data-is-streaming]"],
+        # ⚠ NOT `[data-testid*=message]`: that matched `user-message` and proposed the user's own
+        # prompt as the response container. Claude's assistant turn has no testid at all.
+        "response_container": ["div[data-is-streaming]", "[data-testid=assistant-message]"],
     },
     "notebooklm": {
         # No testids anywhere on this platform, so accessible name is the only handle. Both of these
@@ -223,10 +225,25 @@ _DESCRIBE_JS = """
     // `research_toggle`. Unique, visible, and completely wrong: the run would have opened a chat's
     // overflow menu and reported that deep research was enabled. The composer's controls live in the
     // composer, so that is where to look for them.
+    //
+    // The walk up matters: ChatGPT wraps its composer in a `<form>`, Claude and Gemini do not, and
+    // an `|| parentElement` fallback collapses the scope to the contenteditable's immediate parent —
+    // which holds no buttons, so a scoped probe finds nothing and the platform looks like it has no
+    // send control.
     var root = document;
     if (scope) {
       var anchor = document.querySelector(scope);
-      if (anchor) root = anchor.closest('form') || anchor.parentElement || document;
+      if (anchor) {
+        root = anchor.closest('form');
+        if (!root) {
+          var node = anchor;
+          for (var lvl = 0; lvl < 6 && node && node.parentElement; lvl++) {
+            node = node.parentElement;
+            if (node.querySelectorAll('button,[role=button]').length > 0) { root = node; break; }
+          }
+        }
+        if (!root) root = document;
+      }
     }
     var els = root.querySelectorAll(probe);
     for (var i = 0; i < els.length && i < 8; i++) {
@@ -239,6 +256,7 @@ _DESCRIBE_JS = """
       if (s.css) { try { matches = document.querySelectorAll(s.css).length; } catch (e) {} }
       out.push({
         probe: probe, tag: el.tagName.toLowerCase(), name: nameOf(el),
+        role: el.getAttribute('role'),
         suggested: s.css, rank: s.rank, why: s.why, matches: matches,
         visible: !!(r.width && r.height), width: Math.round(r.width), height: Math.round(r.height),
         disabled: !!el.disabled, ariaPressed: el.getAttribute('aria-pressed'),
@@ -581,10 +599,29 @@ def _wait_for_product_page(host: str, port: int, timeout: float) -> iwdp.Page:
 #:     is part of the platform's own structure.
 _DATA_ATTR_PROBE = re.compile(r"^\[data-[a-z-]+=[^*^$~|\]]+\]$")
 _CUSTOM_ELEMENT_PROBE = re.compile(r"^[a-z]+(-[a-z]+)+$")
+#: A data attribute used as a *marker*, with no value to match — ``div[data-is-streaming]``.
+#: Claude's assistant turn carries no testid, no id and no accessible name; this attribute is the only
+#: thing that identifies it. Measured with an answer on screen: 16 testids on the page and not one of
+#: them on the response, while `[data-testid*=message]` matched `user-message` — so the capture
+#: proposed the *user's own prompt* as `response_container`.
+_DATA_PRESENCE_PROBE = re.compile(r"^[a-z]*\[data-[a-z-]+\]$")
 
 
 def durable_probe(probe: str) -> bool:
-    return bool(_DATA_ATTR_PROBE.match(probe) or _CUSTOM_ELEMENT_PROBE.match(probe))
+    return bool(
+        _DATA_ATTR_PROBE.match(probe)
+        or _CUSTOM_ELEMENT_PROBE.match(probe)
+        or _DATA_PRESENCE_PROBE.match(probe)
+    )
+
+
+#: Keys whose value is going to be TAPPED, so the value had better be a control.
+#:
+#: Gemini names the wrapper around its send button ``send-button-container``, and that wrapper carries
+#: the testid while the button itself carries only ``aria-label="Send message"``. Rank alone therefore
+#: prefers the container — a div — over the button that was actually driven successfully. Requiring a
+#: button settles it without a name heuristic: you tap controls, not their boxes.
+TAPPED_KEYS = COMPOSER_SCOPED_KEYS | {"add_source", "generate_audio"}
 
 
 def draft_manifest(captured: dict) -> dict:
@@ -619,12 +656,18 @@ def draft_manifest(captured: dict) -> dict:
             skipped[key] = "no response on screen — this key is not capturable in this pass"
             continue
         needs_visible = key not in PRESENCE_ONLY_KEYS
+        must_be_control = key in TAPPED_KEYS
         best = next(
             (
                 h
                 for h in hits
                 if h.get("suggested")
                 and (h.get("visible") or not needs_visible)
+                and (
+                    not must_be_control
+                    or h.get("tag") == "button"
+                    or h.get("role") == "button"
+                )
                 and (
                     h.get("rank", 9) <= 3
                     or (h.get("rank") == 4 and h.get("matches") == 1)

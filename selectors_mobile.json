@@ -2,25 +2,32 @@
   "version": 1,
   "surface": "ios-app-webview",
   "_note": [
-    "Captured 2026-07-29 from REAL signed-in DOM, through the app's own WKWebViews (the only",
-    "signed-in surface on this device — Simulator Safari is signed out of all four platforms).",
+    "Captured 2026-07-29 from REAL signed-in DOM, through the app's own WKWebViews \u2014 the only",
+    "signed-in surface on this device. Simulator Safari is signed out of all four platforms, and the",
+    "two cookie jars are not shared, so a value here is evidence about the APP surface.",
     "",
     "Provenance distinguishes two strengths of claim, and the distinction is load-bearing. 'resolved'",
-    "means an element matched. 'DRIVEN' means the pipeline acted on it and the outcome was asserted —",
-    "which is the only claim that rules out the P1 failure, where every click resolves and lands and",
-    "the harvest returns nothing. ChatGPT's composer and send are DRIVEN; the rest are resolved.",
+    "means an element matched. 'DRIVEN' means the pipeline acted on it and the outcome was asserted \u2014",
+    "the only claim that rules out the P1 failure, where every click resolves and lands and the harvest",
+    "returns nothing. DRIVEN so far: ChatGPT's composer, and send on all three chat platforms.",
     "",
-    "Measured while driving ChatGPT's send (settles the isTrusted question): every dispatched event",
-    "reported isTrusted === false, and the message sent regardless — composer cleared, user turn 0->1,",
-    "assistant replied in under 8s. So this control does not gate on trust and the app can drive it",
-    "with evaluateJavaScript. HID taps remain the fallback for a control that does gate.",
+    "isTrusted, settled by driving send on ChatGPT, Claude and Gemini: every dispatched event reported",
+    "isTrusted === false on all three, and all three sent the message regardless. No send control gates",
+    "on trust, so the app can drive them with evaluateJavaScript. HID taps remain the fallback for a",
+    "control that does gate, rather than the default path.",
     "",
-    "The 14 absent keys are absent on purpose. Eight need a response on screen (sources,",
-    "response_container, activity_panel, artifact_panel, audio_ready_marker); five need an interaction",
-    "first (ChatGPT's send appears only once the composer is non-empty, and its research option lives",
-    "inside the composer-plus menu; NotebookLM's add_source and generate_audio live inside a notebook,",
-    "not on the notebook list); and Gemini's deep_research_toggle is a contract mismatch rather than a",
-    "missing value — see the note in bin/capture_selectors.py.",
+    "The 12 absent keys are absent on purpose, in four groups:",
+    "  * needs a response WITH CITATIONS, which a one-word reply does not produce (4): sources on",
+    "    chatgpt/claude/gemini, and claude.artifact_panel.",
+    "  * needs a DEEP RESEARCH run in flight (1): chatgpt.activity_panel.",
+    "  * needs a menu or a notebook open (5): chatgpt.deep_research_toggle and claude.research_toggle",
+    "    live in the composer's overflow menu; gemini.start_research appears only after submitting in",
+    "    research mode; notebooklm.add_source and generate_audio are inside a notebook, not on the list.",
+    "  * a CONTRACT MISMATCH rather than a missing value (1): gemini.deep_research_toggle. Deep Research",
+    "    there is a mode picked from a menu, while phases.py taps once and judges aria-pressed \u2014 see the",
+    "    note in bin/capture_selectors.py for why capturing the picker would run P0-P3 with deep",
+    "    research OFF while reporting success.",
+    "  * notebooklm.audio_ready_marker follows from generate_audio.",
     "",
     "surface is ios-app-webview, not ios-mobile-safari: the app pins an iPhone Safari 17 user agent",
     "while Simulator Safari reports 26.5, so the two surfaces are not proven to render the same DOM."
@@ -28,19 +35,29 @@
   "platforms": {
     "chatgpt": {
       "logged_in_marker": {
-        "css": ["[data-testid=\"composer-plus-btn\"]", "#prompt-textarea"],
+        "css": [
+          "[data-testid=\"composer-plus-btn\"]",
+          "#prompt-textarea"
+        ],
         "provenance": "resolved@ios-app-webview:data-testid; both absent from the signed-out shell"
       },
       "composer": {
-        "css": ["#prompt-textarea"],
+        "css": [
+          "#prompt-textarea"
+        ],
         "provenance": "DRIVEN@ios-app-webview: insertText filled it (execCommand path) and the text was read back"
       },
       "send": {
-        "css": ["[data-testid=\"send-button\"]", "#composer-submit-button"],
-        "provenance": "DRIVEN@ios-app-webview: a JS click sent the message — composer cleared, user turn 0->1, assistant replied. Exists ONLY while the composer is non-empty."
+        "css": [
+          "[data-testid=\"send-button\"]",
+          "#composer-submit-button"
+        ],
+        "provenance": "DRIVEN@ios-app-webview: a JS click sent the message \u2014 composer cleared, user turn 0->1, assistant replied. Exists ONLY while the composer is non-empty."
       },
       "response_container": {
-        "css": ["[data-message-author-role=assistant]"],
+        "css": [
+          "[data-message-author-role=assistant]"
+        ],
         "provenance": "resolved@ios-app-webview:semantic attribute; NOT conversation-turn-N, which binds to one turn"
       }
     },
@@ -51,26 +68,58 @@
           "[data-test-id=\"all-conversations\"]",
           "[data-test-id=\"my-stuff-side-nav-entry-button\"]"
         ],
-        "provenance": "resolved@ios-app-webview:data-test-id (HYPHENATED — [data-testid] matches 0 on this platform); present-but-collapsed, absent when signed out"
+        "provenance": "resolved@ios-app-webview:data-test-id (HYPHENATED \u2014 [data-testid] matches 0 on this platform); present-but-collapsed, absent when signed out"
       },
       "composer": {
-        "css": ["[role=\"textbox\"][aria-label=\"Enter a prompt for Gemini\"]"],
+        "css": [
+          "[role=\"textbox\"][aria-label=\"Enter a prompt for Gemini\"]"
+        ],
         "provenance": "resolved@ios-app-webview:role + accessible name"
+      },
+      "send": {
+        "css": [
+          "button[aria-label=\"Send message\"]"
+        ],
+        "provenance": "DRIVEN@ios-app-webview: a JS click sent the message (isTrusted false throughout). NOT [data-test-id=send-button-container] \u2014 that is the wrapper div, which is what rank alone preferred because Gemini puts the testid on the box and only an aria-label on the button."
+      },
+      "response_container": {
+        "css": [
+          "model-response"
+        ],
+        "provenance": "resolved@ios-app-webview:custom element \u2014 the platform's own component name"
       }
     },
     "claude": {
       "logged_in_marker": {
-        "css": ["[data-testid=\"user-menu-button\"]"],
+        "css": [
+          "[data-testid=\"user-menu-button\"]"
+        ],
         "provenance": "resolved@ios-app-webview:data-testid; an account menu cannot exist without an account"
       },
       "composer": {
-        "css": ["[data-testid=\"chat-input\"]"],
+        "css": [
+          "[data-testid=\"chat-input\"]"
+        ],
         "provenance": "resolved@ios-app-webview:data-testid"
+      },
+      "send": {
+        "css": [
+          "button[aria-label=\"Send message\"]"
+        ],
+        "provenance": "DRIVEN@ios-app-webview: a JS click sent the message (isTrusted false throughout). Present even when the composer is empty, unlike ChatGPT's."
+      },
+      "response_container": {
+        "css": [
+          "div[data-is-streaming]"
+        ],
+        "provenance": "resolved@ios-app-webview:attribute marker. Claude's assistant turn carries no testid, no id and no accessible name \u2014 16 testids on the page, none on the response. NOT [data-testid=user-message], which is the user's own prompt."
       }
     },
     "notebooklm": {
       "logged_in_marker": {
-        "css": ["button[aria-label=\"Create new notebook\"]"],
+        "css": [
+          "button[aria-label=\"Create new notebook\"]"
+        ],
         "provenance": "resolved@ios-app-webview:accessible name; this platform ships NO testids at all (Angular Material). NOT #mat-button-toggle-1-button, which means 'the second toggle' rather than 'My notebooks'."
       }
     }

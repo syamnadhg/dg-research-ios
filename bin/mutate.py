@@ -82,6 +82,27 @@ MUTATIONS = [
         "the semantic-probe fallback never firing, leaving response_container to an indexed testid",
     ),
     (
+        "bin/capture_selectors.py",
+        '                    or h.get("tag") == "button"',
+        '                    or h.get("tag") != "button"',
+        "test_capture_guards.py::test_a_tapped_key_will_not_accept_a_wrapper_div",
+        "a tapped key accepting a wrapper div, e.g. Gemini's send-button-container over its button",
+    ),
+    (
+        "bin/capture_selectors.py",
+        '_DATA_PRESENCE_PROBE = re.compile(r"^[a-z]*\\[data-[a-z-]+\\]$")',
+        '_DATA_PRESENCE_PROBE = re.compile(r"^[a-z]*\\[.+\\]$")',
+        "test_capture_guards.py::test_a_search_term_is_not_accepted_as_a_handle",
+        "any bracketed selector counting as an identity, so div[contenteditable=true] becomes a handle",
+    ),
+    (
+        "bin/capture_selectors.py",
+        "            if (node.querySelectorAll('button,[role=button]').length > 0) { root = node; break; }",
+        "            if (node.querySelectorAll('button,[role=button]').length < 0) { root = node; break; }",
+        "test_capture_guards.py::test_the_composer_scope_walks_up_when_there_is_no_form",
+        "the composer scope never widening past a button-less parent, so send looks absent",
+    ),
+    (
         "emubackend/berepo.py",
         "    for node in tree.body:",
         "    for node in ast.walk(tree):",
