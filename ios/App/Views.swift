@@ -6,6 +6,12 @@ import SwiftUI
 struct RootView: View {
     @StateObject var model: AppModel
 
+    /// Which platform's login sheet is open, if any.
+    @State private var loginTarget: PlatformState?
+    /// Whether the live browser view is up, and which platform it is showing.
+    @State private var watching = false
+    @State private var watchSelection = "chatgpt"
+
     var body: some View {
         ZStack {
             DS.C.bg.ignoresSafeArea()
@@ -14,13 +20,23 @@ struct RootView: View {
                     Header(snapshot: model.snapshot)
                     if model.snapshot.paired {
                         StatusCard(snapshot: model.snapshot)
-                        if let run = model.snapshot.run { RunCard(run: run) }
-                        PlatformsCard(platforms: model.snapshot.platforms, model: model)
+                        if let run = model.snapshot.run {
+                            RunCard(run: run, onWatch: { watching = true })
+                        }
+                        PlatformsCard(
+                            platforms: model.snapshot.platforms,
+                            model: model,
+                            onSelect: { loginTarget = $0 }
+                        )
                         UsersCard(users: model.snapshot.users)
                         ControlsCard(model: model)
                     } else {
                         OnboardingCard(model: model)
-                        PlatformsCard(platforms: model.snapshot.platforms, model: model)
+                        PlatformsCard(
+                            platforms: model.snapshot.platforms,
+                            model: model,
+                            onSelect: { loginTarget = $0 }
+                        )
                     }
                     Footer(snapshot: model.snapshot)
                 }
@@ -31,6 +47,24 @@ struct RootView: View {
         .task { await model.refresh() }
         .overlay(alignment: .bottom) { Toast(text: model.toast) }
         .overlay { ConfirmSheet(model: model) }
+        .sheet(item: $loginTarget) { p in
+            LoginFlowView(platform: p, manifestMarker: nil) { _ in
+                loginTarget = nil
+                Task { await model.refresh() }
+            }
+        }
+        // Full screen rather than a sheet: this is the page being automated, and a sheet's inset
+        // would crop exactly the part of it worth watching.
+        .fullScreenCover(isPresented: $watching) {
+            if let run = model.snapshot.run {
+                LiveRunView(
+                    run: run,
+                    platforms: model.snapshot.platforms,
+                    selected: $watchSelection,
+                    onClose: { watching = false }
+                )
+            }
+        }
     }
 }
 
@@ -191,6 +225,7 @@ private struct QRView: View {
 
 private struct RunCard: View {
     let run: RunState
+    let onWatch: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: DS.S.lg) {
@@ -209,6 +244,9 @@ private struct RunCard: View {
                     AgentChip(key: key, state: run.agents[key] ?? "pending")
                 }
             }
+            // The same affordance as watching Chrome work on the desktop backend. Offered only while
+            // a run exists, because there is nothing to watch otherwise.
+            SRButton(title: "Watch the browser", action: onWatch)
         }
         .srCard()
     }
@@ -252,23 +290,34 @@ private struct AgentChip: View {
 private struct PlatformsCard: View {
     let platforms: [PlatformState]
     @ObservedObject var model: AppModel
+    let onSelect: (PlatformState) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: DS.S.lg) {
             SectionLabel(text: "Platform logins")
+            Text("Sign in once per platform. The session persists across restarts.")
+                .font(DS.F.label).foregroundStyle(DS.C.textTertiary)
             ForEach(platforms) { p in
-                HStack {
-                    Circle().fill(DS.C.platform(p.id)).frame(width: 7, height: 7)
-                    Text(p.name).font(DS.F.body).foregroundStyle(DS.C.textPrimary)
-                    Spacer()
-                    // Three states, not two. "Unknown" is rendered as unknown rather than as
-                    // "not signed in" — claiming a platform is signed out when nobody has checked
-                    // sends the owner to re-do a login they may not need.
-                    Text(label(p.signedIn))
-                        .font(DS.F.label)
-                        .foregroundStyle(colour(p.signedIn))
+                // Each row opens the in-app login. This is the one step no automation can do — 2FA, a
+                // password manager, a CAPTCHA — so it is a first-class tap rather than something the
+                // owner has to know to go and do elsewhere.
+                Button { onSelect(p) } label: {
+                    HStack {
+                        Circle().fill(DS.C.platform(p.id)).frame(width: 7, height: 7)
+                        Text(p.name).font(DS.F.body).foregroundStyle(DS.C.textPrimary)
+                        Spacer()
+                        // Three states, not two. "Unknown" is rendered as unknown rather than as
+                        // "not signed in" — claiming a platform is signed out when nobody has checked
+                        // sends the owner to re-do a login they may not need.
+                        Text(label(p.signedIn))
+                            .font(DS.F.label)
+                            .foregroundStyle(colour(p.signedIn))
+                        Text("›").font(DS.F.body).foregroundStyle(DS.C.textTertiary)
+                    }
+                    .frame(minHeight: DS.S.touch)
+                    .contentShape(Rectangle())
                 }
-                .frame(minHeight: 28)
+                .buttonStyle(.plain)
             }
             SRButton(title: "Seed logins in the emulator") {
                 model.invoke(Operations.byID("login")!)
