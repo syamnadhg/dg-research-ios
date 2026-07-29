@@ -73,6 +73,43 @@ def visible_height(viewport: dict[str, Any]) -> float:
     return float(vv) if vv else float(viewport.get("innerHeight", 0))
 
 
+@dataclass(frozen=True)
+class Probe:
+    """The JS surface calibration needs, as expressions.
+
+    Two surfaces provide it: the B0a fixture page (which ships its own) and the injected
+    production runtime (:mod:`emubackend.substrate.runtime_js`). Parameterising the names
+    keeps one calibration implementation for both, so the algorithm that was validated
+    against a real Simulator in B0a is the same code that runs in production rather than a
+    reimplementation of it.
+    """
+
+    ns: str = "__sr"
+    rect_fn: str = "rectOf"
+
+    def calib(self, on: bool) -> str:
+        return f"window.{self.ns}.calib({'true' if on else 'false'})"
+
+    def reset(self) -> str:
+        return f"window.{self.ns}.reset()"
+
+    def events(self) -> str:
+        return f"window.{self.ns}.events"
+
+    def viewport(self) -> str:
+        return f"window.{self.ns}.viewport()"
+
+    def rect(self, target: Any) -> str:
+        arg = repr(target) if isinstance(target, str) else str(target)
+        return f"window.{self.ns}.{self.rect_fn}({arg})"
+
+
+#: The injected production runtime.
+SR_PROBE = Probe()
+#: The B0a fixture page, which predates the runtime and names things slightly differently.
+B0A_PROBE = Probe(ns="__b0a", rect_fn="rect")
+
+
 class CalibrationError(RuntimeError):
     """Calibration could not be measured, or was used in a state it is not valid for."""
 
@@ -126,6 +163,7 @@ def tap_and_capture(
     tap: Callable[[float, float], None],
     point: tuple[float, float],
     timeout: float = 4.0,
+    probe: Probe = SR_PROBE,
 ) -> dict:
     """Tap a screen point and return *this* tap's positioning event.
 
@@ -140,15 +178,15 @@ def tap_and_capture(
     terminal ``click`` of this tap before reading, which guarantees the sequence is complete
     and nothing can leak into the next capture.
     """
-    evaluate_json("window.__b0a.reset()")
+    evaluate_json(probe.reset())
     _time.sleep(SETTLE_SECONDS)  # let stragglers from a previous tap land...
-    evaluate_json("window.__b0a.reset()")  # ...then discard them
+    evaluate_json(probe.reset())  # ...then discard them
     tap(*point)
 
     deadline = _time.monotonic() + timeout
     events: list[dict] = []
     while _time.monotonic() < deadline:
-        events = evaluate_json("window.__b0a.events") or []
+        events = evaluate_json(probe.events()) or []
         if any(e.get("type") == "click" for e in events):
             break
         _time.sleep(0.1)
@@ -178,6 +216,7 @@ def calibrate(
     tap: Callable[[float, float], None],
     screen_width: float,
     screen_height: float,
+    probe: Probe = SR_PROBE,
 ) -> Calibration:
     """Measure the transform for the page's *current* layout state.
 
@@ -192,9 +231,9 @@ def calibrate(
     with the widest separation wins, since separation is what makes the derived scale robust
     against the sub-pixel rounding in reported CSS coordinates.
     """
-    evaluate_json("window.__b0a.calib(true)")
-    evaluate_json("window.__b0a.reset()")
-    before = evaluate_json("window.__b0a.viewport()")
+    evaluate_json(probe.calib(True))
+    evaluate_json(probe.reset())
+    before = evaluate_json(probe.viewport())
 
     # Anchor the probe band to the visible height, with a conservative allowance for top
     # chrome. We cannot know the chrome height before calibrating — that is the unknown —
@@ -215,7 +254,7 @@ def calibrate(
         if not (0 < point[0] < screen_width and 0 < point[1] < screen_height):
             continue
         try:
-            samples.append((point, tap_and_capture(evaluate_json, tap, point)))
+            samples.append((point, tap_and_capture(evaluate_json, tap, point, probe=probe)))
         except CalibrationError as exc:
             problems.append(f"{point}: {exc}")
         if len(samples) >= 3:
@@ -270,13 +309,13 @@ def calibrate(
         measured_in=before,
     )
 
-    after = evaluate_json("window.__b0a.viewport()")
+    after = evaluate_json(probe.viewport())
     if not calib.is_valid_for(after):
         raise CalibrationError(
             "the layout changed during calibration, so the result describes neither state: "
             + "; ".join(calib.why_invalid(after))
         )
-    evaluate_json("window.__b0a.calib(false)")
+    evaluate_json(probe.calib(False))
     return calib
 
 
@@ -286,6 +325,7 @@ def tap_element(
     tap: Callable[[float, float], None],
     calib: Calibration,
     element_id: str,
+    probe: Probe = B0A_PROBE,
 ) -> dict:
     """Tap the centre of *element_id* and return the trusted event that resulted.
 
@@ -294,13 +334,13 @@ def tap_element(
     the element we aimed at", and only the second one means the substrate works — a
     calibration off by the height of the URL bar produces the first happily.
     """
-    viewport = evaluate_json("window.__b0a.viewport()")
+    viewport = evaluate_json(probe.viewport())
     if not calib.is_valid_for(viewport):
         raise CalibrationError(
             "calibration is stale for the current layout — recalibrate: "
             + "; ".join(calib.why_invalid(viewport))
         )
-    rect = evaluate_json(f"window.__b0a.rect({element_id!r})")
+    rect = evaluate_json(probe.rect(element_id))
     if rect is None:
         raise CalibrationError(f"no element with id {element_id!r}")
     vis = visible_height(viewport)
@@ -318,6 +358,6 @@ def tap_element(
             f"its computed screen point would hit Safari's chrome or the keyboard."
         )
     sx, sy = calib.to_screen(rect["cx"], rect["cy"])
-    hit = tap_and_capture(evaluate_json, tap, (sx, sy))
+    hit = tap_and_capture(evaluate_json, tap, (sx, sy), probe=probe)
     hit["_aimed_at"] = {"element_id": element_id, "screen": [sx, sy], "rect": rect}
     return hit

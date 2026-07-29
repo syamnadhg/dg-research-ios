@@ -142,6 +142,8 @@ def run_case(
         tap=_tapper(udid),
         screen_width=screen.width,
         screen_height=screen.height,
+        # The fixture page ships its own probe surface and predates the injected runtime.
+        probe=geometry.B0A_PROBE,
     )
     viewport = insp.evaluate_json("window.__b0a.viewport()")
     event = geometry.tap_element(
@@ -209,6 +211,8 @@ def prepare_keyboard(udid: str, screen: hid.Screen):
             tap=_tapper(udid),
             screen_width=screen.width,
             screen_height=screen.height,
+            # The fixture page ships its own probe surface and predates the injected runtime.
+            probe=geometry.B0A_PROBE,
         )
         geometry.tap_element(
             evaluate_json=insp.evaluate_json,

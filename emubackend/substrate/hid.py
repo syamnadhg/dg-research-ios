@@ -17,7 +17,17 @@ import re
 import subprocess
 from dataclasses import dataclass
 
-__all__ = ["HidError", "Screen", "screen_size", "screenshot", "swipe", "tap", "type_text"]
+__all__ = [
+    "KEYCODES",
+    "HidError",
+    "Screen",
+    "key",
+    "screen_size",
+    "screenshot",
+    "swipe",
+    "tap",
+    "type_text",
+]
 
 # axe reports the application frame as e.g. "{{0, 0}, {402, 874}}"
 _AXFRAME_RE = re.compile(
@@ -100,6 +110,36 @@ def type_text(udid: str, text: str) -> None:
     plain inputs, execCommand for rich editors.
     """
     _axe("type", text, "--udid", udid)
+
+
+#: HID usage codes AXe expects for `axe key <keycode>`. Named here rather than inlined
+#: because `axe key 40` is unreadable at the call site and a wrong number is a silent
+#: wrong keypress — Escape (41) and Return (40) differ by one.
+KEYCODES = {
+    "Enter": 40,
+    "Return": 40,
+    "Escape": 41,
+    "Backspace": 42,
+    "Tab": 43,
+    "Space": 44,
+    "ArrowRight": 79,
+    "ArrowLeft": 80,
+    "ArrowDown": 81,
+    "ArrowUp": 82,
+}
+
+
+def key(udid: str, name: str, duration: float | None = None) -> None:
+    """Press a single named key as trusted HID input."""
+    if name not in KEYCODES:
+        raise HidError(
+            f"no HID keycode mapped for {name!r}; known: {sorted(KEYCODES)}. Add an explicit "
+            f"mapping rather than passing a raw number at the call site."
+        )
+    args = ["key", str(KEYCODES[name]), "--udid", udid]
+    if duration is not None:
+        args += ["--duration", f"{duration:g}"]
+    _axe(*args)
 
 
 def swipe(
