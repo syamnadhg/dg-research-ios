@@ -331,6 +331,22 @@ public actor FirestoreREST {
         _ = try await send(request)
     }
 
+    /// Create a document with a server-assigned id in *path* (a collection).
+    ///
+    /// A POST to the collection, not a PATCH to a chosen id: `pipeline_events` is append-only, and a
+    /// client-chosen id lets two workers writing in the same millisecond overwrite each other rather
+    /// than both being recorded.
+    public func createDocument(path: String, fields: [String: FirestoreValue]) async throws {
+        var request = URLRequest(url: URL(string: "\(config.documentsRoot)/\(path)")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        try await authorize(&request)
+        request.httpBody = try JSONSerialization.data(
+            withJSONObject: ["fields": fields.mapValues(\.json)]
+        )
+        _ = try await send(request)
+    }
+
     // MARK: Plumbing
 
     private func authorize(_ request: inout URLRequest) async throws {

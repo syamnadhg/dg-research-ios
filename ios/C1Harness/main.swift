@@ -138,6 +138,55 @@ final class C1Harness: NSObject {
             pipeline.events.map { "P\($0.phase).\($0.event)" }.joined(separator: " ")
         )
 
+        // --- the contract writes, against the real rules ---------------------------
+        //
+        // The half that pairing alone does not cover: a device that pairs, goes online and then never
+        // reports anything is not a working backend. Emitted against the Firestore emulator so the
+        // committed rules evaluate every write, and diffed against the golden fixture by the gate
+        // script — with no e2e in existence that diff is the only mechanical proof this second
+        // implementation of the contract is faithful rather than merely plausible.
+        if let emulator = ProcessInfo.processInfo.environment["SR_EMULATOR_HOST"],
+           let customToken = ProcessInfo.processInfo.environment["SR_CUSTOM_TOKEN"],
+           let uid = ProcessInfo.processInfo.environment["SR_UID"],
+           let researchId = ProcessInfo.processInfo.environment["SR_RESEARCH_ID"],
+           let deviceId = ProcessInfo.processInfo.environment["SR_DEVICE_ID"] {
+            let config = FirebaseProjectConfig(
+                projectID: "demo-sr", apiKey: "emulator-key",
+                apiBaseURL: URL(string: "http://127.0.0.1:8907")!, emulatorHost: emulator
+            )
+            let client = FirestoreREST(config: config, transport: URLSessionTransport())
+            var signedIn = true
+            do { try await client.signIn(customToken: customToken) } catch { signedIn = false }
+            record("contract: signed in as the synthetic device", signedIn, "")
+
+            let emitter = ContractEmitter(
+                client: client, uid: uid, researchId: researchId,
+                deviceId: deviceId, runId: "run-c1"
+            )
+            var contractOK = true
+            var failure = ""
+            do {
+                try await emitter.startRun()
+                for phase in 0...3 {
+                    try await emitter.emit(type: "phase_start", phase: phase)
+                    try await emitter.emit(type: "phase_complete", phase: phase)
+                }
+                try await emitter.finishRun(status: "complete")
+            } catch {
+                contractOK = false
+                failure = "\(error)"
+            }
+            record("contract: the full P0-P3 write sequence was ACCEPTED by the real rules",
+                   contractOK, failure)
+
+            let log = await emitter.writeLog()
+            if let data = try? JSONSerialization.data(withJSONObject: log, options: [.sortedKeys]),
+               let text = String(data: data, encoding: .utf8) {
+                // Printed for the gate script to diff against fixtures/golden/p0_p3_happy_path.jsonl.
+                print("WRITE_LOG=\(text)")
+            }
+        }
+
         // The boundary, restated in the run's own verdict so it cannot be read as a full C1 pass.
         let gated = (try? await bridge.evaluateJSON(
             "(function(){ var el = document.querySelector('[data-testid=\"trust-gated\"]');"
