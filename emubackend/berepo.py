@@ -57,6 +57,7 @@ __all__ = [
     "be_root",
     "ensure_on_path",
     "import_be",
+    "import_be_file",
     "module_level_third_party_imports",
 ]
 
@@ -171,6 +172,34 @@ def import_be(module_name: str):
     import importlib
 
     return importlib.import_module(module_name)
+
+
+def import_be_file(module_path: str, alias: str | None = None):
+    """Load a single BE source file as a module, **without** running its package ``__init__``.
+
+    Needed because ``auth/__init__.py`` eagerly does ``from . import credentials, keystore,
+    pairing``, so a plain ``import auth.pairing`` drags in ``credentials`` (which needs
+    ``google.auth``) and the backend's own ``keystore`` — whose module-level constants point at
+    the production state dir. Loading the one file directly keeps the dependency surface honest
+    (``auth/pairing.py`` needs only ``requests``) and guarantees the production keystore is
+    never even imported, which is a stronger A10 position than "imported but not called".
+
+    *module_path* is repo-relative, e.g. ``"auth/pairing.py"``.
+    """
+    import importlib.util
+
+    root = ensure_on_path()
+    target = root / module_path
+    if not target.is_file():
+        raise BEHRepoError(f"{target} does not exist in the BE checkout")
+    name = alias or "be_" + module_path.replace("/", "_").removesuffix(".py")
+    spec = importlib.util.spec_from_file_location(name, target)
+    if spec is None or spec.loader is None:  # pragma: no cover - defensive
+        raise BEHRepoError(f"could not build an import spec for {target}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def module_level_third_party_imports(py_file: Path) -> set[str]:
