@@ -14,6 +14,8 @@ enum DS {
     enum C {
         static let bg = Color(hex: 0x050A15)
         static let surface = Color(hex: 0x0A0F1E)
+        /// The web app's `surface-2` — one step up from a card, for pills and chips sitting ON a card.
+        static let surfaceRaised = Color(hex: 0x121A2E)
         static let border = Color(hex: 0x1A2540)
         static let borderHover = Color(hex: 0x253556)
         static let textPrimary = Color(hex: 0xF1F5F9)
@@ -120,14 +122,37 @@ struct SectionLabel: View {
 
 /// A status dot plus label. Dot *and* text, never colour alone — colour-blind users get nothing
 /// from a green circle, and this is the control that says whether the device is working.
+/// A status pill. When it means "online", the dot breathes.
+///
+/// The pulse is tied to the one thing it is honest about: a device is online *because it is
+/// heartbeating*, and a slow pulse is what a heartbeat looks like. Deliberately NOT applied to offline
+/// or not-paired — animating those would be decoration, and worse, would imply activity where there is
+/// none. That restraint is what keeps the motion informative rather than ambient.
 struct StatusPill: View {
     let color: Color
     let text: String
+    /// Only the live state pulses.
+    var live: Bool = false
+
+    @State private var pulsing = false
+
     var body: some View {
         HStack(spacing: DS.S.sm) {
-            Circle().fill(color).frame(width: 7, height: 7)
+            Circle()
+                .fill(color)
+                .frame(width: 7, height: 7)
+                .scaleEffect(live && pulsing ? 1.35 : 1)
+                .opacity(live && pulsing ? 0.55 : 1)
+                .animation(
+                    live
+                        ? .easeInOut(duration: 1.1).repeatForever(autoreverses: true)
+                        : .default,
+                    value: pulsing
+                )
             Text(text).font(DS.F.body).foregroundStyle(DS.C.textPrimary)
         }
+        .onAppear { if live { pulsing = true } }
+        .onChange(of: live) { _, isLive in pulsing = isLive }
     }
 }
 

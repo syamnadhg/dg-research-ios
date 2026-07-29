@@ -188,15 +188,31 @@ struct PairingFlowView: View {
                 arcPreview
             } else {
                 stageHeader
-                switch controller.stage {
-                case .pair: pairStage
-                case .onStartup: onStartupStage
-                case .apiKeys: apiKeysStage
-                case .logins: loginsStage
-                case .ready: readyStage
+                // Slides forward, because progress has a DIRECTION. A cross-fade would make stage 3
+                // and stage 2 feel interchangeable, when the whole point of the [n/5] header is that
+                // you are moving through something.
+                Group {
+                    switch controller.stage {
+                    case .pair: pairStage
+                    case .onStartup: onStartupStage
+                    case .apiKeys: apiKeysStage
+                    case .logins: loginsStage
+                    case .ready: readyStage
+                    }
                 }
+                .transition(
+                    .asymmetric(
+                        insertion: .move(edge: .trailing).combined(with: .opacity),
+                        removal: .move(edge: .leading).combined(with: .opacity)
+                    )
+                )
+                .id(controller.stage)
             }
         }
+        // One spring for the whole flow, so every stage change and rail fill share a feel rather than
+        // each easing differently.
+        .animation(.spring(response: 0.38, dampingFraction: 0.86), value: controller.stage)
+        .animation(.easeInOut(duration: 0.25), value: controller.started)
         .sheet(item: Binding(
             get: { controller.loginTarget },
             set: { if $0 == nil { controller.loginTarget = nil } }
@@ -255,9 +271,15 @@ struct PairingFlowView: View {
             // actually counting.
             HStack(spacing: DS.S.xs) {
                 ForEach(PairingStage.allCases) { stage in
+                    // Fills left to right as you advance — the rail IS the progress, so it should
+                    // move rather than redraw.
                     Rectangle()
                         .fill(stage.rawValue <= controller.stage.rawValue ? DS.C.accent : DS.C.border)
                         .frame(height: 2)
+                        .animation(
+                            .easeOut(duration: 0.3).delay(Double(stage.rawValue) * 0.04),
+                            value: controller.stage
+                        )
                 }
             }
         }

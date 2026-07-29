@@ -114,6 +114,12 @@ struct DeviceSnapshot {
     var queue: [QueuedRun] = []
     /// What the backend reports about itself, and whether PyPI has something newer.
     var updateAvailable: String? = nil
+    /// The On Startup intent, as stored on the device doc. Read so the Settings toggle reflects reality
+    /// rather than defaulting to on and quietly disagreeing with the frontend.
+    var supervised = false
+    /// Worker ids the OWNER has parked. A listed worker takes no new runs; the backend reads this at
+    /// claim time. Read-only here — see `PeoplePopup` for why the device cannot write it.
+    var restingWorkerIDs: Set<String> = []
 
     static let unpaired = DeviceSnapshot()
 }
@@ -149,6 +155,11 @@ final class AppModel: ObservableObject {
             // again. Without this, relaunching the app leaves it looking offline to the web app.
             device.resumeIfPaired()
         }
+    }
+
+    /// Mirror the On Startup intent to the device doc, so the frontend's Account toggle matches.
+    func setSupervised(_ enabled: Bool) async {
+        await (backend as? DeviceBackend)?.setSupervised(enabled)
     }
 
     /// Called on foreground/background so the heartbeat matches what iOS actually permits.
@@ -213,7 +224,7 @@ final class PreviewBackend: AppBackend {
             pairCode: "JPNTY4F9",
             online: true,
             lastHeartbeatAgo: 3,
-            workerCount: 1,
+            workerCount: 2,
             busyWorkers: 1,
             backendVersion: "0.1.12",
             bridgeReachable: false,
@@ -245,7 +256,9 @@ final class PreviewBackend: AppBackend {
                 QueuedRun(
                     id: "r-9", uid: "u2", title: "Solid-state batteries, 2026 landscape", position: 1
                 )
-            ]
+            ],
+            supervised: true,
+            restingWorkerIDs: ["2"]
         )
     }
 

@@ -71,6 +71,13 @@ final class DeviceBackend: AppBackend {
         snapshot.queue = Self.queue(from: fields)
         if case .string(let version)? = fields["version"] { snapshot.backendVersion = version }
         if case .string(let newer)? = fields["updateAvailable"] { snapshot.updateAvailable = newer }
+        if case .boolean(let supervised)? = fields["supervised"] { snapshot.supervised = supervised }
+        if case .array(let resting)? = fields["restingWorkerIds"] {
+            snapshot.restingWorkerIDs = Set(resting.compactMap { value in
+                if case .string(let id) = value { return id }
+                return nil
+            })
+        }
         snapshot.users = Self.users(from: fields)
         if let logins = Self.platforms(from: fields) { snapshot.platforms = logins }
         return snapshot

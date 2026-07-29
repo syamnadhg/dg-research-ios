@@ -11,6 +11,8 @@ struct RootView: View {
     /// Whether the live browser view is up, and which platform it is showing.
     @State private var watching = false
     @State private var watchSelection = "chatgpt"
+    @State private var settingsOpen = false
+    @State private var peopleOpen = false
 
     var body: some View {
         ZStack {
@@ -21,46 +23,57 @@ struct RootView: View {
                 LandingView { model.screen = .notPaired }
             } else if !model.snapshot.paired, model.screen == .notPaired, model.pairing != nil {
                 VStack(spacing: 0) {
-                    Header(snapshot: model.snapshot).padding(DS.S.screen)
+                    Header(snapshot: model.snapshot, onSettings: nil).padding(DS.S.screen)
                     NotPairedView { model.screen = .pairing }
                 }
             } else {
-            ScrollView {
-                VStack(alignment: .leading, spacing: DS.S.lg * 2) {
-                    Header(snapshot: model.snapshot)
-                    if model.snapshot.paired {
-                        StatusCard(snapshot: model.snapshot)
-                        if let run = model.snapshot.run {
-                            RunCard(run: run, onWatch: { watching = true })
-                        }
-                        PlatformsCard(
-                            platforms: model.snapshot.platforms,
-                            model: model,
-                            onSelect: { loginTarget = $0 }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: DS.S.lg * 2) {
+                        Header(
+                            snapshot: model.snapshot,
+                            onSettings: model.snapshot.paired ? { settingsOpen = true } : nil
                         )
-                        WorkersCard(snapshot: model.snapshot)
-                        PeopleCard(snapshot: model.snapshot)
-                        ControlsCard(model: model)
-                    } else if let pairing = model.pairing {
-                        // The five-stage flow, matching `superresearch --pair` stage for stage. It
-                        // replaces the old three-bullet card, which described the steps without
-                        // walking anyone through them.
-                        PairingFlowView(controller: pairing)
-                    } else {
-                        // Only reachable on the preview backend, which has nothing to pair against.
-                        Text("No Firebase configuration bundled — running in preview mode.")
-                            .font(DS.F.body).foregroundStyle(DS.C.textSecondary).srCard()
+                        if model.snapshot.paired {
+                            // ⚠ Three cards, and only three. Controls and platform logins moved into
+                            // Settings: a backend is something you GLANCE at — is it up, what is it
+                            // doing, who for — and a fifteen-item operations list on the same screen
+                            // buries all three of those answers under things you touch once a month.
+                            StatusCard(snapshot: model.snapshot)
+                            if let run = model.snapshot.run {
+                                RunCard(run: run, onWatch: { watching = true })
+                            }
+                            PeopleButton(snapshot: model.snapshot) { peopleOpen = true }
+                        } else if let pairing = model.pairing {
+                            PairingFlowView(controller: pairing)
+                        } else {
+                            Text("No Firebase configuration bundled — running in preview mode.")
+                                .font(DS.F.body).foregroundStyle(DS.C.textSecondary).srCard()
+                        }
+                        Footer(snapshot: model.snapshot)
                     }
-                    Footer(snapshot: model.snapshot)
+                    .padding(DS.S.screen)
                 }
-                .padding(DS.S.screen)
-            }
             }
         }
         .preferredColorScheme(.dark)
+        // One transition for the whole pre-pairing journey, so landing → not-paired → flow reads as
+        // moving forward through a single thing rather than three unrelated screens swapping out.
+        .animation(.spring(response: 0.4, dampingFraction: 0.88), value: model.screen)
+        .animation(.easeInOut(duration: 0.3), value: model.snapshot.paired)
         .task { await model.refresh() }
         .overlay(alignment: .bottom) { Toast(text: model.toast) }
         .overlay { ConfirmSheet(model: model) }
+        .sheet(isPresented: $settingsOpen) {
+            SettingsSheet(model: model, onClose: { settingsOpen = false })
+        }
+        // An overlay rather than a `.sheet`: a sheet brings its own full-height chrome and grabber,
+        // and the frontend's equivalent is a bottom-anchored card floating over a blurred backdrop.
+        .overlay {
+            if peopleOpen {
+                PeoplePopup(snapshot: model.snapshot, onClose: { peopleOpen = false })
+            }
+        }
+        .animation(.spring(response: 0.34, dampingFraction: 0.84), value: peopleOpen)
         .sheet(item: $loginTarget) { p in
             LoginFlowView(platform: p, manifestMarker: nil) { _ in
                 loginTarget = nil
@@ -82,15 +95,11 @@ struct RootView: View {
     }
 }
 
-/// The wordmark, matching the web app's own.
-///
-/// The frontend renders it `text-2xl font-bold text-accent`, centered — so 24pt, bold, and in the
-/// accent blue rather than white. It was left-aligned in white here, which is a different brand.
 /// The wordmark, in the frontend's own two tones.
 ///
-/// ⚠ Not one colour. The web app renders it as `<span class="text-accent font-bold">Super</span>` then
+/// ⚠ Not one colour. The web app renders `<span class="text-accent font-bold">Super</span>` then
 /// `<span class="text-text-secondary font-medium">Research</span>` — so **Super** is accent and bold,
-/// **Research** is secondary and medium. Painting the whole thing accent, as the first version did, is
+/// **Research** is secondary and medium. Painting the whole thing accent, as an earlier version did, is
 /// a different mark from the one the product uses everywhere else.
 struct Wordmark: View {
     var size: CGFloat = 24
@@ -109,19 +118,38 @@ struct Wordmark: View {
 
 private struct Header: View {
     let snapshot: DeviceSnapshot
+    /// nil hides the button — there is nothing to configure before pairing.
+    let onSettings: (() -> Void)?
+
     var body: some View {
-        VStack(spacing: DS.S.md) {
-            Wordmark(size: 24)
-            if snapshot.paired {
-                StatusPill(
-                    color: snapshot.online ? DS.C.ok : DS.C.textTertiary,
-                    text: snapshot.online ? "Online" : "Offline"
-                )
-            } else {
-                StatusPill(color: DS.C.warn, text: "Not paired")
+        ZStack(alignment: .topTrailing) {
+            VStack(spacing: DS.S.md) {
+                Wordmark(size: 24)
+                if snapshot.paired {
+                    StatusPill(
+                        color: snapshot.online ? DS.C.ok : DS.C.textTertiary,
+                        text: snapshot.online ? "Online" : "Offline",
+                        live: snapshot.online
+                    )
+                } else {
+                    StatusPill(color: DS.C.warn, text: "Not paired")
+                }
+            }
+            .frame(maxWidth: .infinity)
+
+            if let onSettings {
+                // Top right, out of the way. Everything behind it is something you set once — the
+                // wordmark and status stay the two things the eye lands on.
+                // An SF Symbol, not the ⚙ emoji. The emoji renders in full colour and at its own
+                // metrics, so it sat in this flat monochrome header looking like a sticker.
+                Button(action: onSettings) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 17, weight: .regular))
+                        .foregroundStyle(DS.C.textTertiary)
+                }
+                .frame(minWidth: DS.S.touch, minHeight: DS.S.touch)
             }
         }
-        .frame(maxWidth: .infinity)
     }
 }
 
@@ -496,43 +524,23 @@ private struct PersonRow: View {
     }
 }
 
-// MARK: - Controls (full terminal parity)
+// MARK: - Operation rows (used by SettingsSheet)
 
-private struct ControlsCard: View {
-    @ObservedObject var model: AppModel
+struct BridgeNotice: View {
+    /// Passed in so the notice reflects the real probe rather than assuming.
+    var reachable: Bool = false
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: DS.S.lg) {
-            SectionLabel(text: "Backend controls")
-
-            if !model.snapshot.bridgeReachable {
-                // Said plainly and up front. A control that silently does nothing is worse than one
-                // that is visibly unavailable, and these act on the Mac — not on the phone.
-                BridgeNotice()
-            }
-
-            ForEach(Operations.groups, id: \.self) { group in
-                let ops = Operations.inGroup(group).filter { $0.id != "pair" && $0.id != "login" }
-                if !ops.isEmpty {
-                    Text(group).font(DS.F.label).foregroundStyle(DS.C.textSecondary)
-                    ForEach(ops) { op in
-                        OpRow(op: op, model: model)
-                    }
-                }
-            }
-        }
-        .srCard()
-    }
-}
-
-private struct BridgeNotice: View {
     var body: some View {
         HStack(alignment: .top, spacing: DS.S.lg) {
             Text("!")
                 .font(DS.F.mono(11, .semibold)).foregroundStyle(DS.C.warn)
                 .frame(width: 16, height: 16)
                 .overlay(Circle().stroke(DS.C.warn, lineWidth: 1))
-            Text("The Mac bridge is not running. Actions marked **mac** will be queued, not executed.")
+            // ⚠ "not sent", not "queued". There is no transport, so nothing is waiting anywhere —
+            // saying queued would have the user waiting for an effect that cannot arrive.
+            Text(reachable
+                 ? "Actions marked **mac** run on the Mac bridge."
+                 : "The Mac bridge is not running. Actions marked **mac** cannot be sent yet.")
                 .font(DS.F.label).foregroundStyle(DS.C.textSecondary)
         }
         .padding(DS.S.lg)
@@ -541,12 +549,13 @@ private struct BridgeNotice: View {
     }
 }
 
-private struct OpRow: View {
+struct OperationRow: View {
     let op: Operation
-    @ObservedObject var model: AppModel
+    let busy: Bool
+    let action: () -> Void
 
     var body: some View {
-        Button { model.invoke(op) } label: {
+        Button(action: action) {
             HStack(spacing: DS.S.lg) {
                 VStack(alignment: .leading, spacing: DS.S.xs) {
                     HStack(spacing: DS.S.md) {
@@ -560,7 +569,7 @@ private struct OpRow: View {
                         .multilineTextAlignment(.leading)
                 }
                 Spacer()
-                if model.busyOpID == op.id {
+                if busy {
                     ProgressView().scaleEffect(0.6).tint(DS.C.accent)
                 } else {
                     Text("›").font(DS.F.body).foregroundStyle(DS.C.textTertiary)
@@ -570,13 +579,12 @@ private struct OpRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(model.busyOpID != nil)
     }
 }
 
 /// Marks an action that runs on the Mac rather than the phone. Present because the distinction is
 /// invisible otherwise, and a user who taps "Restart" deserves to know what is being restarted.
-private struct ScopeTag: View {
+struct ScopeTag: View {
     var body: some View {
         Text("mac")
             .font(DS.F.mono(9, .semibold))
@@ -648,5 +656,58 @@ private struct Footer: View {
             Spacer()
             Text("iOS backend").font(DS.F.mono(9)).foregroundStyle(DS.C.textTertiary)
         }
+    }
+}
+
+
+// MARK: - People (a button, not a list)
+
+/// The People summary on the main screen: who, and how busy, in one row that opens the full sheet.
+///
+/// A button rather than an inline list because the interesting version of this information — every
+/// worker slot, whose run each one is, what is queued behind it — does not fit on a glance screen, and
+/// the web app already made the same call: a "Shared with N" pill that opens a popup.
+struct PeopleButton: View {
+    let snapshot: DeviceSnapshot
+    let onOpen: () -> Void
+
+    private var busyCount: Int { snapshot.workers.filter(\.isBusy).count }
+
+    var body: some View {
+        Button(action: onOpen) {
+            VStack(alignment: .leading, spacing: DS.S.lg) {
+                HStack {
+                    SectionLabel(text: "People")
+                    Spacer()
+                    Text("›").font(DS.F.body).foregroundStyle(DS.C.textTertiary)
+                }
+                HStack(spacing: DS.S.sm) {
+                    // The summary a glance needs: how many people, how much of the device is in use,
+                    // and whether anything is waiting.
+                    Pill(
+                        text: snapshot.users.count == 1
+                            ? "1 person" : "\(snapshot.users.count) people",
+                        tone: .neutral
+                    )
+                    Pill(
+                        text: "\(busyCount)/\(max(snapshot.workerCount, snapshot.workers.count)) busy",
+                        tone: busyCount > 0 ? .ok : .neutral
+                    )
+                    if !snapshot.queue.isEmpty {
+                        Pill(text: "\(snapshot.queue.count) queued", tone: .violet)
+                    }
+                    Spacer()
+                }
+                // Named faces, so the card is not purely numeric — the point of it is the people.
+                if !snapshot.users.isEmpty {
+                    Text(snapshot.users.map(\.label).joined(separator: ", "))
+                        .font(DS.F.label).foregroundStyle(DS.C.textTertiary)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+            }
+            .srCard()
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
