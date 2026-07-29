@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -168,6 +169,18 @@ _DESCRIBE_JS = """
   // the candidate fall through to role+name or aria-label, which are properties of the control rather
   // than of this particular render.
   var GENERATED_ID = /(^|-)_r_|_R_|^radix-|^base-ui-|^headlessui-|^mui-|^:r/i;
+  // Handles containing a positional index. Stable across renders, and still wrong.
+  //
+  // Measured: with an answer on screen, ChatGPT's `response_container` was proposed as
+  // `[data-testid="conversation-turn-1"]` — rank 1, unique, visible, and bound to the FIRST turn of
+  // the conversation forever. Turn 2 onwards would never match, so a multi-turn run harvests the
+  // opening exchange and reports success. NotebookLM's `#mat-button-toggle-1-button` is the same
+  // shape: it means "the second toggle", not "My notebooks".
+  //
+  // Rejecting these makes the candidate fall through to the semantic attribute
+  // (`[data-message-author-role=assistant]`, `button[aria-label="Create new notebook"]`), which is
+  // both more durable and what the key actually means.
+  var INDEXED = /(^|-)[0-9]+(-|$)/;
   function suggest(el) {
     // ⚠ The attribute NAME matters and the two spellings are not interchangeable. Gemini uses
     // `data-test-id`; ChatGPT and Claude use `data-testid`. An earlier version read either and then
@@ -178,9 +191,11 @@ _DESCRIBE_JS = """
              : (el.hasAttribute('data-test-id') ? 'data-test-id' : null);
     if (attr) {
       var tid = el.getAttribute(attr);
-      return { css: '[' + attr + '="' + tid + '"]', rank: 1, why: attr };
+      if (!INDEXED.test(tid)) {
+        return { css: '[' + attr + '="' + tid + '"]', rank: 1, why: attr };
+      }
     }
-    if (el.id && !/^[0-9]/.test(el.id) && !GENERATED_ID.test(el.id)) {
+    if (el.id && !/^[0-9]/.test(el.id) && !GENERATED_ID.test(el.id) && !INDEXED.test(el.id)) {
       return { css: '#' + el.id, rank: 2, why: 'stable id' };
     }
     var role = el.getAttribute('role'), label = el.getAttribute('aria-label');
@@ -549,6 +564,29 @@ def _wait_for_product_page(host: str, port: int, timeout: float) -> iwdp.Page:
         raise
 
 
+#: A probe that is *itself* a durable handle, so matching it is already the answer.
+#:
+#: ``suggest()`` describes the element it found — its testid, its id, its accessible name — and that
+#: covers controls. It has no vocabulary for an element whose identity IS a semantic data attribute,
+#: which is exactly how both ChatGPT and Gemini mark up a response:
+#: ``[data-message-author-role=assistant]``, ``<model-response>``. Those matched, were described as
+#: "no stable attribute — text match only", and were dropped — after which the only surviving candidate
+#: for ``response_container`` was ``[data-testid="conversation-turn-1"]``, bound to turn one forever.
+#:
+#: Two shapes qualify, both narrow on purpose:
+#:   * a plain data-attribute equality selector — ``[data-message-author-role=assistant]``. Not
+#:     ``*=`` substring forms, which are search terms rather than identities, and not
+#:     ``a[href^=http]``, which is how ChatGPT's "Images" nav link became a candidate for ``sources``.
+#:   * a bare custom-element tag — ``model-response``, ``message-content``. A framework component name
+#:     is part of the platform's own structure.
+_DATA_ATTR_PROBE = re.compile(r"^\[data-[a-z-]+=[^*^$~|\]]+\]$")
+_CUSTOM_ELEMENT_PROBE = re.compile(r"^[a-z]+(-[a-z]+)+$")
+
+
+def durable_probe(probe: str) -> bool:
+    return bool(_DATA_ATTR_PROBE.match(probe) or _CUSTOM_ELEMENT_PROBE.match(probe))
+
+
 def draft_manifest(captured: dict) -> dict:
     """Turn candidates into a DRAFT manifest entry — proposed, never promoted.
 
@@ -595,6 +633,23 @@ def draft_manifest(captured: dict) -> dict:
             None,
         )
         if best is None:
+            # Last resort: the probe itself, when the probe is a durable handle rather than a search
+            # term. After the element-described candidates, never before, so a testid still wins.
+            durable = next(
+                (
+                    h
+                    for h in hits
+                    if durable_probe(h.get("probe", ""))
+                    and (h.get("visible") or not needs_visible)
+                ),
+                None,
+            )
+            if durable is not None:
+                entries[key] = {
+                    "css": [durable["probe"]],
+                    "provenance": f"captured@{surface}:the probe is itself a semantic handle",
+                }
+                continue
             skipped[key] = "no candidate met the acceptance rule"
             continue
         # The surface rides along with every value, because the two surfaces are not guaranteed to

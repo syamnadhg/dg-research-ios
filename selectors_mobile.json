@@ -5,12 +5,17 @@
     "Captured 2026-07-29 from REAL signed-in DOM, through the app's own WKWebViews (the only",
     "signed-in surface on this device — Simulator Safari is signed out of all four platforms).",
     "",
-    "Every value here resolved on a live page. NONE has yet been verified by DRIVING it, which is a",
-    "different and stronger claim: resolution only proves an element matched, while driving proves the",
-    "element was the right one. Provenance says 'resolved', and it should not say 'driven' until a run",
-    "has acted on it and asserted the outcome.",
+    "Provenance distinguishes two strengths of claim, and the distinction is load-bearing. 'resolved'",
+    "means an element matched. 'DRIVEN' means the pipeline acted on it and the outcome was asserted —",
+    "which is the only claim that rules out the P1 failure, where every click resolves and lands and",
+    "the harvest returns nothing. ChatGPT's composer and send are DRIVEN; the rest are resolved.",
     "",
-    "The 17 absent keys are absent on purpose. Nine need a response on screen (sources,",
+    "Measured while driving ChatGPT's send (settles the isTrusted question): every dispatched event",
+    "reported isTrusted === false, and the message sent regardless — composer cleared, user turn 0->1,",
+    "assistant replied in under 8s. So this control does not gate on trust and the app can drive it",
+    "with evaluateJavaScript. HID taps remain the fallback for a control that does gate.",
+    "",
+    "The 14 absent keys are absent on purpose. Eight need a response on screen (sources,",
     "response_container, activity_panel, artifact_panel, audio_ready_marker); five need an interaction",
     "first (ChatGPT's send appears only once the composer is non-empty, and its research option lives",
     "inside the composer-plus menu; NotebookLM's add_source and generate_audio live inside a notebook,",
@@ -28,7 +33,15 @@
       },
       "composer": {
         "css": ["#prompt-textarea"],
-        "provenance": "resolved@ios-app-webview:stable id; contenteditable div, not the textarea"
+        "provenance": "DRIVEN@ios-app-webview: insertText filled it (execCommand path) and the text was read back"
+      },
+      "send": {
+        "css": ["[data-testid=\"send-button\"]", "#composer-submit-button"],
+        "provenance": "DRIVEN@ios-app-webview: a JS click sent the message — composer cleared, user turn 0->1, assistant replied. Exists ONLY while the composer is non-empty."
+      },
+      "response_container": {
+        "css": ["[data-message-author-role=assistant]"],
+        "provenance": "resolved@ios-app-webview:semantic attribute; NOT conversation-turn-N, which binds to one turn"
       }
     },
     "gemini": {
@@ -57,8 +70,8 @@
     },
     "notebooklm": {
       "logged_in_marker": {
-        "css": ["#mat-button-toggle-1-button", "button[aria-label=\"Create new notebook\"]"],
-        "provenance": "resolved@ios-app-webview:stable id; this platform ships NO testids at all (Angular Material)"
+        "css": ["button[aria-label=\"Create new notebook\"]"],
+        "provenance": "resolved@ios-app-webview:accessible name; this platform ships NO testids at all (Angular Material). NOT #mat-button-toggle-1-button, which means 'the second toggle' rather than 'My notebooks'."
       }
     }
   }

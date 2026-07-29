@@ -68,6 +68,20 @@ MUTATIONS = [
         "accepting an invisible send button, which cannot be tapped",
     ),
     (
+        "bin/capture_selectors.py",
+        '_DATA_ATTR_PROBE = re.compile(r"^\\[data-[a-z-]+=[^*^$~|\\]]+\\]$")',
+        '_DATA_ATTR_PROBE = re.compile(r"^\\[data-[a-z-]+.+\\]$")',
+        "test_capture_guards.py::test_a_search_term_is_not_accepted_as_a_handle",
+        "treating a `*=` search term as an identity, so a substring probe becomes the selector",
+    ),
+    (
+        "bin/capture_selectors.py",
+        "            if durable is not None:",
+        "            if durable is None:",
+        "test_capture_guards.py::test_the_durable_probe_fallback_rescues_an_undescribable_element",
+        "the semantic-probe fallback never firing, leaving response_container to an indexed testid",
+    ),
+    (
         "emubackend/berepo.py",
         "    for node in tree.body:",
         "    for node in ast.walk(tree):",

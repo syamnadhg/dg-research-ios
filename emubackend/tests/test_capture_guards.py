@@ -29,6 +29,7 @@ against the author's imagination.
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -376,6 +377,114 @@ def test_chatgpt_and_claude_probes_use_the_unhyphenated_attribute(cap):
             probe for probes in cap.PROBES[platform].values() for probe in probes
         )
         assert "data-test-id" not in flat, f"{platform} does not use the hyphenated spelling"
+
+
+# --- indexed handles, and probes that are themselves handles ----------------------------------
+
+
+def test_indexed_handles_are_rejected_by_the_describe_script(cap):
+    """`conversation-turn-1` is stable across renders and still wrong: it means turn ONE.
+
+    Measured with an answer on screen: `response_container` was proposed as
+    `[data-testid="conversation-turn-1"]`, rank 1, unique, visible. Turn 2 onward would never match,
+    so a multi-turn run harvests the opening exchange and reports success.
+    """
+    js = cap._DESCRIBE_JS
+    assert "INDEXED" in js
+    assert "!INDEXED.test(tid)" in js
+    assert "!INDEXED.test(el.id)" in js
+
+
+@pytest.mark.parametrize(
+    "handle",
+    ["conversation-turn-1", "mat-button-toggle-1-button", "message-2", "3-col"],
+)
+def test_the_indexed_pattern_matches_positional_handles(cap, handle):
+    pattern = re.compile(r"(^|-)[0-9]+(-|$)")
+    assert pattern.search(handle), f"{handle} should read as positional"
+
+
+@pytest.mark.parametrize(
+    "handle",
+    ["send-button", "chat-input", "composer-plus-btn", "user-menu-button", "new-chat-button"],
+)
+def test_the_indexed_pattern_spares_real_handles(cap, handle):
+    """The converse. A guard that also rejects the good values is not a guard, it is an outage."""
+    pattern = re.compile(r"(^|-)[0-9]+(-|$)")
+    assert not pattern.search(handle), f"{handle} must survive"
+
+
+@pytest.mark.parametrize(
+    "probe",
+    ["[data-message-author-role=assistant]", "model-response", "message-content"],
+)
+def test_a_semantic_probe_is_itself_accepted_as_a_handle(cap, probe):
+    assert cap.durable_probe(probe)
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        "a[href^=http]",
+        '[data-testid*="conversation-turn"]',
+        'button[aria-label*="research" i]',
+        "cite",
+        "audio",
+        "div[contenteditable=true]",
+    ],
+)
+def test_a_search_term_is_not_accepted_as_a_handle(cap, probe):
+    """`a[href^=http]` in particular: that is how the Images nav link became a `sources` candidate."""
+    assert not cap.durable_probe(probe)
+
+
+def test_the_durable_probe_fallback_runs_after_the_described_candidates(cap):
+    """A testid on the element must still beat the probe that found it."""
+    hits = [
+        {
+            "probe": "[data-message-author-role=assistant]",
+            "suggested": '[data-testid="better"]',
+            "rank": 1,
+            "why": "data-testid",
+            "matches": 1,
+            "visible": True,
+        }
+    ]
+    entries = _draft(cap, {"response_container": hits}, response_present=True)
+    assert entries["response_container"]["css"] == ['[data-testid="better"]']
+
+
+def test_the_durable_probe_fallback_rescues_an_undescribable_element(cap):
+    """An assistant turn has no testid, no id and no accessible name — the probe is the identity."""
+    hits = [
+        {
+            "probe": "[data-message-author-role=assistant]",
+            "suggested": None,
+            "rank": 5,
+            "why": "no stable attribute — text match only",
+            "matches": None,
+            "visible": True,
+        }
+    ]
+    entries = _draft(cap, {"response_container": hits}, response_present=True)
+    assert entries["response_container"]["css"] == ["[data-message-author-role=assistant]"]
+    assert "semantic handle" in entries["response_container"]["provenance"]
+
+
+def test_the_fallback_still_honours_the_post_response_refusal(cap):
+    """Otherwise the new escape hatch reopens the door the post-response guard closed."""
+    hits = [
+        {"probe": "[data-message-author-role=assistant]", "suggested": None, "rank": 5,
+         "why": "text", "matches": None, "visible": True}
+    ]
+    draft = cap.draft_manifest(
+        {
+            "platform": "chatgpt",
+            "candidates": {"response_container": hits},
+            "response": {"present": False},
+        }
+    )
+    assert "response_container" not in draft["platforms"]["chatgpt"]
 
 
 # --- the app's login markers must be absent when signed out ----------------------------------
