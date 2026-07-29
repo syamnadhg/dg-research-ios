@@ -1,0 +1,11 @@
+{"delete_paths": ["pendingDecision"], "fields": {"backendRunId": "{runId}", "status": "ongoing"}, "op": "patch", "path": "users/{uid}/researches/{rid}"}
+{"delete_paths": [], "fields": {"deviceId": "{deviceId}", "expireAt": "<iso8601>", "phase": 0, "seq": "<int>", "timestamp": "<int>", "type": "phase_start"}, "op": "create", "path": "users/{uid}/researches/{rid}/pipeline_events"}
+{"delete_paths": [], "fields": {"deviceId": "{deviceId}", "expireAt": "<iso8601>", "phase": 0, "seq": "<int>", "timestamp": "<int>", "type": "phase_complete"}, "op": "create", "path": "users/{uid}/researches/{rid}/pipeline_events"}
+{"delete_paths": [], "fields": {"deviceId": "{deviceId}", "expireAt": "<iso8601>", "phase": 1, "seq": "<int>", "timestamp": "<int>", "type": "phase_start"}, "op": "create", "path": "users/{uid}/researches/{rid}/pipeline_events"}
+{"delete_paths": [], "fields": {"deviceId": "{deviceId}", "expireAt": "<iso8601>", "phase": 1, "seq": "<int>", "timestamp": "<int>", "type": "phase_complete"}, "op": "create", "path": "users/{uid}/researches/{rid}/pipeline_events"}
+{"delete_paths": [], "fields": {"deviceId": "{deviceId}", "expireAt": "<iso8601>", "phase": 2, "seq": "<int>", "timestamp": "<int>", "type": "phase_start"}, "op": "create", "path": "users/{uid}/researches/{rid}/pipeline_events"}
+{"delete_paths": [], "fields": {"deviceId": "{deviceId}", "expireAt": "<iso8601>", "phase": 2, "seq": "<int>", "timestamp": "<int>", "type": "phase_complete"}, "op": "create", "path": "users/{uid}/researches/{rid}/pipeline_events"}
+{"delete_paths": [], "fields": {"deviceId": "{deviceId}", "expireAt": "<iso8601>", "phase": 3, "seq": "<int>", "timestamp": "<int>", "type": "phase_start"}, "op": "create", "path": "users/{uid}/researches/{rid}/pipeline_events"}
+{"delete_paths": [], "fields": {"deviceId": "{deviceId}", "expireAt": "<iso8601>", "phase": 3, "seq": "<int>", "timestamp": "<int>", "type": "phase_complete"}, "op": "create", "path": "users/{uid}/researches/{rid}/pipeline_events"}
+{"delete_paths": [], "fields": {"deviceId": "{deviceId}", "expireAt": "<iso8601>", "seq": "<int>", "timestamp": "<int>", "type": "pipeline_complete"}, "op": "create", "path": "users/{uid}/researches/{rid}/pipeline_events"}
+{"delete_paths": [], "fields": {"status": "complete"}, "op": "patch", "path": "users/{uid}/researches/{rid}"}

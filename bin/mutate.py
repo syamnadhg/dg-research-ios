@@ -503,6 +503,63 @@ MUTATIONS = [
         "test_harvest.py::test_a_zero_baseline_does_not_trigger_a_collapse_verdict",
         "an off-by-one that makes a zero baseline call a healthy 2-item harvest a collapse",
     ),
+    # ---- the P0-P3 run loop ----
+    (
+        "emubackend/pipeline.py",
+        "            if ctx.controls.stopped:",
+        "            if False:",
+        "test_pipeline.py::test_a_stop_takes_precedence_over_a_queued_phase_skip",
+        "a stopped run reporting a phase as SKIPPED — a different, untrue outcome",
+    ),
+    (
+        "emubackend/pipeline.py",
+        "            if ctx.controls.is_phase_skip_requested(phase.number):",
+        "            if False:",
+        "test_pipeline.py::test_a_skipped_phase_emits_phase_skipped_and_no_start_complete_pair",
+        "a requested phase skip being ignored and the phase body running anyway",
+    ),
+    (
+        "emubackend/pipeline.py",
+        "            if not await ctx.controls.wait_while_paused():",
+        "            if False:",
+        "test_pipeline.py::test_a_stop_during_a_park_takes_effect_at_the_park",
+        "a stop during a long park only landing after the park ends",
+    ),
+    (
+        "emubackend/pipeline.py",
+        '    deletes = ["pendingDecision"] if pd.startup_clear_field(queued=queued) else None',
+        "    deletes = None",
+        "test_pipeline.py::test_a_non_queued_start_wipes_the_decision_slot_in_the_same_patch",
+        "a new run visible alongside the previous run's decision card",
+    ),
+    (
+        "emubackend/pipeline.py",
+        "    if event_type in _CLEAR_ON and pd.should_clear(ctx.pending, scoped):",
+        "    if event_type in _CLEAR_ON:",
+        "test_pipeline.py::test_an_agent_scoped_clear_respects_the_keep_guard",
+        "the cross-agent clobber: one agent's late clear deleting another's live card",
+    ),
+    (
+        "emubackend/pipeline.py",
+        "    scoped = pd.clear_agent_scope(event_type, agent)",
+        "    scoped = agent",
+        "test_pipeline.py::test_phase_restart_clears_unconditionally_even_with_an_agent",
+        "scoping phase_restart by agent, so Retry leaves the card it just resolved on screen",
+    ),
+    (
+        "emubackend/pipeline.py",
+        '            emit_event(ctx, "pipeline_complete")',
+        "            pass",
+        "test_pipeline.py::test_a_full_p0_to_p3_run_emits_the_expected_sequence",
+        "a completed run never announcing completion, so the frontend waits forever",
+    ),
+    (
+        "emubackend/pipeline.py",
+        "            claim_mod.release_lock(worker_id, lock_dir)",
+        "            pass",
+        "test_pipeline.py::test_the_lock_is_released_even_when_the_run_fails",
+        "a retained lock making the next claim look like a live sibling, wedging the device",
+    ),
 ]
 
 
