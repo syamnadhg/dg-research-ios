@@ -8,13 +8,19 @@ import XCTest
 /// encodes the bare code, or one rendered at a fractional scale, both look correct and both fail in
 /// practice — the first because a camera has nothing to open, the second because soft module edges
 /// do not decode.
+/// ⚠ The query param is `repair`, not `pair`.
+///
+/// Verified in the frontend: `account/page.tsx` reads `searchParams.get("repair")`, uppercases it,
+/// strips non-alphanumerics and opens the pairing slot prefilled. These tests asserted `?pair=` — which
+/// the account page ignores entirely — so they passed while a scanned QR opened the right page and
+/// filled in nothing. The lesson repeats: a test can only confirm the contract you already believe.
 final class QRCodeTests: XCTestCase {
 
     func testTheQREncodesTheClaimURLNotTheBareCode() {
         // Eight characters in a QR gives a phone camera nothing to open, so the human types the
         // code anyway and the QR is decoration.
         let url = QRCode.claimURL(baseURL: "https://app.example.com", pairCode: "JPNTY4F9")
-        XCTAssertEqual(url, "https://app.example.com/account?pair=JPNTY4F9")
+        XCTAssertEqual(url, "https://app.example.com/account?repair=JPNTY4F9")
         XCTAssertNotEqual(url, "JPNTY4F9")
     }
 
@@ -23,14 +29,14 @@ final class QRCodeTests: XCTestCase {
         // perfectly and opens the wrong site.
         XCTAssertEqual(
             QRCode.claimURL(baseURL: "http://localhost:3000", pairCode: "AAAA2345"),
-            "http://localhost:3000/account?pair=AAAA2345"
+            "http://localhost:3000/account?repair=AAAA2345"
         )
     }
 
     func testATrailingSlashDoesNotProduceADoubleSlash() {
         XCTAssertEqual(
             QRCode.claimURL(baseURL: "https://app.example.com/", pairCode: "AAAA2345"),
-            "https://app.example.com/account?pair=AAAA2345"
+            "https://app.example.com/account?repair=AAAA2345"
         )
     }
 
@@ -58,7 +64,7 @@ final class QRCodeTests: XCTestCase {
 
     func testEveryCorrectionLevelProducesAScannableQR() throws {
         for level in QRCode.Correction.allCases {
-            let image = try QRCode.image(for: "https://app.example.com/account?pair=AAAA2345",
+            let image = try QRCode.image(for: "https://app.example.com/account?repair=AAAA2345",
                                         correction: level)
             XCTAssertGreaterThan(image.extent.width, 0, "level \(level.rawValue) produced nothing")
         }
@@ -67,9 +73,9 @@ final class QRCodeTests: XCTestCase {
     func testHigherCorrectionCostsModules() throws {
         // Which is why M is the default: more modules on a 402pt screen means a smaller feature
         // size, and that is what actually makes a close-range scan fail.
-        let low = try QRCode.image(for: "https://app.example.com/account?pair=AAAA2345",
+        let low = try QRCode.image(for: "https://app.example.com/account?repair=AAAA2345",
                                    correction: .low)
-        let high = try QRCode.image(for: "https://app.example.com/account?pair=AAAA2345",
+        let high = try QRCode.image(for: "https://app.example.com/account?repair=AAAA2345",
                                     correction: .high)
         XCTAssertGreaterThanOrEqual(high.extent.width, low.extent.width)
     }
