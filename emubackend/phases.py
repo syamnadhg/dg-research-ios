@@ -233,13 +233,36 @@ class PlatformDriver:
         )
 
     async def enable_deep_research(self) -> intents.IntentOutcome | None:
+        """Ensure deep research is ON. **Idempotent** — this is not "tap the toggle".
+
+        ⚠ The distinction is the whole correctness of this step, and getting it wrong is silent.
+        Deep-research state **persists across sessions** on the real platforms, and persistent login is
+        the entire premise of this initiative — so the second run of any device finds the toggle already
+        on. An unconditional tap then switches it **OFF**; the on-predicate correctly fails; escalation
+        is correctly not permitted (shadow-only), so nothing recovers it; and the run proceeds to do a
+        full P0–P3 with deep research disabled while reporting success. The output is a shallow answer
+        that looks like a normal one.
+
+        Found by running the e2e a second time — the first run left the mock's toggle on, exactly as a
+        real platform would. It is invisible to a single run against fresh state, which is what every
+        earlier run of this gate was.
+        """
         for key in ("deep_research_toggle", "research_toggle"):
-            if key in self.deps.manifest.platforms.get(self.platform, {}):
-                return await intents.guarded_intent(
-                    self.deps.registry,
-                    f"{self.platform}.{key}",
-                    lambda k=key: self._tap(k),
+            if key not in self.deps.manifest.platforms.get(self.platform, {}):
+                continue
+            # Checked before acting, with the same predicate that would judge the action. Reusing it
+            # means the "already on" test cannot drift from the "is it on now" test.
+            if await self._toggle_on_predicate(key)():
+                return intents.IntentOutcome(
+                    intent_id=f"{self.platform}.{key}",
+                    predicate_passed=True,
+                    reason="already enabled — not tapped, because tapping would disable it",
                 )
+            return await intents.guarded_intent(
+                self.deps.registry,
+                f"{self.platform}.{key}",
+                lambda k=key: self._tap(k),
+            )
         return None
 
     async def harvest_sources(self) -> harvest.HarvestVerdict:

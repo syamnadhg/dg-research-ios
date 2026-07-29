@@ -143,10 +143,19 @@ async def run(udid: str, skip_reboot: bool) -> dict:
         after = await page.evaluate(
             "document.querySelector('[data-testid=\"deep-research-toggle\"]').getAttribute('aria-pressed')"
         )
+        # Asserted as "ends ON", not "flipped from off to on".
+        #
+        # ⚠ The old assertion — `before == "false" and after == "true"` — silently required a FRESH
+        # page, and that requirement is what hid a real bug for every run of this gate. Toggle state
+        # persists across sessions on the real platforms (persistent login is the whole premise), so
+        # the second run finds it already on; the step then tapped it OFF and the gate reported a
+        # failure that looked like a flaky tap rather than an idempotence defect. A gate that only
+        # passes from one starting state is a gate that cannot see the second run.
         record(
-            "deep-research toggle flipped by a trusted tap",
-            before == "false" and after == "true" and outcome is not None,
-            f"aria-pressed {before} -> {after}, predicate_passed={outcome and outcome.predicate_passed}",
+            "deep research ends ENABLED, from either starting state",
+            after == "true" and outcome is not None and outcome.predicate_passed,
+            f"aria-pressed {before} -> {after}, predicate_passed={outcome and outcome.predicate_passed}"
+            + (" (already on; correctly not tapped)" if before == "true" else ""),
         )
 
         # --- P1/P2: type via the editor-aware path, then send -------------------
