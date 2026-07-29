@@ -11,7 +11,7 @@ backend is a **read-only** dependency, reached through `emubackend.berepo`.
 This is enforced, not merely stated:
 
 ```bash
-PYTHONPATH=. .venv/bin/python -m pytest emubackend/tests -q      # 44 tests
+PYTHONPATH=. .venv/bin/python -m pytest emubackend/tests -q      # 73 tests
 PYTHONPATH=. .venv/bin/python -c "from emubackend import purity; purity.assert_pristine()"
 ```
 
@@ -29,8 +29,13 @@ because those are `.gitignore`d in the backend, so a write there is invisible to
 | `emubackend/substrate/iwdp.py` | DOM/read channel — WebKit remote inspector via `ios_webkit_debug_proxy` |
 | `emubackend/substrate/hid.py` | trusted-input channel — AXe |
 | `emubackend/substrate/geometry.py` | CSS-pixel → screen-point mapping, measured not assumed |
-| `emubackend/contract/` | (B1) vendored Firestore-contract layer |
+| `emubackend/substrate/runtime_js.py` | the injected in-page runtime (`window.__sr`) |
+| `emubackend/substrate/backend.py` | `BrowserBackend` ABC + `IOSSimulatorBackend` |
+| `emubackend/substrate/page_shim.py` | the Playwright-`Page`-shaped surface ported code calls |
+| `emubackend/contract/` | ⏳ **not yet written** — the vendored Firestore-contract layer |
 | `bin/b0a_gate.py` | the B0a substrate gate |
+| `bin/b1_smoke.py` | the B1 seam smoke test |
+| `bin/mutate.py` | the mutation harness (every guard must be provably breakable) |
 | `fixtures/b0a/` | the probe page |
 | `docs/FIRESTORE_CONTRACT.md` | the executable spec for pairing / queue / events |
 | `docs/DEVIATIONS.md` | where and why this repo departs from `EmulatorRecipe.md` |
