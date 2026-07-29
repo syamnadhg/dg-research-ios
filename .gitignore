@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+
+# B0a / substrate run artifacts — captured DOM, screenshots, IWDP logs.
+artifacts/
+*.log
+
+# Never commit credentials or the Firebase iOS config (it carries an API key).
+GoogleService-Info.plist
+*.mobileprovision
+*.p8
+*.p12
+secrets/
+
+# Xcode
+ios/**/xcuserdata/
+ios/**/*.xcworkspace/xcuserdata/
+DerivedData/

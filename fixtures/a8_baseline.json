@@ -1,0 +1,25 @@
+{
+  "dg-research": {
+    "head": "7073d25290c606e6f65be0d4aaf03170755dead8",
+    "ignored_digests": {},
+    "name": "dg-research",
+    "tracked_changes": [],
+    "untracked": []
+  },
+  "dg-research-backend": {
+    "head": "36817f023569f214d52296d5eba165a45faf3e79",
+    "ignored_digests": {
+      "build": "911e9095a33d723288b37742eb7b20a6cacc4b489eac47003bd638eee361744f",
+      "dist": "4ae6d97c972ee325b7e6ffc5301f2effff8f65bc4658e7ca9f8df1d5c5e3c2ad",
+      "superresearch.egg-info": "42b5630a61cfe6039ffc709475d33844ab9e13a5043dc0d5e838288502006af6"
+    },
+    "name": "dg-research-backend",
+    "tracked_changes": [],
+    "untracked": [
+      ".DS_Store",
+      ".claude/",
+      "agent/uv.lock",
+      "uv.lock"
+    ]
+  }
+}

@@ -1,0 +1,57 @@
+# Super Research — iOS track (dg-research-ios)
+#
+# ⛔ A8 (the hardest constraint in EmulatorRecipe.md §0.5): dg-research-backend and
+# dg-research are NOT modified by this repo. Not a line. The BE is a READ-ONLY
+# dependency, reached via emubackend.berepo (a sys.path injection), NOT via
+# `pip install -e ../dg-research-backend`.
+#
+# Why not the editable install the recipe specifies: the BE's build backend is
+# setuptools, so `pip install -e` runs that backend *inside* the BE checkout and
+# regenerates `superresearch.egg-info/`. The production daemon runs from that same
+# checkout. See emubackend/berepo.py for the full rationale and docs/DEVIATIONS.md.
+#
+# ⚠ NAMESPACE HAZARD. With the BE checkout on sys.path these top-level names are
+# claimed and MUST NOT be defined here:
+#     research  models  prompts  vision  vision_test  narrate  selfheal  auth  scripts
+# and these BE directories are plain (no __init__.py), so reusing their names would
+# create a merged implicit namespace package — also forbidden here:
+#     tests  tools  agent
+# Everything this repo owns therefore lives under the single `emubackend` package.
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dg-research-ios"
+version = "0.0.1"
+description = "Super Research iOS track: Simulator browser substrate, vendored Firestore contract layer, and the native app."
+requires-python = ">=3.11"
+authors = [{ name = "Distributed Global" }]
+
+# Deliberately minimal. `import research` needs only the BE-local `models` and
+# `prompts` at module level (verified by AST over research.py's module body — every
+# other module-level import is stdlib), so reaching the BE's importable surface costs
+# no third-party dependency at all.
+#
+# These are the deps the BE's *importable* helpers (auth/, selfheal.py) actually need,
+# declared here rather than inherited from the BE so the BE is never installed.
+dependencies = [
+    "requests>=2.32",
+    "google-cloud-firestore>=2.16",
+    "google-auth>=2.30",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "websocket-client>=1.7",   # IWDP page sockets (B0a DOM channel)
+]
+
+[tool.setuptools.packages.find]
+include = ["emubackend*"]
+
+[tool.pytest.ini_options]
+testpaths = ["emubackend/tests"]
+# Keep the BE checkout out of collection even if it lands on sys.path.
+norecursedirs = ["../dg-research-backend", "../dg-research", "ios", "fixtures"]

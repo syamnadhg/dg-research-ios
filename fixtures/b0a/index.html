@@ -1,0 +1,96 @@
+<!doctype html>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>B0a substrate probe</title>
+<style>
+  html, body { margin: 0; padding: 0; font: 16px/1.4 -apple-system, system-ui, sans-serif; }
+  #calib { position: fixed; inset: 0; background: #eef; z-index: 9999; }
+  #calib.off { display: none; }
+  .target { display: block; width: 220px; height: 64px; margin: 24px auto;
+            background: #2a6; color: #fff; border: 0; font-size: 18px; border-radius: 10px; }
+  .spacer { height: 1400px; background: linear-gradient(#fff, #ddd); }
+  #inp { display: block; width: 260px; margin: 24px auto; font-size: 18px; padding: 10px; }
+  #log { font: 12px/1.3 ui-monospace, monospace; white-space: pre-wrap; padding: 8px; }
+</style>
+
+<div id="calib">calibration surface</div>
+
+<h2 style="text-align:center">B0a</h2>
+<button class="target" id="t1">T1 plain</button>
+<input id="inp" placeholder="focus me (keyboard)">
+<button class="target" id="t3">T3 keyboard-open</button>
+<div class="spacer"></div>
+<button class="target" id="t2">T2 after scroll</button>
+<div class="spacer"></div>
+<div id="log"></div>
+
+<script>
+// The probe surface the host harness reads over IWDP `Runtime.evaluate`.
+//
+// The one assertion that matters here is `isTrusted`. A synthetic event dispatched from
+// injected JS reports isTrusted === false, and the chat SPAs this pipeline drives reject
+// exactly those. So a tap that arrives with isTrusted === true is the whole point of the
+// gate: it proves the AXe HID channel reaches real MobileSafari, not that some JS ran.
+window.__b0a = {
+  events: [],
+  ready: true,
+  // Recorded for every event so the host can tell *why* a mapping was off rather than
+  // just that it was: URL-bar collapse, pinch-zoom and keyboard insets all show up here.
+  viewport: function () {
+    var vv = window.visualViewport || {};
+    return {
+      innerWidth: window.innerWidth,
+      innerHeight: window.innerHeight,
+      dpr: window.devicePixelRatio,
+      scrollX: window.scrollX,
+      scrollY: window.scrollY,
+      vvWidth: vv.width, vvHeight: vv.height,
+      vvOffsetLeft: vv.offsetLeft, vvOffsetTop: vv.offsetTop,
+      vvPageLeft: vv.pageLeft, vvPageTop: vv.pageTop,
+      vvScale: vv.scale
+    };
+  },
+  rect: function (id) {
+    var el = document.getElementById(id);
+    if (!el) return null;
+    var r = el.getBoundingClientRect();
+    return { id: id, left: r.left, top: r.top, width: r.width, height: r.height,
+             cx: r.left + r.width / 2, cy: r.top + r.height / 2 };
+  },
+  reset: function () { this.events = []; return true; },
+  calib: function (on) {
+    document.getElementById('calib').className = on ? '' : 'off';
+    return true;
+  },
+  focusInput: function () { document.getElementById('inp').focus(); return document.activeElement.id; },
+  blurInput: function () { document.activeElement && document.activeElement.blur(); return true; }
+};
+
+function record(e) {
+  // TouchEvent has no clientX/clientY of its own — the coordinates live on
+  // touches[0]. Reading e.clientX blindly yields undefined for touchstart, which
+  // then reads as "no coordinate captured" rather than "wrong event shape".
+  var cx = e.clientX, cy = e.clientY, px = e.pageX, py = e.pageY;
+  if (cx === undefined && e.touches && e.touches.length) {
+    cx = e.touches[0].clientX; cy = e.touches[0].clientY;
+    px = e.touches[0].pageX;   py = e.touches[0].pageY;
+  }
+  window.__b0a.events.push({
+    type: e.type,
+    isTrusted: e.isTrusted,
+    clientX: cx === undefined ? null : cx,
+    clientY: cy === undefined ? null : cy,
+    pageX: px === undefined ? null : px,
+    pageY: py === undefined ? null : py,
+    targetId: (e.target && e.target.id) || (e.target && e.target.tagName) || '?',
+    viewport: window.__b0a.viewport(),
+    t: Date.now()
+  });
+  var l = document.getElementById('log');
+  if (l) l.textContent = JSON.stringify(window.__b0a.events.slice(-4), null, 1);
+}
+
+// Capture phase on the document so nothing can stop propagation before we see it.
+['pointerdown', 'touchstart', 'click'].forEach(function (t) {
+  document.addEventListener(t, record, true);
+});
+</script>
