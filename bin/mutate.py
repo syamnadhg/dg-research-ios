@@ -338,6 +338,63 @@ MUTATIONS = [
         "test_fixtures.py::test_every_difference_is_reported_not_just_the_first",
         "ignoring fields that are missing or extra rather than merely different",
     ),
+    # ---- wrapped intents (phase A1) ----
+    (
+        "emubackend/intents.py",
+        '    return observation_enabled() and os.environ.get("DG_IOS_SELFHEAL_ACT") == "1"',
+        '    return os.environ.get("DG_IOS_SELFHEAL_ACT") == "1"',
+        "test_intents.py::test_act_requires_both_flags",
+        "ACT alone arming the actor, so turning observation on could arm actions",
+    ),
+    (
+        "emubackend/intents.py",
+        "        if not act_enabled():",
+        "        if False:",
+        "test_intents.py::test_the_wrapper_is_a_no_op_with_flags_off",
+        "the wrapper acting with flags off - the recipe's explicit gate for A1 existing",
+    ),
+    (
+        "emubackend/intents.py",
+        "        if not status.baked:",
+        "        if False:",
+        "test_intents.py::test_an_unbaked_predicate_may_log_but_never_escalate",
+        "an unbaked predicate escalating an agent onto a possibly-healthy page",
+    ),
+    (
+        "emubackend/intents.py",
+        "            not self.poisoned\n            and self.false_positives == 0",
+        "            self.false_positives == 0",
+        "test_intents.py::test_the_poisoned_flag_blocks_a_bake_on_its_own",
+        "the poisoned invariant collapsing into the counter, so a future counter reset rehabilitates a wolf-crier",
+    ),
+    (
+        "emubackend/intents.py",
+        "    if off_error is not None or not off_confirmed:",
+        "    if False:",
+        "test_intents.py::test_an_unconfirmed_off_signal_refuses_the_action",
+        "the #709 guard gone - a false-negative predicate switching a live control OFF",
+    ),
+    (
+        "emubackend/intents.py",
+        "    if pred_error is not None:",
+        "    if False:",
+        "test_intents.py::test_a_broken_predicate_does_not_manufacture_a_failure",
+        "a raising predicate manufacturing a failure and escalating onto a fine page",
+    ),
+    (
+        "emubackend/intents.py",
+        "    outcome.healed = bool(reverified) and reverify_error is None",
+        "    outcome.healed = True",
+        "test_intents.py::test_a_heal_that_ran_but_did_not_work_is_not_reported_as_healed",
+        "reporting 'the heal ran' as 'the heal worked'",
+    ),
+    (
+        "emubackend/intents.py",
+        "        if not intent.escalation_eligible:",
+        "        if False:",
+        "test_intents.py::test_shadow_only_forever_is_a_valid_resting_state",
+        "acting on an intent with no positive off-signal or no reversibility",
+    ),
 ]
 
 
