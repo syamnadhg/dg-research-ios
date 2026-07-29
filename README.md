@@ -86,3 +86,46 @@ python bin/b0a_gate.py --udid <UDID>        # writes artifacts/b0a/verdict.json
 Plus one operational rule: **never hard-stop a Simulator straight after a login.** Cookies
 take a few seconds to reach `Cookies.binarycookies`; `simctl shutdown` before the flush loses
 the session, which is indistinguishable from "the session did not persist".
+
+## B1 — the seam: **built and proven on device** (2026-07-29)
+
+`bin/b1_smoke.py` → **16/16 PASS** against a real Simulator (`artifacts/b1/smoke.json`):
+runtime injection + idempotent re-injection, real mobile viewport, the handle registry, a
+**trusted** `PageShim` click landing on the intended element, the calibration overlay cleaned
+up afterwards, editor-aware `fill()`, a detached handle raising, and gesture scroll
+invalidating the calibration.
+
+**The trap this phase found — no desktop analogue.** IWDP will `Runtime.evaluate` in a
+**background** MobileSafari tab, but AXe taps only reach the **foreground** one. A tap computed
+from a background tab's DOM therefore lands on different content *and reports success*, and
+nothing else in the stack notices. Every input path asserts foreground first. The consequence
+for the P2 tab model is concrete: **one Simulator per platform, or strictly sequential
+single-tab** — `switch_to` and `open_isolated_tab` are `BackendUnsupported`, because
+MobileSafari's tab switcher is UI-only.
+
+**Degraded on purpose**, each raising `BackendUnsupported` with the alternative named: private
+tabs, tab switching, **host→guest file upload** (no `DOM.setFileInputFiles` equivalent, and a
+real `<input type=file>` tap opens the native document picker — so NotebookLM source upload
+stays on the desktop backend), download capture, OS clipboard (in-page `copy` interception
+only), and `mouse.move` (touch has no hover).
+
+### Still owed for B1
+
+- the vendored `emubackend/contract/` layer — **one** cohesive copy, never N one-off helpers
+- `auth/` vendored with its three hardcoded path constants parameterized (A10)
+- the golden-fixture capture harness — start early, fixtures accrue at 1–3 runs/week
+
+The spec for all three is `docs/FIRESTORE_CONTRACT.md`; none of it needs re-deriving from the
+backend.
+
+## Testing
+
+```bash
+PYTHONPATH=. .venv/bin/python -m pytest emubackend/tests -q   # 73 tests
+python bin/mutate.py                                          # 18 mutations, all must be CAUGHT
+python bin/b0a_gate.py --udid <UDID>                          # substrate gate, needs a Simulator
+python bin/b1_smoke.py --udid <UDID>                          # seam smoke, needs a Simulator
+```
+
+Every guard here protects against a specific silent-failure mode, so `bin/mutate.py` breaks
+each one and asserts the matching test turns red. A guard nobody proved can fail is decoration.
