@@ -467,6 +467,42 @@ MUTATIONS = [
         "test_controls_and_claim.py::test_our_own_lock_does_not_block_us",
         "our own lock blocking us, so a resume can never proceed",
     ),
+    # ---- harvest-shaped predicates (read drift) ----
+    (
+        "emubackend/harvest.py",
+        "        if count < max(1, int(baseline * collapse_ratio)):",
+        "        if False:",
+        "test_harvest.py::test_a_near_total_collapse_is_caught_even_though_it_is_non_empty",
+        "the P1 shape: 1 source where 40 are expected, which non_empty passes happily",
+    ),
+    (
+        "emubackend/harvest.py",
+        "    if count >= 3 and distinct == 1:",
+        "    if False:",
+        "test_harvest.py::test_identical_items_indicate_one_node_matched_repeatedly",
+        "a selector matching one node repeatedly reading as a full harvest",
+    ),
+    (
+        "emubackend/harvest.py",
+        "    if not usable:",
+        "    if False:",
+        "test_harvest.py::test_items_that_are_all_unusable_fail_even_at_a_healthy_count",
+        "40 empty strings counting as 40 sources",
+    ),
+    (
+        "emubackend/harvest.py",
+        "        history.record(point, 0)\n        return HarvestVerdict(False, \"empty harvest\", 0, baseline)",
+        '        return HarvestVerdict(False, "empty harvest", 0, baseline)',
+        "test_harvest.py::test_a_failing_harvest_is_still_recorded_so_zero_cannot_become_normal",
+        "an all-zero run never establishing a baseline, so zero later looks healthy",
+    ),
+    (
+        "emubackend/harvest.py",
+        "        if count < max(1, int(baseline * collapse_ratio)):",
+        "        if count <= max(1, int(baseline * collapse_ratio)):",
+        "test_harvest.py::test_a_zero_baseline_does_not_trigger_a_collapse_verdict",
+        "an off-by-one that makes a zero baseline call a healthy 2-item harvest a collapse",
+    ),
 ]
 
 
