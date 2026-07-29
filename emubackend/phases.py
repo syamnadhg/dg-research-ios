@@ -113,6 +113,19 @@ class PlatformDriver:
         return bool(active)
 
     async def response_present(self) -> bool:
+        """The send's outcome predicate: was the send ACCEPTED — not, did the response finish.
+
+        ⚠ **This distinction was found by running against a real Simulator, and the fake-substrate
+        tests could not have found it, because the fake had no latency.** A response arrives
+        hundreds of milliseconds to minutes after the tap. A predicate that asserts *completion*
+        therefore cannot be true at the moment it is evaluated, so it reports a **false failure on
+        every single run** — and with acting enabled it would escalate an agent onto a perfectly
+        healthy page every time, which is the precise failure mode the recipe calls worse than the
+        crash it replaces.
+
+        So ``response_container`` must match the container in **any** state (running, streaming,
+        complete). Waiting for completion is a separate, explicit wait — not this predicate's job.
+        """
         return await self._present("response_container")
 
     # -- intents -----------------------------------------------------------------

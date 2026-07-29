@@ -1,0 +1,96 @@
+<!doctype html>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Mock Platform</title>
+<style>
+  html, body { margin: 0; font: 16px/1.4 -apple-system, system-ui, sans-serif; }
+  header { padding: 10px 14px; background: #f3f3f5; font-weight: 600; }
+  main { padding: 14px; }
+  #composer { min-height: 72px; border: 1px solid #bbb; border-radius: 10px; padding: 10px;
+              font-size: 17px; }
+  #send { margin-top: 10px; width: 100%; height: 48px; font-size: 17px; border-radius: 10px;
+          border: 0; background: #2a6; color: #fff; }
+  #send[disabled] { background: #ccc; }
+  #dr { margin-top: 10px; height: 40px; border-radius: 8px; border: 1px solid #888; background: #fff; }
+  #dr[aria-pressed="true"] { background: #2a6; color: #fff; }
+  #response { margin-top: 14px; min-height: 40px; }
+  .spacer { height: 900px; }
+  #sources { margin-top: 12px; }
+  .src { padding: 6px 0; border-bottom: 1px solid #eee; }
+</style>
+
+<header id="signed-in-marker">Mock Platform — signed in as tester</header>
+<main>
+  <!-- A contenteditable composer, so the run must use the execCommand path. Setting
+       .textContent leaves `model` empty and the send button disabled — which is exactly how a real
+       ProseMirror composer behaves, and the reason PageShim.fill() exists. -->
+  <div id="composer" contenteditable="true" data-testid="composer" role="textbox"
+       aria-label="Message composer"></div>
+
+  <button id="dr" data-testid="deep-research-toggle" aria-pressed="false"
+          aria-label="Deep research">Deep research</button>
+
+  <button id="send" data-testid="send-button" aria-label="Send" disabled>Send</button>
+
+  <div class="spacer"></div>
+  <div id="response" data-testid="response-container"></div>
+  <div id="sources"></div>
+</main>
+
+<script>
+// A deliberately faithful mock of the behaviours that break automation, so a run against it
+// exercises the same code paths a real platform would.
+(function () {
+  var model = "";                       // the composer's internal model, like ProseMirror's
+  var composer = document.getElementById('composer');
+  var send = document.getElementById('send');
+  var dr = document.getElementById('dr');
+
+  // ⚠ The send button is gated on the MODEL, not on the DOM text. Assigning textContent from
+  // script therefore leaves it disabled — the failure that makes a run look like the page is
+  // ignoring you. Only a real edit (execCommand('insertText') or typing) updates the model.
+  composer.addEventListener('input', function () {
+    model = composer.textContent || "";
+    send.disabled = model.trim().length === 0;
+  });
+
+  dr.addEventListener('click', function () {
+    dr.setAttribute('aria-pressed', dr.getAttribute('aria-pressed') === 'true' ? 'false' : 'true');
+  });
+
+  send.addEventListener('click', function () {
+    if (send.disabled) { return; }
+    var deep = dr.getAttribute('aria-pressed') === 'true';
+    document.getElementById('response').setAttribute('data-state', 'running');
+
+    // Responses and sources arrive LATE, as they do in reality — so the run has to wait for them
+    // rather than reading straight after the tap.
+    setTimeout(function () {
+      document.getElementById('response').textContent =
+        (deep ? 'Deep research result for: ' : 'Answer for: ') + model;
+      document.getElementById('response').setAttribute('data-state', 'complete');
+
+      // ⚠ Sources render as plain DIVs, NOT <a href> — reproducing the P1 raw-activity incident,
+      // where every click landed and extraction returned 0 all run because the panel rendered
+      // sources as non-anchors. A harvest that only looks for links finds nothing here.
+      var box = document.getElementById('sources');
+      box.innerHTML = '';
+      var n = deep ? 12 : 3;
+      for (var i = 0; i < n; i++) {
+        var d = document.createElement('div');
+        d.className = 'src';
+        d.setAttribute('data-testid', 'source');
+        d.textContent = 'Source ' + (i + 1) + ' — Journal of Mock Studies, 202' + (i % 5);
+        box.appendChild(d);
+      }
+    }, 700);
+  });
+
+  // A persisted login marker, so a Simulator reboot can be checked for session survival.
+  try {
+    if (!document.cookie.match(/mock_session=/)) {
+      document.cookie = 'mock_session=tester; path=/; max-age=86400';
+    }
+    window.__mockSession = (document.cookie.match(/mock_session=([^;]+)/) || [])[1] || null;
+  } catch (e) { window.__mockSession = null; }
+})();
+</script>

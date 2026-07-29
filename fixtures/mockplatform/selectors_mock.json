@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "surface": "ios-mobile-safari",
+  "platforms": {
+    "chatgpt": {
+      "logged_in_marker": {
+        "css": [
+          "#signed-in-marker"
+        ],
+        "provenance": "mock-platform fixture"
+      },
+      "composer": {
+        "css": [
+          "[data-testid=\"composer\"]",
+          "div[contenteditable=true]"
+        ],
+        "provenance": "mock-platform fixture"
+      },
+      "send": {
+        "css": [
+          "[data-testid=\"send-button\"]"
+        ],
+        "provenance": "mock-platform fixture"
+      },
+      "deep_research_toggle": {
+        "css": [
+          "[data-testid=\"deep-research-toggle\"]"
+        ],
+        "provenance": "mock-platform fixture"
+      },
+      "activity_panel": {
+        "css": [
+          "#response"
+        ],
+        "provenance": "mock-platform fixture"
+      },
+      "sources": {
+        "css": [
+          "[data-testid=\"source\"]"
+        ],
+        "provenance": "mock-platform fixture \u2014 renders as DIVs, not <a href>, reproducing P1"
+      },
+      "response_container": {
+        "css": [
+          "[data-testid=\"response-container\"][data-state]"
+        ],
+        "provenance": "mock-platform fixture \u2014 matches ANY data-state, because a send's predicate must assert the send was ACCEPTED, not that the response finished. Gating on data-state=complete made the predicate report a false failure on every run: the response arrives ~700ms later."
+      }
+    }
+  }
+}
