@@ -7,6 +7,10 @@
     "firestore": {
       "port": 8181
     },
+    "//": "Auth is here so signInWithCustomToken can be exercised too. The emulator does not verify a custom token's signature and it propagates custom claims into the resulting ID token — which is what lets the deviceId claim the rules read (15 times) be tested with no credentials.",
+    "auth": {
+      "port": 9199
+    },
     "ui": {
       "enabled": false
     },

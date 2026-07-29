@@ -30,14 +30,53 @@ public struct FirebaseProjectConfig: Sendable, Equatable {
     /// Frontend origin, for `/api/devices/initiate-pair` and the QR's claim URL.
     public let apiBaseURL: URL
 
-    public init(projectID: String, apiKey: String, apiBaseURL: URL) {
+    /// `host:port` of the Firebase emulator suite, when pointing at it instead of production.
+    ///
+    /// Present so this client can be verified against the **real `firestore.rules`** with no
+    /// credentials — the rules are the contract, so a write they accept is a write the project accepts.
+    /// Without an injectable host the REST layer could only ever be tested against stubs, which proves
+    /// the code agrees with my idea of the API rather than with the API.
+    ///
+    /// `nil` in production. There is deliberately no environment-variable fallback inside this type: a
+    /// client that could be redirected to another host by ambient configuration is a client that could
+    /// be redirected by anything that can set an environment variable.
+    public let emulatorHost: String?
+
+    public init(
+        projectID: String, apiKey: String, apiBaseURL: URL, emulatorHost: String? = nil
+    ) {
         self.projectID = projectID
         self.apiKey = apiKey
         self.apiBaseURL = apiBaseURL
+        self.emulatorHost = emulatorHost
     }
 
     var documentsRoot: String {
-        "https://firestore.googleapis.com/v1/projects/\(projectID)/databases/(default)/documents"
+        let base = emulatorHost.map { "http://\($0)/v1" }
+            ?? "https://firestore.googleapis.com/v1"
+        return "\(base)/projects/\(projectID)/databases/(default)/documents"
+    }
+
+    /// Identity Toolkit's base, which the emulator serves on its **own** port — not Firestore's.
+    var identityRoot: String {
+        emulatorAuthHost.map { "http://\($0)/identitytoolkit.googleapis.com/v1" }
+            ?? "https://identitytoolkit.googleapis.com/v1"
+    }
+
+    /// Secure Token (refresh) shares the Auth emulator's port but a different path prefix.
+    var secureTokenRoot: String {
+        emulatorAuthHost.map { "http://\($0)/securetoken.googleapis.com/v1" }
+            ?? "https://securetoken.googleapis.com/v1"
+    }
+
+    /// The Auth emulator's authority, derived from the Firestore one.
+    ///
+    /// Derived rather than configured separately because the two always run together in the suite, and
+    /// a second knob would just be a second thing to get out of step.
+    private var emulatorAuthHost: String? {
+        guard let emulatorHost else { return nil }
+        let host = emulatorHost.split(separator: ":").first.map(String.init) ?? emulatorHost
+        return "\(host):9199"
     }
 }
 
@@ -191,7 +230,7 @@ public actor FirestoreREST {
     public func signIn(customToken: String) async throws {
         let body: [String: Any] = ["token": customToken, "returnSecureToken": true]
         let json = try await postJSON(
-            url: "https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken",
+            url: "\(config.identityRoot)/accounts:signInWithCustomToken",
             body: body
         )
         guard let id = json["idToken"] as? String else {
@@ -213,7 +252,7 @@ public actor FirestoreREST {
         guard let deadline = expiry, clock().addingTimeInterval(60) >= deadline else { return }
 
         var request = URLRequest(
-            url: URL(string: "https://securetoken.googleapis.com/v1/token?key=\(config.apiKey)")!
+            url: URL(string: "\(config.secureTokenRoot)/token?key=\(config.apiKey)")!
         )
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
