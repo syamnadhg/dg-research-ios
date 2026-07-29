@@ -395,6 +395,78 @@ MUTATIONS = [
         "test_intents.py::test_shadow_only_forever_is_a_valid_resting_state",
         "acting on an intent with no positive off-signal or no reversibility",
     ),
+    # ---- orchestration invariants ----
+    (
+        "emubackend/controls.py",
+        "        return self.pause_event.is_set() and not self.resume_event.is_set() and not self.stopped",
+        "        return self.pause_event.is_set() and not self.resume_event.is_set()",
+        "test_controls_and_claim.py::test_resume_must_not_revive_a_stopped_run",
+        "a stopped run still reading as paused, so a Resume tap restarts ended work",
+    ),
+    (
+        "emubackend/controls.py",
+        "        if self.stopped:\n            return\n        self.pause_event.clear()",
+        "        if False:\n            return\n        self.pause_event.clear()",
+        "test_controls_and_claim.py::test_resume_must_not_revive_a_stopped_run",
+        "Resume reviving a stopped run - a duplicated pipeline",
+    ),
+    (
+        "emubackend/controls.py",
+        "        if origin == SkipOrigin.USER_TAP:",
+        "        if True:",
+        "test_controls_and_claim.py::test_only_a_real_tap_counts_as_a_user_skip",
+        "the 2026-07-11 incident: an internal marker reported as a user decision, retracting the honest card",
+    ),
+    (
+        "emubackend/controls.py",
+        '        if target and target != (agent or "").lower():',
+        "        if False:",
+        "test_controls_and_claim.py::test_a_targeted_decision_cannot_be_stolen_by_another_agents_park",
+        "one agent's park stealing a decision addressed to another",
+    ),
+    (
+        "emubackend/controls.py",
+        "        self.awaiting_user = False\n        self.pending_agent_decision = None",
+        "        self.pending_agent_decision = None",
+        "test_controls_and_claim.py::test_reset_clears_awaiting_user_or_the_next_runs_watchdog_never_fires",
+        "a stale awaiting_user so the NEXT run's watchdog never fires - an absent safety net",
+    ),
+    (
+        "emubackend/controls.py",
+        "        return not self.awaiting_user",
+        "        return True",
+        "test_controls_and_claim.py::test_waiting_on_a_human_does_not_count_as_active_time",
+        "the watchdog killing a legitimate wait-for-the-user as 'stuck'",
+    ),
+    # ---- claim sentinel ----
+    (
+        "emubackend/claim.py",
+        '    for guarded in ("dg-research-backend", "dg-research"):',
+        "    for guarded in ():",
+        "test_controls_and_claim.py::test_the_lock_dir_inside_a_guarded_repo_is_refused",
+        "writing worker locks into the BE checkout's queues/, which the daemon scans",
+    ),
+    (
+        "emubackend/claim.py",
+        "        if age > PID_REUSE_MAX_AGE_MS:",
+        "        if False:",
+        "test_controls_and_claim.py::test_a_live_pid_with_an_ancient_claim_is_a_recycled_pid_not_a_live_claim",
+        "a recycled PID reading as a live claim forever, wedging the worker",
+    ),
+    (
+        "emubackend/claim.py",
+        "        if not alive:",
+        "        if False:",
+        "test_controls_and_claim.py::test_a_dead_pid_makes_the_lock_stale",
+        "a crashed worker's lock blocking every future claim",
+    ),
+    (
+        "emubackend/claim.py",
+        "        if wid == self_worker_id:\n            continue",
+        "        if False:\n            continue",
+        "test_controls_and_claim.py::test_our_own_lock_does_not_block_us",
+        "our own lock blocking us, so a resume can never proceed",
+    ),
 ]
 
 
