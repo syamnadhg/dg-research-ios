@@ -63,6 +63,27 @@ cd ios              && swift test    # 53 tests, offline, no plist
 cd ios/FirebaseGlue && swift build   # needs network + a resolved firebase-ios-sdk
 ```
 
+### Verification status of the Firebase glue — measured, not guessed
+
+| | |
+|---|---|
+| Syntax (`swiftc -parse`) | ✅ **clean** — the file is valid Swift |
+| API signatures | ❌ **unverified** — needs the SDK |
+| The *sequence* it drives | ✅ **tested** against a fake (`PairingCoordinatorTests`, 11 tests) |
+
+**The SDK could not be fetched here, and that is settled rather than assumed** — two independent
+attempts, both failing on the network:
+
+1. `swift package resolve` — a full-history fetch of `firebase-ios-sdk` (~416k objects) that did not
+   complete.
+2. `git clone --depth 1 --branch 11.15.0` — died at ~6 MB with
+   `fatal: early EOF / fetch-pack: invalid index-pack output`.
+
+So do not spend time retrying it on a constrained connection; run `swift build` where the network is
+good. What remains unverified is **argument labels and async-ness on about a dozen well-known calls**,
+listed in the header of `FirebasePairingBackend.swift` — not the logic, which is tested, and not the
+syntax, which parses.
+
 ### The one genuinely open question
 
 Whether the Firestore **iOS SDK** will issue a `getDocument` with no signed-in user, or insists on at

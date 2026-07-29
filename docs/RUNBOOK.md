@@ -75,9 +75,12 @@ Then:
 cd dg-research-ios/ios/FirebaseGlue && swift build   # needs network for the SDK fetch
 ```
 
-⚠ That package has **never been built** — the SDK could not be fetched in the environment this was
-written in. Expect at most a signature fix or two; the API surface it uses is listed in the header of
-`FirebasePairingBackend.swift`, and the *sequence* it drives is already tested against a fake.
+⚠ That package has **never been built**, and the SDK's unavailability here is settled rather than
+assumed — two independent attempts both died on the network (`swift package resolve` on ~416k objects,
+and `git clone --depth 1` failing at ~6 MB with `fatal: early EOF`). It **does** parse cleanly
+(`swiftc -parse`), and the *sequence* it drives is tested against a fake, so what is unverified is
+**argument labels and async-ness on about a dozen well-known calls** — listed in the header of
+`FirebasePairingBackend.swift`. Expect at most a signature fix or two, on a good connection.
 
 ### The one open question it will answer
 
