@@ -23,7 +23,10 @@ struct OpResult {
 
 struct ConnectedUser: Identifiable, Hashable {
     let id: String
-    let email: String
+    /// What to show for this person. Named `label`, not `email`, because the device tree stores **uids**
+    /// — the frontend is what resolves them to addresses. Calling the field `email` invited filling it
+    /// with something email-shaped that isn't one.
+    let label: String
     let isOwner: Bool
 }
 
@@ -135,8 +138,8 @@ final class PreviewBackend: AppBackend {
             backendVersion: "0.1.12",
             bridgeReachable: false,
             users: [
-                ConnectedUser(id: "u1", email: "sammy.guli@distributedglobal.com", isOwner: true),
-                ConnectedUser(id: "u2", email: "eren@distributedglobal.com", isOwner: false),
+                ConnectedUser(id: "u1", label: "sammy.guli@distributedglobal.com", isOwner: true),
+                ConnectedUser(id: "u2", label: "eren@distributedglobal.com", isOwner: false),
             ],
             platforms: Self.platforms,
             run: RunState(

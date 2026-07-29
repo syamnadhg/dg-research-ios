@@ -354,7 +354,7 @@ private struct UsersCard: View {
             }
             ForEach(users) { u in
                 HStack {
-                    Text(u.email)
+                    Text(u.label)
                         .font(DS.F.body).foregroundStyle(DS.C.textPrimary)
                         .lineLimit(1).truncationMode(.middle)
                     Spacer()
