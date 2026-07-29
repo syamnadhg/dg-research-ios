@@ -39,3 +39,35 @@ with its own `hasOnly()` list. A write mixing fields from two lists satisfies **
 is rejected wholesale.
 
 **Pass criteria:** the FE Account page shows the device **Online** — not merely local success.
+
+## Package layout, and why there are two
+
+| Package | Builds offline? | Tested? |
+|---|---|---|
+| `ios/` — `SuperResearchDeviceCore` | **yes** | **53 tests** |
+| `ios/FirebaseGlue/` — `SuperResearchFirebase` | no (fetches firebase-ios-sdk) | **not compile-verified here** |
+
+The split is deliberate. Adding a Firebase dependency to the core would make `swift test` require a
+~416k-object clone of `firebase-ios-sdk`, which did not complete in the environment this was written
+in. Keeping it separate means all the logic worth testing stays runnable offline — and that is
+genuinely all of it: secret hashing, code formatting, the write shapes, the pairing sequence, the
+five-minute deadline, and the QR payload.
+
+`FirebaseGlue` is the mechanical remainder: HTTP for `initiate-pair`, `signIn(withCustomToken:)`,
+`getDocument`, `updateData`, `addSnapshotListener`. **It has never been built.** The API surface it
+uses is listed in the file header so it can be checked against whichever SDK version you resolve;
+expect at most a signature fix or two.
+
+```bash
+cd ios              && swift test    # 53 tests, offline, no plist
+cd ios/FirebaseGlue && swift build   # needs network + a resolved firebase-ios-sdk
+```
+
+### The one genuinely open question
+
+Whether the Firestore **iOS SDK** will issue a `getDocument` with no signed-in user, or insists on at
+least an anonymous session. The rule permits the read (`allow get: if true` on
+`pending/{secretHash}`), so REST unambiguously works; whether the SDK path does is untested.
+`pollPending` implements **both** and falls back, because guessing wrong stalls pairing at the one
+step with no error surface — the poll just never returns a token. Recorded in
+`docs/FIRESTORE_CONTRACT.md` §13.
