@@ -90,3 +90,41 @@ reasons and a test greps this repo for calls to them.
 queue-triggered e2e, and "we wrote it down" is not a control. `init_firebase` is included
 for the A10 reason — it would authenticate as the production daemon's `deviceId`,
 putting two listeners on one `devices/{id}/queue`.
+
+## Deep research is not a composer toggle on mobile web — on either platform
+
+**Measured 2026-07-29** against real signed-in accounts in the app's web views, by opening every
+plausible container rather than by inference:
+
+| Where I looked | ChatGPT | Gemini |
+|---|---|---|
+| composer control row at rest | plus / model picker / dictation / voice | upload / microphone / send |
+| `composer-plus-btn` menu | Camera, Photos, Files | — |
+| model picker (`Pro`) | Instant 5.5, Medium, High, Extra High, Pro, GPT-5.6 Sol | — |
+| sidebar (signed in) | Home, Search, New chat, Library, Projects, Scheduled, Plugins, Recents | — |
+| mode picker (`bard-mode-menu-button`) | — | opens a **mode** list; Deep Research is one of them |
+
+So **`deep_research_toggle` cannot be satisfied on either platform as specified.** The manifest key's
+contract is one tap judged by `aria-pressed`/`aria-checked` (`phases.py::_toggle_on_predicate`), and:
+
+* **Gemini** has the capability but the wrong shape — Deep Research is a *mode* selected from a menu,
+  so there are two taps and no pressed state on the opener.
+* **ChatGPT** does not expose it in the mobile web composer at all. The word appears in the
+  *signed-out* marketing drawer and nowhere in the signed-in UI.
+
+Why this matters more than a missing selector: capturing the nearest plausible control makes the run
+tap something, read no pressed state, fail the predicate, correctly decline to escalate (toggles are
+shadow-only without a positive off-signal) — and then complete a full P0–P3 **with deep research off
+while reporting success**. That is the same failure the `enable_deep_research` idempotence guard was
+written to prevent, arriving through a different door, and it is invisible in the output except as a
+shallower answer.
+
+Three ways out, and the choice is a product decision rather than a capture problem:
+
+1. **Give the phase a mode-select shape** — open picker, choose item, verify by the picker's own label
+   changing. Fits Gemini exactly. Does nothing for ChatGPT.
+2. **Ask for a desktop surface.** The app pins an iPhone Safari 17 user agent; the desktop composer is
+   where ChatGPT's research controls live. Untested, and a wider blast radius than it looks — every
+   captured selector would need re-verifying against the desktop DOM.
+3. **Accept P2 without the toggle on iOS** and say so, rather than shipping a run that silently does
+   ordinary chat under a deep-research label.
