@@ -44,16 +44,50 @@ public final class WebAutomationBridge {
     /// Polls rather than using a navigation delegate because a single-page app finishes its
     /// navigation long before its content exists — the delegate fires and there is nothing to talk
     /// to yet. Polling `readyState` plus a content check is what actually corresponds to "usable".
+    /// ⚠ **`readyState` alone is not "loaded", and this returned true on `about:blank`.**
+    ///
+    /// A fresh `WKWebView` starts on `about:blank`, which reports `readyState == "complete"`
+    /// immediately — so a poll on `readyState` alone succeeds *before* the requested page has begun
+    /// loading. The C1 gate then ran every phase against a three-node empty document and reported nine
+    /// consecutive failures that looked like broken selectors. This function's own doc comment already
+    /// claimed a content check; the check was never there.
+    ///
+    /// Now three conditions, all necessary: the document is complete, it is not `about:blank`, and it
+    /// has actual content. `expecting` additionally pins it to the intended URL, which is what
+    /// distinguishes "a page loaded" from "the page I asked for loaded".
     @discardableResult
-    public func waitForReady(timeout: TimeInterval = 30) async throws -> Bool {
+    public func waitForReady(timeout: TimeInterval = 30, expecting: String? = nil) async throws -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if let state = try? await evaluate("document.readyState") as? String, state == "complete" {
+            let state = try? await evaluate("document.readyState") as? String
+            let href = try? await evaluate("location.href") as? String
+            let children = try? await evaluate("document.body ? document.body.children.length : 0")
+                as? Int
+            if Self.isLoaded(
+                readyState: state ?? nil, href: href ?? nil, bodyChildren: children ?? nil,
+                expecting: expecting
+            ) {
                 return true
             }
             try? await Task.sleep(nanoseconds: 150_000_000)
         }
         return false
+    }
+
+    /// The loaded predicate, as a pure function so it is testable without a `WKWebView`.
+    ///
+    /// Extracted deliberately: the bug above lived in a condition that no test could reach, because the
+    /// only way to reach it was to host a real web view. A pure predicate is checkable under
+    /// `swift test`, and `about:blank` is now a named case rather than an oversight.
+    public static func isLoaded(
+        readyState: String?, href: String?, bodyChildren: Int?, expecting: String? = nil
+    ) -> Bool {
+        guard readyState == "complete" else { return false }
+        guard let href, !href.isEmpty, href != "about:blank" else { return false }
+        // Content, not just a document. An error page or a stub can be "complete" and empty.
+        guard let bodyChildren, bodyChildren > 0 else { return false }
+        if let expecting, !href.hasPrefix(expecting) { return false }
+        return true
     }
 
     /// Inject the runtime. Idempotent — safe and cheap to call after every navigation.
@@ -84,6 +118,19 @@ public final class WebAutomationBridge {
         try await webView.evaluateJavaScript(js)
     }
 
+    /// Evaluate and decode to an untyped JSON value.
+    ///
+    /// The untyped sibling of ``evaluateJSON(_:as:)``, for the runtime's small result envelopes where a
+    /// `Decodable` type per shape would be more ceremony than the shapes are worth. Same string
+    /// round-trip, for the same reason.
+    func evaluateDecoded(_ expression: String) async throws -> Any? {
+        let wrapped = "JSON.stringify((function(){ return (\(expression)); })())"
+        guard let text = try await evaluate(wrapped) as? String,
+              let data = text.data(using: .utf8)
+        else { return nil }
+        return try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+    }
+
     /// Ask the page what a JS-dispatched click reports for `isTrusted`.
     ///
     /// C0's real question, answered by measurement. If this returns `false` — which is what the spec
@@ -93,7 +140,7 @@ public final class WebAutomationBridge {
     public func probeTrustedDispatch(selector: String) async throws -> Bool? {
         let js = """
         (function () {
-          var el = document.querySelector(\(jsString(selector)));
+          var el = document.querySelector(\(Self.jsString(selector)));
           if (!el) return null;
           var seen = null;
           function once(e) { seen = e.isTrusted; el.removeEventListener('click', once, true); }
@@ -116,11 +163,79 @@ public final class WebAutomationBridge {
         return config
     }
 
-    private func jsString(_ value: String) -> String {
-        let escaped = value
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "'", with: "\\'")
-        return "'\(escaped)'"
-    }
 }
 #endif
+
+// MARK: - WebPage over WKWebView
+
+/// `WebPage` backed by a real `WKWebView`, via the injected runtime's handle registry.
+///
+/// Handles rather than selectors across the boundary: a selector re-queried per operation can resolve
+/// to a *different* node between calls on a live SPA, so "read the attribute of the thing I just
+/// clicked" silently becomes "of whatever matches now". The registry pins the node, and `S.get`
+/// reports `detached` if it leaves the document — which is a real answer rather than a stale one.
+///
+/// ⚠ Every call goes through `JSON.stringify`. `WKWebView`'s own value bridging flattens nested types
+/// inconsistently; the string round-trip behaves identically to the Python side's, which is what keeps
+/// the two implementations comparable.
+extension WebAutomationBridge: WebPage {
+
+    public func evaluateJSON(_ expression: String) async throws -> Any? {
+        try await evaluateDecoded(expression)
+    }
+
+    public func querySelector(_ css: String) async throws -> Int? {
+        try await evaluateDecoded("window.__sr.query(\(Self.jsString(css)))") as? Int
+    }
+
+    public func querySelectorAll(_ css: String) async throws -> [Int] {
+        (try await evaluateDecoded("window.__sr.queryAll(\(Self.jsString(css)))") as? [Any])?
+            .compactMap { $0 as? Int } ?? []
+    }
+
+    public func attribute(_ handle: Int, _ name: String) async throws -> String? {
+        let result = try await evaluateDecoded(
+            "window.__sr.attrOf(\(handle), \(Self.jsString(name)))"
+        ) as? [String: Any]
+        // `value` absent means the attribute is absent; an `err` key means the handle is gone. Both
+        // return nil, but they are different facts — the caller's predicate treats "no attribute" as
+        // not-pressed, which is correct for either.
+        return result?["value"] as? String
+    }
+
+    public func innerText(_ handle: Int) async throws -> String? {
+        (try await evaluateDecoded("window.__sr.textOf(\(handle))") as? [String: Any])?["text"]
+            as? String
+    }
+
+    public func click(_ handle: Int) async throws {
+        // ⚠ MEASURED: this reports `isTrusted === false`, and a control gated on it cannot be driven
+        // this way at all — see artifacts/apphost/verdict.json's BOUNDARY check. The full realistic
+        // event sequence does not change that, so it is not attempted here; a caller must treat an
+        // unconfirmed outcome as a real failure rather than retrying in a different shape.
+        _ = try await evaluateDecoded(
+            "(function(){ var h = window.__sr.get(\(handle)); if (h.err) return h;"
+                + " h.el.click(); return {ok: true}; })()"
+        )
+    }
+
+    public func insertText(_ handle: Int, _ text: String) async throws -> String? {
+        let result = try await evaluateDecoded(
+            "window.__sr.insertText(\(handle), \(Self.jsString(text)))"
+        ) as? [String: Any]
+        if result?["err"] != nil { return "not-a-text-target" }
+        return result?["path"] as? String
+    }
+
+    /// JSON-encode a string for embedding in JS source.
+    ///
+    /// Via `JSONSerialization` rather than hand-escaping: a research topic is arbitrary user text, and
+    /// quote/backslash/newline handling done by hand is how a prompt containing an apostrophe becomes a
+    /// syntax error in an injected script.
+    static func jsString(_ value: String) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: [value]),
+              let array = String(data: data, encoding: .utf8)
+        else { return "\"\"" }
+        return String(array.dropFirst().dropLast())
+    }
+}
