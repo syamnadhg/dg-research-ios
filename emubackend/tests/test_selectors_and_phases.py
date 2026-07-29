@@ -94,27 +94,55 @@ def test_a_network_hint_can_be_carried_because_it_is_the_durable_signal():
     assert entry.network_hint == "/deep_research"
 
 
-def test_require_fails_loudly_on_an_uncaptured_selector():
-    m = selectors.load_manifest(path=None)
+def _baseline(tmp_path):
+    """The baseline, forced.
+
+    ``load_manifest(path=None)`` consults ``$DG_IOS_SELECTORS`` and then the repo's own
+    ``selectors_mobile.json`` — so once real selectors were captured, these two tests started reading
+    them and one of them stopped failing. They were asserting a property of the baseline while asking
+    for whatever the repo happened to hold, which is a test that quietly changes subject.
+    """
+    return selectors.load_manifest(path=tmp_path / "does-not-exist.json")
+
+
+def test_require_fails_loudly_on_an_uncaptured_selector(tmp_path):
+    m = _baseline(tmp_path)
     with pytest.raises(ManifestError) as exc:
         m.require("chatgpt", "composer")
     assert "has not been captured" in str(exc.value)
     assert "silent skip" in str(exc.value)
 
 
-def test_an_unknown_key_names_what_is_available():
-    m = selectors.load_manifest(path=None)
+def test_an_unknown_key_names_what_is_available(tmp_path):
+    m = _baseline(tmp_path)
     with pytest.raises(ManifestError, match="Known keys"):
         m.entry("chatgpt", "nope")
 
 
-def test_coverage_reports_progress_as_a_number(tmp_path):
+def test_coverage_counts_against_every_baseline_key_not_just_the_supplied_ones(tmp_path):
+    """A partial manifest must not shrink the denominator.
+
+    It used to: the loaded file *replaced* the baseline structure, so a file holding two keys reported
+    ``(2, 2)`` — complete — and ``missing()`` returned nothing. Measured on the first real capture,
+    where seven of twenty-five keys read as 7/7 done. The two functions whose only job is to report how
+    far along the capture is were the two that lied about it.
+    """
     path = tmp_path / "m.json"
     path.write_text(
         json.dumps({"platforms": {"chatgpt": {"composer": "#c", "send": "#s"}}})
     )
-    done, total = selectors.load_manifest(path).coverage()
-    assert (done, total) == (2, 2)
+    manifest = selectors.load_manifest(path)
+    assert manifest.coverage() == (2, 25)
+    assert len(manifest.missing()) == 23
+
+
+def test_a_supplied_value_still_wins_over_the_baseline(tmp_path):
+    """Merging must not resurrect the baseline's empty entry over a captured one."""
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps({"platforms": {"claude": {"composer": "#real"}}}))
+    manifest = selectors.load_manifest(path)
+    assert manifest.entry("claude", "composer").css == ("#real",)
+    assert not manifest.entry("claude", "send").resolvable
 
 
 # ======================================================================================

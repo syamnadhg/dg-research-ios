@@ -55,12 +55,37 @@ struct LoginFlowView: View {
     ///
     /// These are the mobile markers from `bin/capture_selectors.py`, deliberately not the desktop
     /// sidebar ones — those collapse on a phone and would never match.
+    ///
+    /// ⚠ Every value below is now one that was **measured to be absent when signed out**, by
+    /// surveying each platform twice on the same device — signed in through the app, signed out in
+    /// Safari — and diffing. That check overturned two of the four original guesses:
+    ///
+    /// * **Gemini** shipped `rich-textarea, div[contenteditable=true]`, and Gemini's signed-out page
+    ///   has *both*: `textarea-inner`, `textarea-wrapper`, `chat-app` and `bard-mode-menu-button` are
+    ///   all present before you log in. It would have reported every signed-out session as signed in
+    ///   — and a login the app believes it already has is a login the owner never gets prompted for,
+    ///   so the first symptom would have been a run failing on a login page.
+    /// * **NotebookLM** shipped `[aria-label*=Notebook]`, which matches its marketing copy.
+    ///
+    /// Both are replaced with markers that only exist behind a session (`new-chat-button`,
+    /// `Create new notebook`). ChatGPT's and Claude's originals survived the check unchanged.
+    ///
+    /// Generosity is fine *within* this set — comma-joined so any candidate matching is enough — but
+    /// generosity about what counts as signed-in is not, which is the whole point of the diff.
     static func candidateMarkers(for platform: String) -> String {
         switch platform {
-        case "chatgpt": return "#prompt-textarea, [data-testid*=composer]"
-        case "gemini": return "rich-textarea, div[contenteditable=true]"
-        case "claude": return "div.ProseMirror, div[contenteditable=true]"
-        case "notebooklm": return "[aria-label*=Notebook], button[aria-label*=Add]"
+        case "chatgpt": return "#prompt-textarea, [data-testid=composer-plus-btn]"
+        // ⚠ `data-test-id`, hyphenated. Gemini spells it differently from ChatGPT and Claude, and
+        // `[data-testid]` matches **zero** elements on its page — measured: 0 vs 41. These three
+        // exist once each when signed in and not at all when signed out; none has a visible rect at
+        // 402pt (the sidebar is collapsed), which is fine here because the check below asks
+        // `querySelector`, not "can I see it".
+        case "gemini":
+            return "[data-test-id=new-chat-button], [data-test-id=all-conversations], "
+                + "[data-test-id=my-stuff-side-nav-entry-button]"
+        case "claude": return "[data-testid=user-menu-button], div.ProseMirror"
+        case "notebooklm":
+            return "button[aria-label=\"Create new notebook\"], #mat-button-toggle-1-button"
         default: return ""
         }
     }
@@ -152,6 +177,7 @@ private struct LoginWebView: UIViewRepresentable {
         // in-app at all.
         config.websiteDataStore = .default()
         let web = WKWebView(frame: .zero, configuration: config)
+        web.enableInspectionInSimulator()
         // The documented mitigation for the embedded-web-view OAuth block. Not a guarantee —
         // Google's check is heuristic — but it is the difference between "usually works" and
         // "never works".

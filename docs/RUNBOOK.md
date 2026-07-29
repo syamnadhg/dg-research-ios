@@ -29,26 +29,54 @@ now has both a WEB and an IOS app. The build script bundles the plist automatica
 
 **Unlocks:** a P0–P3 run against *real* platforms, in the Simulator and in the app.
 
-```bash
-xcrun simctl boot EB3E3597-E62B-413B-B7E5-0FD286ACCC38   # or any iOS 26.5 device
-open -a Simulator                                        # needed to type a password by hand
-```
+**There are TWO cookie jars, and they are not shared.** The app's web views use
+`WKWebsiteDataStore.default()` inside the app container; Simulator Safari has its own. Signing in on
+one surface does nothing for the other, and iOS gives an app no way to read Safari's jar. Measured on
+this device: all four platforms signed in **in the app** while Safari was signed out of all four —
+each announcing it differently (ChatGPT's `mobile-app-shell-fallback` shell with a "Log in" button,
+`login-with-google` on Claude, the word "Sign in" on Gemini, an `accounts.google.com` redirect for
+NotebookLM). So state either surface explicitly whenever you talk about "logged in".
 
-Sign in **once** per platform in Safari inside the Simulator: ChatGPT, Gemini, Claude, NotebookLM.
+The **app** surface is the one that matters for a run, and it is reached without pairing:
+Settings (⚙, top right) → Platform logins → tap a platform → sign in as normal, 2FA included. The
+sheet closes itself when the platform's *own* signed-in marker appears, never on a tap.
 
-> ⚠ **Do not `simctl shutdown` straight after signing in.** Cookies take a few seconds to reach
-> `Cookies.binarycookies`, and shutting down first loses the session in a way that is
-> indistinguishable from "the platform logged us out". B0a measured the flush at ~3s. Give it ten.
+> ⚠ **Do not `simctl shutdown` straight after signing in.** Cookies take a few seconds to flush, and
+> shutting down first loses the session in a way that is indistinguishable from "the platform logged
+> us out". B0a measured the flush at ~3s. Give it ten.
 
-Then, per platform:
+> ⚠ **`bin/build_app.sh` no longer uninstalls, and that matters here.** It used to
+> `simctl uninstall` before every install, which deletes the Data container — every hand-made login,
+> the Keychain API keys, and the pairing identity with it. Cleaning is now `--clean`, opt-in. Verified
+> by rebuilding twice and re-reading the app's DOM: the sessions survived both.
+
+Then capture, per platform. `--surface app` reads the **app's own web view** rather than driving
+Safari, so it sees the signed-in DOM:
 
 ```bash
 cd dg-research-ios
-python bin/capture_selectors.py --udid <UDID> --platform chatgpt --url https://chatgpt.com
-python bin/capture_selectors.py --udid <UDID> --platform gemini  --url https://gemini.google.com
-python bin/capture_selectors.py --udid <UDID> --platform claude  --url https://claude.ai
-python bin/capture_selectors.py --udid <UDID> --platform notebooklm --url https://notebooklm.google.com
+# First: in the app, open "Watch the browser" and visit each of the four tabs once. Those web views
+# are retained by design (a run drives all four at once), whereas the login sheet tears its view down
+# on dismiss — so this is what keeps one page per platform alive to be read.
+for p in "chatgpt|https://chatgpt.com" "gemini|https://gemini.google.com" \
+         "claude|https://claude.ai" "notebooklm|https://notebooklm.google.com"; do
+  python bin/capture_selectors.py --udid <UDID> --platform "${p%%|*}" --url "${p##*|}" --surface app
+done
 ```
+
+Reading the app's web views at all needs `isInspectable = true` (iOS 16.4+), which
+`WebViewInspection.swift` sets — Simulator-only, because an inspectable web view in a shipped build is
+a way to read a signed-in platform session.
+
+**A capture is only ever a pre-response, idle-page pass.** 17 of the 25 keys are not visible then, and
+the tool now says which of the two reasons applies per key rather than reporting them all as "no
+candidate":
+
+| Needs | Keys |
+|---|---|
+| a response on screen | `sources`, `response_container`, `activity_panel`, `artifact_panel`, `audio_ready_marker` |
+| an interaction first | ChatGPT `send` (exists only once the composer is non-empty) and `deep_research_toggle` (inside the composer-plus menu); NotebookLM `add_source`, `generate_audio` (inside a notebook, not the notebook list) |
+| a phase change, not a selector | Gemini `deep_research_toggle` — Deep Research there is a **mode** chosen from a picker, while `phases.py` taps once and judges `aria-pressed`. See the note in `bin/capture_selectors.py`. |
 
 Each writes `artifacts/selectors/<platform>_candidates.json` (everything it saw, ranked) and
 `artifacts/selectors/<platform>_draft.json` (a manifest that loads as-is).

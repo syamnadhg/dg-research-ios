@@ -196,6 +196,35 @@ def test_a_safari_like_user_agent_is_set_on_both_surfaces():
 # ======================================================================================
 
 
+def _swift_case_strings(body: str) -> dict[str, str]:
+    """Map each ``case "<name>":`` to its returned string, joining concatenated literals.
+
+    The first version was a single regex, ``case "(\\w+)": return "([^"]*)"``, and it silently
+    returned *nothing* for two platforms once their markers grew past one line — the mirror check then
+    compared a two-entry dict against a four-entry one and reported drift where there was none, while
+    real drift in the two it could not see would have gone unnoticed. Escaped quotes matter for the
+    same reason: NotebookLM's marker is ``button[aria-label=\\"Create new notebook\\"]``.
+    """
+    out: dict[str, str] = {}
+    current: str | None = None
+    for line in body.splitlines():
+        # Comments are skipped, or the prose explaining a marker becomes part of it — the parser
+        # happily concatenated the phrase from a `// … "can I see it"` note onto ChatGPT's selector.
+        if line.lstrip().startswith("//"):
+            continue
+        case = re.match(r'\s*case "(\w+)"', line)
+        if case:
+            current = case.group(1)
+            out.setdefault(current, "")
+        if current is None:
+            continue
+        for literal in re.findall(r'"((?:[^"\\]|\\.)*)"', line.split("case", 1)[-1]):
+            if literal == current:
+                continue
+            out[current] += literal.replace('\\"', '"')
+    return out
+
+
 def test_the_swift_fallback_markers_match_the_python_probe_candidates():
     """A third hand-maintained mirror, so a third drift check.
 
@@ -213,10 +242,7 @@ def test_the_swift_fallback_markers_match_the_python_probe_candidates():
 
     swift = LOGIN.read_text(encoding="utf-8")
     body = _body_of(swift, "static func candidateMarkers(for platform: String)")
-    swift_markers = {
-        platform: value
-        for platform, value in re.findall(r'case "(\w+)": return "([^"]*)"', body)
-    }
+    swift_markers = _swift_case_strings(body)
 
     expected = {
         platform: ", ".join(probes["logged_in_marker"])

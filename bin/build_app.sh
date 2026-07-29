@@ -5,12 +5,21 @@
 # `codesign -s -` is enough. An Apple Developer account is only needed for a real device.
 #
 # Usage:
-#   bin/build_app.sh <UDID>                  # build, install, launch
+#   bin/build_app.sh <UDID>                  # build, install (in place), launch
 #   bin/build_app.sh <UDID> --shots          # also screenshot the paired and unpaired states
+#   bin/build_app.sh <UDID> --clean          # DESTROY the app's data first (see below)
 set -euo pipefail
 
-UDID="${1:?usage: build_app.sh <UDID> [--shots]}"
-SHOTS="${2:-}"
+UDID="${1:?usage: build_app.sh <UDID> [--shots] [--clean]}"
+SHOTS=""
+CLEAN=""
+for arg in "${@:2}"; do
+  case "$arg" in
+    --shots) SHOTS="--shots" ;;
+    --clean) CLEAN="--clean" ;;
+    *) echo "unknown flag: $arg" >&2; exit 2 ;;
+  esac
+done
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="$REPO/artifacts/app"
 APP="$BUILD/SuperResearch.app"
@@ -91,7 +100,22 @@ codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 || codesign --
 
 echo "==> installing"
 xcrun simctl bootstatus "$UDID" -b >/dev/null 2>&1 || true
-xcrun simctl uninstall "$UDID" "$BUNDLE_ID" >/dev/null 2>&1 || true
+# `simctl install` over an existing bundle UPGRADES it in place and keeps the Data container.
+#
+# ⚠ There used to be an unconditional `simctl uninstall` here, and it cost real work. Uninstall
+# deletes the Data container, which on this app holds three things that are expensive to recreate:
+# the WKWebView cookie jar (every platform login the owner did by hand, 2FA included), the Keychain
+# API keys, and the paired device identity. So every rebuild silently signed the device out of
+# ChatGPT/Gemini/Claude/NotebookLM and unpaired it — measured, not theorised: after a rebuild the
+# container had no `Library/WebKit/WebsiteData` at all and all four platforms surveyed as logged
+# out. It also produced the "the app restarted by itself" symptom mid-pairing, because uninstalling
+# a foreground app terminates it (`SBWorkspaceTerminateApplication: "uninstalling app"`).
+#
+# Cleaning is now opt-in, because destroying a hand-made login should be something you asked for.
+if [ "$CLEAN" = "--clean" ]; then
+  echo "    --clean: erasing app data (logins, API keys, pairing identity)"
+  xcrun simctl uninstall "$UDID" "$BUNDLE_ID" >/dev/null 2>&1 || true
+fi
 xcrun simctl install "$UDID" "$APP"
 
 if [ "$SHOTS" = "--shots" ]; then

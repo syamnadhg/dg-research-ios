@@ -219,11 +219,24 @@ def load_manifest(path: Path | None = None) -> SelectorManifest:
         except (OSError, ValueError) as exc:
             source = f"baseline (external manifest at {candidate} unusable: {exc})"
 
-    platforms: dict[str, dict[str, SelectorEntry]] = {}
+    # Merged ONTO the baseline's key structure, never substituted for it.
+    #
+    # ⚠ This was a substitution, and the bug it produced was a reporting lie rather than a crash. A
+    # partial manifest — seven captured keys out of the twenty-five — made `platforms` contain only
+    # those seven, so `coverage()` returned `(7, 7)` and `missing()` returned `[]`. The two functions
+    # whose whole job is to say how far along the capture is both reported *finished* at 28%.
+    #
+    # Merging keeps every baseline key present as an unresolvable entry, which is what `missing()`
+    # counts and what `require()` fails loudly on. A manifest can now add values but never shrink the
+    # question being asked.
+    platforms: dict[str, dict[str, SelectorEntry]] = {
+        platform: {key: SelectorEntry() for key in keys}
+        for platform, keys in ALLOWED_KEYS.items()
+    }
     for platform, entries in (raw.get("platforms") or {}).items():
-        platforms[platform] = {
-            key: SelectorEntry.from_json(value) for key, value in (entries or {}).items()
-        }
+        merged = platforms.setdefault(platform, {})
+        for key, value in (entries or {}).items():
+            merged[key] = SelectorEntry.from_json(value)
     return SelectorManifest(
         version=int(raw.get("version", 1)),
         surface=str(raw.get("surface", "ios-mobile-safari")),

@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "surface": "ios-app-webview",
+  "_note": [
+    "Captured 2026-07-29 from REAL signed-in DOM, through the app's own WKWebViews (the only",
+    "signed-in surface on this device — Simulator Safari is signed out of all four platforms).",
+    "",
+    "Every value here resolved on a live page. NONE has yet been verified by DRIVING it, which is a",
+    "different and stronger claim: resolution only proves an element matched, while driving proves the",
+    "element was the right one. Provenance says 'resolved', and it should not say 'driven' until a run",
+    "has acted on it and asserted the outcome.",
+    "",
+    "The 17 absent keys are absent on purpose. Nine need a response on screen (sources,",
+    "response_container, activity_panel, artifact_panel, audio_ready_marker); five need an interaction",
+    "first (ChatGPT's send appears only once the composer is non-empty, and its research option lives",
+    "inside the composer-plus menu; NotebookLM's add_source and generate_audio live inside a notebook,",
+    "not on the notebook list); and Gemini's deep_research_toggle is a contract mismatch rather than a",
+    "missing value — see the note in bin/capture_selectors.py.",
+    "",
+    "surface is ios-app-webview, not ios-mobile-safari: the app pins an iPhone Safari 17 user agent",
+    "while Simulator Safari reports 26.5, so the two surfaces are not proven to render the same DOM."
+  ],
+  "platforms": {
+    "chatgpt": {
+      "logged_in_marker": {
+        "css": ["[data-testid=\"composer-plus-btn\"]", "#prompt-textarea"],
+        "provenance": "resolved@ios-app-webview:data-testid; both absent from the signed-out shell"
+      },
+      "composer": {
+        "css": ["#prompt-textarea"],
+        "provenance": "resolved@ios-app-webview:stable id; contenteditable div, not the textarea"
+      }
+    },
+    "gemini": {
+      "logged_in_marker": {
+        "css": [
+          "[data-test-id=\"new-chat-button\"]",
+          "[data-test-id=\"all-conversations\"]",
+          "[data-test-id=\"my-stuff-side-nav-entry-button\"]"
+        ],
+        "provenance": "resolved@ios-app-webview:data-test-id (HYPHENATED — [data-testid] matches 0 on this platform); present-but-collapsed, absent when signed out"
+      },
+      "composer": {
+        "css": ["[role=\"textbox\"][aria-label=\"Enter a prompt for Gemini\"]"],
+        "provenance": "resolved@ios-app-webview:role + accessible name"
+      }
+    },
+    "claude": {
+      "logged_in_marker": {
+        "css": ["[data-testid=\"user-menu-button\"]"],
+        "provenance": "resolved@ios-app-webview:data-testid; an account menu cannot exist without an account"
+      },
+      "composer": {
+        "css": ["[data-testid=\"chat-input\"]"],
+        "provenance": "resolved@ios-app-webview:data-testid"
+      }
+    },
+    "notebooklm": {
+      "logged_in_marker": {
+        "css": ["#mat-button-toggle-1-button", "button[aria-label=\"Create new notebook\"]"],
+        "provenance": "resolved@ios-app-webview:stable id; this platform ships NO testids at all (Angular Material)"
+      }
+    }
+  }
+}

@@ -29,6 +29,44 @@ PY = ROOT / ".venv/bin/python"
 
 # (file, old, new, test-node-id-that-MUST-fail, what-real-defect-this-simulates)
 MUTATIONS = [
+    # --- the guards added after the first real signed-in capture -----------------------------
+    (
+        "emubackend/selectors.py",
+        "        platform: {key: SelectorEntry() for key in keys}\n"
+        "        for platform, keys in ALLOWED_KEYS.items()",
+        "        platform: {}\n"
+        "        for platform, keys in ALLOWED_KEYS.items()",
+        "test_selectors_and_phases.py::test_coverage_counts_against_every_baseline_key_not_just_the_supplied_ones",
+        "a partial manifest shrinking the denominator, so 7-of-25 captured keys report 7/7 complete",
+    ),
+    (
+        "bin/capture_selectors.py",
+        "        if key in POST_RESPONSE_KEYS and not response_present:",
+        "        if key in POST_RESPONSE_KEYS and response_present:",
+        "test_capture_guards.py::test_chatgpts_images_nav_link_never_becomes_sources",
+        "capturing `sources` from a page with no answer, making ChatGPT's Images nav link the source list",
+    ),
+    (
+        "bin/capture_selectors.py",
+        "                    or (h.get(\"rank\") == 4 and h.get(\"matches\") == 1)",
+        "                    or (h.get(\"rank\") == 4 and h.get(\"matches\") != 1)",
+        "test_capture_guards.py::test_an_ambiguous_aria_label_target_is_rejected",
+        "accepting an aria-label match that resolves to several nodes, so resolve() takes document order",
+    ),
+    (
+        "bin/capture_selectors.py",
+        "    signed_in = not on_auth_host and not controls",
+        "    signed_in = not on_auth_host or not controls",
+        "test_capture_guards.py::test_the_real_signed_out_chatgpt_shell_is_refused",
+        "drafting from a signed-out page, whose anonymous composer looks exactly like the real one",
+    ),
+    (
+        "bin/capture_selectors.py",
+        "        needs_visible = key not in PRESENCE_ONLY_KEYS",
+        "        needs_visible = key in PRESENCE_ONLY_KEYS",
+        "test_capture_guards.py::test_visibility_is_still_required_for_anything_tapped",
+        "accepting an invisible send button, which cannot be tapped",
+    ),
     (
         "emubackend/berepo.py",
         "    for node in tree.body:",
