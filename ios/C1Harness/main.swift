@@ -30,20 +30,15 @@ struct Check: Codable {
     let detail: String
 }
 
-/// The mock's selectors, mirroring `fixtures/mockplatform/selectors_mock.json`.
+/// The platform under test and its selectors, both GENERATED at build time.
 ///
-/// Inlined rather than read from disk: the app is sandboxed and the fixture lives in the repo, so
-/// bundling it would mean a resource pipeline for a build that deliberately has none. The parity test
-/// `emubackend/tests/test_inapp_parity.py` compares these against the JSON so they cannot drift.
-let MOCK_MANIFEST: [String: [String]] = [
-    "logged_in_marker": ["#signed-in-marker"],
-    "composer": ["[data-testid=\"composer\"]", "div[contenteditable=true]"],
-    "send": ["[data-testid=\"send-button\"]"],
-    "deep_research_toggle": ["[data-testid=\"deep-research-toggle\"]"],
-    "activity_panel": ["#response"],
-    "sources": ["[data-testid=\"source\"]"],
-    "response_container": ["[data-testid=\"response-container\"][data-state]"],
-]
+/// ⚠ Previously the mock's manifest was inlined here, which quietly capped C1 at one platform: the
+/// coverage gate could demand "run C1 against chatgpt" and there would be no way to do it without
+/// editing Swift. Generating both from the real manifest (`bin/c1_in_app.sh <UDID> [platform]`) is what
+/// makes the gate's demand satisfiable — the owner supplies selectors, and C1 runs against that
+/// platform with no code change at all.
+let PLATFORM = SRManifest.platform
+let MANIFEST = SRManifest.selectors
 
 final class C1Harness: NSObject {
     let web: WKWebView
@@ -66,7 +61,7 @@ final class C1Harness: NSObject {
     }
 
     func run() async {
-        let url = URL(string: "http://127.0.0.1:8901/")!
+        let url = URL(string: SRManifest.pageURL)!
         web.load(URLRequest(url: url))
 
         let bridge = WebAutomationBridge(webView: web, runtimeJS: RUNTIME_JS)
@@ -76,7 +71,7 @@ final class C1Harness: NSObject {
         let injected = (try? await bridge.injectRuntime()) ?? "failed"
         record("runtime injected", injected == "installed" || injected == "already", injected)
 
-        let driver = InAppPhaseDriver(platform: "chatgpt", manifest: MOCK_MANIFEST, page: bridge)
+        let driver = InAppPhaseDriver(platform: PLATFORM, manifest: MANIFEST, page: bridge)
 
         // Each phase is also asserted individually, because "the run completed" alone cannot
         // distinguish a real pass from a pipeline that skipped everything.
@@ -207,7 +202,10 @@ final class C1Harness: NSObject {
         let verdict: [String: Any] = [
             "gate": "C1-in-app",
             "what": "a full P0-P3 run inside the native app, driving the app's own WKWebView",
-            "platform": "mockplatform (the only platform that has cleared C0)",
+            "platform": PLATFORM,
+            // Travels to the coverage gate, which credits a platform ONLY for a run that
+            // used the real manifest. A wiring-proof run must not count as coverage.
+            "manifest_source": SRManifest.manifestSource,
             "results": checks.map { ["check": $0.check, "pass": $0.pass, "detail": $0.detail] },
             "pass": checks.allSatisfy(\.pass),
             "not_established": [

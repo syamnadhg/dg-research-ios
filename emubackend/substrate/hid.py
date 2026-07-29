@@ -72,20 +72,32 @@ def screen_size(udid: str) -> Screen:
 
 
 def largest_frame(describe_ui_output: str) -> Screen:
-    """The screen, taken as the **largest** frame in the accessibility tree.
+    """The screen: the largest frame whose dimensions are plausible **points**.
 
-    ⚠ Not the first one. The first version took `search()`'s first match and assumed it was the root,
-    which depends on which app happens to be frontmost and on how its tree is ordered — and it
-    silently returned **402x100pt** for a real device whose screen is 402x874. Every probe tap was
-    then computed inside a 100-point band, none of them reached the page, and the gate reported
-    "fewer than two probe taps produced a trusted event", which reads as a broken input channel rather
-    than a bad screen measurement. B1 had passed minutes earlier through the same code path, because
-    a different app was foreground.
+    Two wrong answers were tried before this one, and both were silent:
 
-    Taking the maximum by area is measurement rather than assumption, in the same spirit as measuring
-    the screen at all instead of looking it up from a device table: the screen is by definition the
-    biggest frame present, whatever the tree order.
+    1. **The first frame**, assumed to be the root. That depends on which app is frontmost and on how
+       its tree is ordered; it returned **402x100pt** for a 402x874 screen. Every calibration probe was
+       then computed inside a 100-point band and landed nowhere, and B0a reported "fewer than two probe
+       taps produced a trusted event" — a broken-input-channel message for a bad-measurement fault.
+    2. **The largest frame by area.** Also wrong: the tree can contain frames denominated in **pixels**,
+       and one appeared as **1206x2622** (= 402x874 at 3x) while a different app was foreground. Taps
+       were then computed against a screen three times too big, so they clamped to the right edge —
+       every recorded event had clientX pinned at 402.
+
+    So the bound is the discriminator. Point dimensions for any iOS device are bounded: the largest is
+    the 12.9" iPad Pro at 1024x1366. Anything beyond that is not a point-denominated screen, whatever
+    element it belongs to. Within the plausible band, largest-by-area is right.
+
+    This is still measurement rather than a device table — the table is what goes stale with every new
+    device — but it is measurement with a sanity range, because the failure mode of a wrong answer here
+    is taps that are computed, validated, dispatched, and simply miss.
     """
+    #: Generous upper bound: the 12.9" iPad Pro is 1024x1366pt. Lower bound excludes toolbars and
+    #: single views, which is the case that produced 402x100.
+    MAX_POINT_W, MAX_POINT_H = 1200.0, 1400.0
+    MIN_POINT_W, MIN_POINT_H = 200.0, 300.0
+
     frames = [
         Screen(width=float(m.group(3)), height=float(m.group(4)))
         for m in _AXFRAME_RE.finditer(describe_ui_output)
@@ -96,16 +108,22 @@ def largest_frame(describe_ui_output: str) -> Screen:
             "'No translation object returned', the device is still starting — run "
             "`xcrun simctl bootstatus <udid> -b` and retry."
         )
-    biggest = max(frames, key=lambda s: s.width * s.height)
-    # A floor, because a plausible-but-tiny result is the failure mode that wasted the most time here:
-    # it produces taps that are computed, validated and dispatched, and simply land nowhere.
-    if biggest.height < 300 or biggest.width < 200:
+
+    plausible = [
+        s
+        for s in frames
+        if MIN_POINT_W <= s.width <= MAX_POINT_W and MIN_POINT_H <= s.height <= MAX_POINT_H
+    ]
+    if not plausible:
+        biggest = max(frames, key=lambda s: s.width * s.height)
         raise HidError(
-            f"the largest AXFrame is {biggest.width:g}x{biggest.height:g}pt, which is too small to be "
-            f"a device screen. The accessibility tree probably describes a single view rather than the "
-            f"window — bring the app you intend to drive to the foreground and retry."
+            f"no AXFrame looks like a device screen in points. The largest is "
+            f"{biggest.width:g}x{biggest.height:g}, outside the plausible range "
+            f"{MIN_POINT_W:g}..{MAX_POINT_W:g} x {MIN_POINT_H:g}..{MAX_POINT_H:g}pt — it is probably "
+            f"denominated in PIXELS, or the tree describes a single view rather than the window. "
+            f"Bring the app you intend to drive to the foreground and retry."
         )
-    return biggest
+    return max(plausible, key=lambda s: s.width * s.height)
 
 
 def tap(udid: str, x: float, y: float, screen: Screen | None = None) -> None:

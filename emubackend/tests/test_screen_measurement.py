@@ -42,16 +42,43 @@ def test_no_frames_at_all_says_the_device_may_still_be_starting():
         hid.largest_frame("nothing useful here")
 
 
-@pytest.mark.parametrize(
-    "w,h", [(402, 100), (402, 250), (100, 874), (60, 40)]
-)
-def test_a_plausible_but_too_small_result_is_refused_rather_than_returned(w, h):
+@pytest.mark.parametrize("w,h", [(402, 100), (402, 250), (100, 874), (60, 40)])
+def test_a_too_small_result_is_refused_rather_than_returned(w, h):
     """The floor. A tiny screen produces taps that are computed, validated, dispatched — and land
 
     nowhere, which is the failure mode that wasted the most time. Refusing names the real problem.
     """
-    with pytest.raises(hid.HidError, match="too small to be a device screen"):
+    with pytest.raises(hid.HidError, match="looks like a device screen in points"):
         hid.largest_frame(frame(0, 0, w, h))
+
+
+def test_a_pixel_denominated_frame_is_not_mistaken_for_the_screen():
+    """The second wrong answer, and the reason largest-by-area alone is not enough.
+
+    A 1206x2622 frame (402x874 at 3x) appeared while another app was foreground. Taken as the screen it
+    made every tap compute against a display three times too big, so they clamped to the right edge —
+    every recorded event had clientX pinned at 402.
+    """
+    out = "\n".join([frame(0, 0, 1206, 2622), frame(0, 0, 402, 874)])
+    assert hid.largest_frame(out) == hid.Screen(width=402.0, height=874.0)
+
+
+def test_all_three_historical_wrong_answers_are_rejected_together():
+    """The exact tree that broke B0a twice, plus the correct frame."""
+    out = "\n".join(
+        [frame(0, 0, 402, 100), frame(0, 0, 1206, 2622), frame(0, 0, 402, 874), frame(0, 0, 30, 750)]
+    )
+    assert hid.largest_frame(out) == hid.Screen(width=402.0, height=874.0)
+
+
+def test_a_tree_of_only_pixel_frames_says_so_instead_of_guessing():
+    with pytest.raises(hid.HidError, match="denominated in PIXELS"):
+        hid.largest_frame(frame(0, 0, 1206, 2622))
+
+
+def test_the_largest_ipad_still_counts_as_plausible():
+    """The 12.9\" iPad Pro is 1024x1366pt — the bound must not exclude a real device."""
+    assert hid.largest_frame(frame(0, 0, 1024, 1366)).height == 1366.0
 
 
 def test_a_real_device_size_clears_the_floor():

@@ -163,47 +163,26 @@ def test_the_composer_goes_through_the_model_updating_path():
 # ======================================================================================
 
 
-def test_the_inlined_mock_manifest_matches_the_fixture():
-    """The harness inlines the mock's selectors because the app has no resource pipeline.
+def test_the_harness_does_not_inline_a_manifest():
+    """The harness must take its platform and selectors from the GENERATED constant.
 
-    Inlining is fine; inlining *and never checking* is how the gate ends up testing selectors that no
-    longer match the fixture every other consumer uses.
+    It used to inline the mock's manifest, and that quietly capped C1 at one platform: the coverage gate
+    could demand "run C1 against chatgpt" with no way to satisfy it short of editing Swift. This test
+    exists to stop that regressing — an inlined copy would also drift from the manifest every other
+    consumer reads.
     """
-    fixture = json.loads(MOCK_SELECTORS.read_text(encoding="utf-8"))["platforms"]["chatgpt"]
-    body = _array_literal(_code(SWIFT_HARNESS), "let MOCK_MANIFEST")
-
-    def unescape(literal: str) -> str:
-        """Swift-literal text -> the actual string.
-
-        Comparing the *escaped* forms instead was the first attempt and it is needlessly fragile: it
-        makes the test depend on how each side happens to spell a quote rather than on what the
-        selector is.
-        """
-        return literal.replace('\\"', '"').replace("\\\\", "\\")
-
-    # Parsed line by line rather than with a bracketed regex. The selectors THEMSELVES contain
-    # brackets — `[data-testid="composer"]` — so `\[([^\]]*)\]` stops at the first `]` inside the
-    # value and yields an empty list. It did, for five of the seven keys, and the only reason that
-    # surfaced is that the comparison failed; a key missing from both sides would have passed.
-    swift: dict[str, list[str]] = {}
-    for line in body.splitlines():
-        match = re.match(r'\s*"(\w+)":\s*\[(.*)\],?\s*$', line.strip())
-        if match:
-            swift[match.group(1)] = [
-                unescape(found)
-                for found in re.findall(r'"((?:[^"\\]|\\.)*)"', match.group(2))
-            ]
-
-    # An explicit guard against the silent version of this bug: every key must have parsed to at
-    # least one selector. Without it, a parse that quietly produces nothing looks like agreement.
-    empty = sorted(key for key, values in swift.items() if not values)
-    assert not empty, f"parsed no selectors for {empty} — the parser is wrong, not the source"
-
-    expected = {key: list(entry["css"]) for key, entry in fixture.items()}
-    assert swift == expected, (
-        "the C1 harness's inlined manifest drifted from fixtures/mockplatform/selectors_mock.json.\n"
-        f"  Swift:   {swift}\n  Fixture: {expected}"
+    code = _code(SWIFT_HARNESS)
+    assert "SRManifest.selectors" in code, "the harness must use the generated manifest"
+    assert "SRManifest.platform" in code, "the platform must come from the generated manifest"
+    assert "MOCK_MANIFEST" not in code, (
+        "a hardcoded manifest is back — it caps C1 at whatever platform was compiled in"
     )
+
+
+def test_the_verdict_carries_its_manifests_provenance():
+    """Without it the coverage gate cannot tell a wiring proof from real coverage."""
+    code = _code(SWIFT_HARNESS)
+    assert '"manifest_source": SRManifest.manifestSource' in code
 
 
 def test_both_implementations_cover_the_same_phase_keys():

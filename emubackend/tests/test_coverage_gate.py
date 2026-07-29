@@ -69,42 +69,38 @@ def test_the_optional_activity_panel_does_not_block_clearing():
     assert "activity_panel" not in gate.REQUIRED
 
 
-def test_a_failing_c1_verdict_covers_nothing():
+def test_a_failing_c1_verdict_covers_nothing(tmp_path, monkeypatch):
     """Otherwise a red gate would still be credited with coverage."""
     gate = _gate()
-    original = gate.C1_VERDICT
-    try:
-        temp = REPO / "artifacts" / "coverage" / "_test_c1.json"
-        temp.parent.mkdir(parents=True, exist_ok=True)
-        temp.write_text(json.dumps({"pass": False, "platform": "chatgpt"}))
-        gate.C1_VERDICT = temp
-        assert gate.c1_covered() == set()
-    finally:
-        gate.C1_VERDICT = original
+    directory = tmp_path / "c1"
+    directory.mkdir()
+    (directory / "verdict-chatgpt.json").write_text(
+        json.dumps({"pass": False, "platform": "chatgpt", "manifest_source": "selectors.json"})
+    )
+    monkeypatch.setattr(gate, "C1_VERDICT", directory / "verdict.json")
+    assert gate.c1_covered() == set()
 
 
-def test_a_passing_c1_verdict_credits_the_platform_it_names():
+def test_a_passing_c1_verdict_credits_the_platform_it_names(tmp_path, monkeypatch):
     gate = _gate()
-    original = gate.C1_VERDICT
-    try:
-        temp = REPO / "artifacts" / "coverage" / "_test_c1.json"
-        temp.parent.mkdir(parents=True, exist_ok=True)
-        # The real verdict names its platform with a trailing parenthetical.
-        temp.write_text(json.dumps({"pass": True, "platform": "mockplatform (the only one)"}))
-        gate.C1_VERDICT = temp
-        assert gate.c1_covered() == {"mockplatform"}
-    finally:
-        gate.C1_VERDICT = original
+    directory = tmp_path / "c1"
+    directory.mkdir()
+    # The real verdict may name its platform with a trailing parenthetical.
+    (directory / "verdict-mockplatform.json").write_text(
+        json.dumps({
+            "pass": True,
+            "platform": "mockplatform (the only one)",
+            "manifest_source": "fixtures/mockplatform/selectors_mock.json",
+        })
+    )
+    monkeypatch.setattr(gate, "C1_VERDICT", directory / "verdict.json")
+    assert gate.c1_covered() == {"mockplatform"}
 
 
-def test_a_missing_c1_verdict_covers_nothing():
+def test_no_verdicts_at_all_covers_nothing(tmp_path, monkeypatch):
     gate = _gate()
-    original = gate.C1_VERDICT
-    try:
-        gate.C1_VERDICT = REPO / "artifacts" / "coverage" / "_does_not_exist.json"
-        assert gate.c1_covered() == set()
-    finally:
-        gate.C1_VERDICT = original
+    monkeypatch.setattr(gate, "C1_VERDICT", tmp_path / "nonexistent" / "verdict.json")
+    assert gate.c1_covered() == set()
 
 
 def test_the_gate_fails_when_a_cleared_platform_was_never_run_in_app(monkeypatch, capsys):
@@ -224,3 +220,88 @@ def test_the_real_cli_passes_on_the_repos_actual_state():
     )
     assert result.returncode == 0, result.stdout
     assert "mockplatform" in result.stdout
+
+
+# ======================================================================================
+# provenance: a wiring proof must not be credited as coverage
+# ======================================================================================
+
+
+def test_a_wiring_proof_verdict_is_not_credited(tmp_path, monkeypatch):
+    """The self-congratulation guard.
+
+    Proving the harness can drive a non-mock platform requires running it under a proof manifest, which
+    writes a PASSING `verdict-chatgpt.json`. Crediting that would have the gate report chatgpt as
+    covered while nobody has captured a single real selector for it.
+    """
+    gate = _gate()
+    directory = tmp_path / "c1"
+    directory.mkdir()
+    (directory / "verdict-chatgpt.json").write_text(
+        json.dumps({
+            "pass": True,
+            "platform": "chatgpt",
+            "manifest_source": "fixtures/manifests/nonmock_wiring_proof.json "
+                               "(url overridden — WIRING PROOF, not real coverage)",
+        })
+    )
+    monkeypatch.setattr(gate, "C1_VERDICT", directory / "verdict.json")
+    assert gate.c1_covered() == set()
+
+
+def test_a_proof_manifest_path_alone_is_enough_to_refuse_credit(tmp_path, monkeypatch):
+    """Belt and braces: a proof-manifest run WITHOUT the url override must also not count."""
+    gate = _gate()
+    directory = tmp_path / "c1"
+    directory.mkdir()
+    (directory / "verdict-gemini.json").write_text(
+        json.dumps({
+            "pass": True, "platform": "gemini",
+            "manifest_source": "fixtures/manifests/one_platform_cleared.json",
+        })
+    )
+    monkeypatch.setattr(gate, "C1_VERDICT", directory / "verdict.json")
+    assert gate.c1_covered() == set()
+
+
+def test_coverage_accumulates_across_platforms(tmp_path, monkeypatch):
+    """Per-platform verdicts exist so coverage is not merely whatever ran last."""
+    gate = _gate()
+    directory = tmp_path / "c1"
+    directory.mkdir()
+    for platform, source in [
+        ("mockplatform", "fixtures/mockplatform/selectors_mock.json"),
+        ("chatgpt", "selectors_mobile.json"),
+    ]:
+        (directory / f"verdict-{platform}.json").write_text(
+            json.dumps({"pass": True, "platform": platform, "manifest_source": source})
+        )
+    monkeypatch.setattr(gate, "C1_VERDICT", directory / "verdict.json")
+    assert gate.c1_covered() == {"mockplatform", "chatgpt"}
+
+
+def test_the_mock_platforms_own_fixture_is_still_credited(tmp_path, monkeypatch):
+    """The mock IS a fixture platform — refusing it would leave nothing ever covered."""
+    gate = _gate()
+    directory = tmp_path / "c1"
+    directory.mkdir()
+    (directory / "verdict-mockplatform.json").write_text(
+        json.dumps({
+            "pass": True, "platform": "mockplatform",
+            "manifest_source": "fixtures/mockplatform/selectors_mock.json",
+        })
+    )
+    monkeypatch.setattr(gate, "C1_VERDICT", directory / "verdict.json")
+    assert gate.c1_covered() == {"mockplatform"}
+
+
+def test_the_real_repo_refuses_to_credit_the_chatgpt_wiring_proof():
+    """Against the ACTUAL artifacts on disk, which include a passing verdict-chatgpt.json."""
+    gate = _gate()
+    proof = REPO / "artifacts" / "c1" / "verdict-chatgpt.json"
+    if not proof.exists():
+        pytest.skip("no wiring-proof verdict present; run bin/c1_in_app.sh's proof invocation")
+    assert json.loads(proof.read_text())["pass"] is True, "the proof run should have passed"
+    assert "chatgpt" not in gate.c1_covered(), (
+        "a passing wiring-proof verdict must not be credited as real coverage"
+    )

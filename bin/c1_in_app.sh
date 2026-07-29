@@ -11,10 +11,20 @@
 # ⚠ The runtime JS is GENERATED from emubackend/substrate/runtime_js.py. One source of truth: a second
 # hand-maintained copy would drift from the one that has Simulator evidence behind it.
 #
-# Usage: bin/c1_in_app.sh <UDID>
+# Usage:
+#   bin/c1_in_app.sh <UDID>                       # the mock platform (default)
+#   bin/c1_in_app.sh <UDID> chatgpt               # a real platform, from the selector manifest
+#   bin/c1_in_app.sh <UDID> chatgpt path/to.json  # ...from a specific manifest
+#
+# The platform and its selectors are GENERATED into Swift at build time, so running C1 against a newly
+# captured platform needs no code change — which is what makes the coverage gate's demand satisfiable
+# rather than aspirational.
 set -euo pipefail
 
-UDID="${1:?usage: c1_in_app.sh <UDID>}"
+UDID="${1:?usage: c1_in_app.sh <UDID> [platform] [manifest]}"
+PLATFORM="${2:-mockplatform}"
+MANIFEST_ARG="${3:-}"
+URL_ARG="${4:-}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="$REPO/artifacts/c1"
 APP="$BUILD/SRC1.app"
@@ -22,7 +32,12 @@ BUNDLE_ID="com.distributedglobal.src1"
 PORT=8901
 PY="$REPO/.venv/bin/python"
 
-rm -rf "$BUILD"; mkdir -p "$APP"
+# ⚠ Only the app bundle is cleaned, NOT the whole artifacts dir. `rm -rf "$BUILD"` deleted the other
+# platforms' verdict-*.json files, so coverage could never accumulate across platforms — which is the
+# entire reason the verdicts are written per platform.
+mkdir -p "$BUILD"
+rm -rf "$APP" "$BUILD/SRManifest.swift" "$BUILD/SRRuntime.swift"
+mkdir -p "$APP"
 
 echo "==> serving the mock platform on :$PORT"
 if ! curl -fsS -o /dev/null "http://127.0.0.1:$PORT/"; then
@@ -33,6 +48,9 @@ if ! curl -fsS -o /dev/null "http://127.0.0.1:$PORT/"; then
     sleep 0.5
   done
 fi
+
+echo "==> generating the manifest constant for platform '$PLATFORM'"
+"$PY" "$REPO/bin/c1_gen_manifest.py" "$PLATFORM" "$BUILD/SRManifest.swift" ${MANIFEST_ARG:+--manifest "$MANIFEST_ARG"} ${URL_ARG:+--url "$URL_ARG"}
 
 echo "==> generating the runtime constant from runtime_js.py"
 "$PY" - "$BUILD/SRRuntime.swift" <<'PY'
@@ -67,6 +85,7 @@ xcrun swiftc \
   -framework UIKit -framework WebKit \
   -o "$APP/SRC1" \
   "$BUILD/SRRuntime.swift" \
+  "$BUILD/SRManifest.swift" \
   "$REPO"/ios/Sources/SuperResearchDeviceCore/*.swift \
   "$REPO/ios/C1Harness/main.swift"
 
@@ -114,6 +133,9 @@ set -e
 CONTAINER="$(xcrun simctl get_app_container "$UDID" "$BUNDLE_ID" data 2>/dev/null || true)"
 FOUND="$(find "$CONTAINER" -name verdict.json -path '*sr-c1*' 2>/dev/null | head -1)"
 if [ -n "$FOUND" ]; then
+  # Written per platform AND to the legacy path, so coverage can accumulate across platforms while
+  # existing readers of verdict.json keep working.
+  cp "$FOUND" "$BUILD/verdict-$PLATFORM.json"
   cp "$FOUND" "$BUILD/verdict.json"
   "$PY" -c "
 import json, sys
@@ -122,7 +144,7 @@ print()
 for r in d['results']:
     print(('  [PASS] ' if r['pass'] else '  [FAIL] ') + r['check'] + (': ' + r['detail'] if r['detail'] else ''))
 print()
-print('C1 in-app: ' + ('PASS' if d['pass'] else 'FAIL') + '  -> $BUILD/verdict.json')
+print('C1 in-app [' + d['platform'] + ']: ' + ('PASS' if d['pass'] else 'FAIL') + '  -> $BUILD/verdict-$PLATFORM.json')
 sys.exit(0 if d['pass'] else 1)
 "
 else

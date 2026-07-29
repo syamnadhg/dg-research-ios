@@ -53,16 +53,37 @@ def cleared_platforms(manifest) -> dict[str, list[str]]:
 
 
 def c1_covered() -> set[str]:
-    """Which platforms the C1 gate actually ran against."""
-    if not C1_VERDICT.exists():
-        return set()
-    verdict = json.loads(C1_VERDICT.read_text())
-    if not verdict.get("pass"):
-        return set()   # a failing C1 covers nothing, whatever it names
-    # The verdict names its platform in prose (e.g. "mockplatform (the only platform ...)"), so the
-    # token before any parenthesis is the identifier.
-    named = str(verdict.get("platform", "")).split("(")[0].strip()
-    return {named} if named else set()
+    """Which platforms a C1 run has genuinely covered.
+
+    Reads every `artifacts/c1/verdict-*.json`, so coverage accumulates across platforms instead of
+    being whatever ran last.
+
+    ⚠ **Provenance is checked, not just the pass flag.** Proving that the harness can drive a non-mock
+    platform requires running it under a *proof* manifest — which writes a passing
+    `verdict-chatgpt.json`. Crediting that would have the gate report chatgpt as covered when nobody has
+    captured a single real selector for it: the gate congratulating itself. So a verdict counts only if
+    its `manifest_source` is neither marked as a wiring proof nor a manifest under
+    `fixtures/manifests/`.
+    """
+    covered: set[str] = set()
+    directory = C1_VERDICT.parent
+    if not directory.exists():
+        return covered
+    for path in sorted(directory.glob("verdict*.json")):
+        try:
+            verdict = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not verdict.get("pass"):
+            continue   # a failing C1 covers nothing, whatever it names
+        platform = str(verdict.get("platform", "")).split("(")[0].strip()
+        if not platform:
+            continue
+        source = str(verdict.get("manifest_source", ""))
+        if "WIRING PROOF" in source or "fixtures/manifests/" in source:
+            continue
+        covered.add(platform)
+    return covered
 
 
 def main() -> int:
