@@ -17,12 +17,32 @@ import UIKit
 /// reachable without hand-driving the app into them.
 final class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
+    var model: AppModel?
+
+    /// iOS suspends a backgrounded app, which stops the heartbeat. Resuming on foreground is what makes
+    /// "open the app and it is online" true rather than aspirational.
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        model?.applicationBecameActive()
+    }
 
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        // Identity the frontend's Account page will show. Supplied here because the core package is
+        // deliberately UIKit-free.
+        RESTPairingBackend.deviceNameProvider = { UIDevice.current.name }
+        RESTPairingBackend.osStringProvider = {
+            "\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)"
+        }
+
         let model = AppModel(backend: Self.chooseBackend())
+        self.model = model
+
+        // ⚠ A backend that sleeps is a backend that is offline. iOS dims and locks an idle device, which
+        // suspends the app and stops the heartbeat — so a device left paired on a desk would silently
+        // drop off the web app. This is exactly the trade a backend wants and an ordinary app does not.
+        application.isIdleTimerDisabled = true
 
         let window = UIWindow(frame: UIScreen.main.bounds)
         window.rootViewController = UIHostingController(rootView: RootView(model: model))
@@ -56,11 +76,21 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         }
         // The frontend origin is overridable so the app can be pointed at a local FE during
         // development without a rebuild of the plist.
-        let base = environment["SR_API_BASE_URL"] ?? "https://superresearch.distributedglobal.com"
+        // ⚠ VERIFIED against the backend's own default
+        // (`dg-research-backend/auth/v2_flow.py`: `RESEARCH_FE_BASE_URL`, default
+        // `https://superresearch.io`). My first guess was a distributedglobal.com subdomain that does
+        // not resolve — pairing would have failed with a DNS error on the very first attempt, which
+        // looks like a network problem rather than a wrong constant. Same env var name as the backend,
+        // so one override covers both.
+        let base = environment["RESEARCH_FE_BASE_URL"]
+            ?? environment["SR_API_BASE_URL"]
+            ?? "https://superresearch.io"
         do {
             let config = try FirebaseProjectConfig(
                 plist: plist, apiBaseURL: URL(string: base)!
             )
+            // Set here so the QR and the pairing POST cannot disagree about which frontend this is.
+            AppConfig.frontendBaseURL = base
             return DeviceBackend(config: config)
         } catch {
             // Reported and degraded rather than fatal: a malformed plist is a configuration problem

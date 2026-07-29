@@ -167,9 +167,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         length = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(length) or "{}")
-        secret_hash = body.get("secretHash", "")
+        # ⚠ `pollSecretHash` — the field name the REAL route uses
+        # (`dg-research-backend/auth/v2_flow.py::initiate_pair_remote`). This fixture read
+        # `secretHash` until the device was corrected to match production, at which point the gate
+        # failed 0/4 — correctly. A fixture that accepts a field the real server does not is worse
+        # than no fixture: it makes the gate green precisely when the app cannot pair.
+        secret_hash = body.get("pollSecretHash", "")
         if not secret_hash:
-            self.send_error(400, "secretHash is required")
+            self.send_error(400, "pollSecretHash is required")
             return
 
         device_id = f"dev-c0fe-{int(time.time())}"

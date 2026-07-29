@@ -15,6 +15,16 @@ struct RootView: View {
     var body: some View {
         ZStack {
             DS.C.bg.ignoresSafeArea()
+            // The landing page owns the whole screen, so it sits outside the dashboard's scroll view
+            // and header rather than being squeezed into a card.
+            if !model.snapshot.paired, model.screen == .landing, model.pairing != nil {
+                LandingView { model.screen = .notPaired }
+            } else if !model.snapshot.paired, model.screen == .notPaired, model.pairing != nil {
+                VStack(spacing: 0) {
+                    Header(snapshot: model.snapshot).padding(DS.S.screen)
+                    NotPairedView { model.screen = .pairing }
+                }
+            } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: DS.S.lg * 2) {
                     Header(snapshot: model.snapshot)
@@ -30,17 +40,20 @@ struct RootView: View {
                         )
                         UsersCard(users: model.snapshot.users)
                         ControlsCard(model: model)
+                    } else if let pairing = model.pairing {
+                        // The five-stage flow, matching `superresearch --pair` stage for stage. It
+                        // replaces the old three-bullet card, which described the steps without
+                        // walking anyone through them.
+                        PairingFlowView(controller: pairing)
                     } else {
-                        OnboardingCard(model: model)
-                        PlatformsCard(
-                            platforms: model.snapshot.platforms,
-                            model: model,
-                            onSelect: { loginTarget = $0 }
-                        )
+                        // Only reachable on the preview backend, which has nothing to pair against.
+                        Text("No Firebase configuration bundled — running in preview mode.")
+                            .font(DS.F.body).foregroundStyle(DS.C.textSecondary).srCard()
                     }
                     Footer(snapshot: model.snapshot)
                 }
                 .padding(DS.S.screen)
+            }
             }
         }
         .preferredColorScheme(.dark)
@@ -68,12 +81,17 @@ struct RootView: View {
     }
 }
 
+/// The wordmark, matching the web app's own.
+///
+/// The frontend renders it `text-2xl font-bold text-accent`, centered — so 24pt, bold, and in the
+/// accent blue rather than white. It was left-aligned in white here, which is a different brand.
 private struct Header: View {
     let snapshot: DeviceSnapshot
     var body: some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text("Super Research").font(DS.F.title).foregroundStyle(DS.C.textPrimary)
-            Spacer()
+        VStack(spacing: DS.S.md) {
+            Text("Super Research")
+                .font(DS.F.wordmark)
+                .foregroundStyle(DS.C.accent)
             if snapshot.paired {
                 StatusPill(
                     color: snapshot.online ? DS.C.ok : DS.C.textTertiary,
@@ -83,49 +101,7 @@ private struct Header: View {
                 StatusPill(color: DS.C.warn, text: "Not paired")
             }
         }
-    }
-}
-
-// MARK: - Onboarding (the first-run path the owner asked about)
-
-private struct OnboardingCard: View {
-    @ObservedObject var model: AppModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: DS.S.lg) {
-            SectionLabel(text: "Set up this device")
-            Text("This device becomes a Super Research backend. Pair it, then fire research at it from the web app or the chat agent.")
-                .font(DS.F.body).foregroundStyle(DS.C.textSecondary)
-
-            // Ordered, numbered, and honest about which steps are not ours to do. An onboarding
-            // that hides the human steps just moves the confusion to the moment they are needed.
-            VStack(alignment: .leading, spacing: DS.S.md) {
-                Step(n: 1, text: "Get a pair code", done: false)
-                Step(n: 2, text: "Enter it on the web app's Account page", done: false)
-                Step(n: 3, text: "Sign in to each platform once", done: false)
-            }
-
-            SRButton(title: "Get pair code", role: .primary) {
-                model.invoke(Operations.byID("pair")!)
-            }
-        }
-        .srCard()
-    }
-}
-
-private struct Step: View {
-    let n: Int
-    let text: String
-    let done: Bool
-    var body: some View {
-        HStack(spacing: DS.S.lg) {
-            Text("\(n)")
-                .font(DS.F.mono(11, .semibold))
-                .foregroundStyle(done ? DS.C.ok : DS.C.textTertiary)
-                .frame(width: 16, height: 16)
-                .overlay(Circle().stroke(done ? DS.C.ok : DS.C.border, lineWidth: 1))
-            Text(text).font(DS.F.body).foregroundStyle(DS.C.textSecondary)
-        }
+        .frame(maxWidth: .infinity)
     }
 }
 
@@ -191,31 +167,43 @@ private struct Metric: View {
 ///
 /// A fractional scale blurs the boundaries and a blurred QR does not decode — which looks like the
 /// camera failing rather than the render being wrong.
-private struct QRView: View {
+struct QRView: View {
     let code: String
+    /// Point size. The pairing flow wants it big enough to scan from a phone held at arm's length;
+    /// the paired dashboard only needs a reminder of what the code was.
+    var side: CGFloat = 88
 
     var body: some View {
         Group {
             if let image = qr {
                 Image(decorative: image, scale: 1)
                     .interpolation(.none)           // nearest-neighbour; smoothing kills the scan
-                    .frame(width: 88, height: 88)
+                    .frame(width: side, height: side)
                     .padding(DS.S.md)
                     .background(Color.white)        // quiet zone: scanners need the light margin
                     .clipShape(RoundedRectangle(cornerRadius: DS.R.sm))
             } else {
                 RoundedRectangle(cornerRadius: DS.R.sm)
                     .stroke(DS.C.border, lineWidth: 1)
-                    .frame(width: 100, height: 100)
+                    .frame(width: side + 12, height: side + 12)
             }
         }
     }
 
     private var qr: CGImage? {
         guard !code.isEmpty,
-              let ci = try? QRCode.imageForPairCode(code, baseURL: "https://app.superresearch.dev")
+              // ⚠ Was hardcoded to `https://app.superresearch.dev`, which is not the frontend this
+              // app talks to — scanning the code would have led nowhere. The unit test
+              // `testTheBaseURLIsTakenNotHardcoded` passed the whole time, because the *function*
+              // takes a base URL; it was the CALL SITE that hardcoded one. A parameterised API is no
+              // protection if its only caller ignores the parameter.
+              let ci = try? QRCode.imageForPairCode(code, baseURL: AppConfig.frontendBaseURL)
         else { return nil }
-        let scale = QRCode.integerScale(for: ci.extent.width, targetPoints: 88)
+        // ⚠ `side`, not a hardcoded 88. This was the SECOND hardcoded value in this one function:
+        // the raster was always sized for 88pt, so at 220pt the QR rendered at its intrinsic size and
+        // floated in the middle of a much larger white card. `integerScale(for:targetPoints:)` takes
+        // the target precisely so the rasterisation matches the display size.
+        let scale = QRCode.integerScale(for: ci.extent.width, targetPoints: side)
         let scaled = ci.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
         return CIContext().createCGImage(scaled, from: scaled.extent)
     }

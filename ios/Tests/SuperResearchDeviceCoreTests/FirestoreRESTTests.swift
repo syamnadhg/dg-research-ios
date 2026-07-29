@@ -14,7 +14,9 @@ final class FirestoreRESTTests: XCTestCase {
     private let config = FirebaseProjectConfig(
         projectID: "test-project",
         apiKey: "test-key",
-        apiBaseURL: URL(string: "https://example.test")!
+        apiBaseURL: URL(string: "https://example.test")!,
+        // An emulator host, so the two api-key paths above are distinguishable.
+        emulatorHost: "127.0.0.1:8181"
     )
 
     // MARK: - Value encoding
@@ -139,15 +141,34 @@ final class FirestoreRESTTests: XCTestCase {
         XCTAssertNil(fields)
     }
 
-    func testAnUnauthenticatedReadSendsTheApiKeyAndNoBearerToken() async throws {
+    func testAnUnauthenticatedProductionReadSendsNeitherKeyNorBearerToken() async throws {
         // The bootstrap read. There is no session yet — the token to create one is what it fetches.
+        //
+        // ⚠ And it sends NO api key. The backend's own poller
+        // (`auth/v2_flow.py::poll_pending_token`) issues a bare GET, and that is the path proven in
+        // production. Appending `?key=` is not merely redundant: a key restricted by API or referrer
+        // would 403 where omitting it succeeds, turning the pairing bootstrap into a permissions error
+        // that points at the rules rather than at the key. This test asserted the opposite until the
+        // backend was checked.
+        let production = FirebaseProjectConfig(
+            projectID: "p", apiKey: "test-key", apiBaseURL: URL(string: "https://x.test")!
+        )
         let transport = StubTransport(responses: [.ok("{\"fields\":{}}")])
-        let client = FirestoreREST(config: config, transport: transport)
+        let client = FirestoreREST(config: production, transport: transport)
         _ = try await client.getDocument(path: "devices/x/pending/y", authenticated: false)
 
         let request = try transport.lastRequest()
-        XCTAssertTrue(request.url!.absoluteString.contains("key=test-key"))
+        XCTAssertFalse(request.url!.absoluteString.contains("key="), "no api key in production")
         XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+    }
+
+    func testTheEmulatorPathStillSendsTheKey() async throws {
+        // The emulator wants it and ignores its value; keeping it there is what lets the C0-FE gate
+        // authenticate as nobody.
+        let transport = StubTransport(responses: [.ok("{\"fields\":{}}")])
+        let client = FirestoreREST(config: config, transport: transport)   // config has an emulatorHost
+        _ = try await client.getDocument(path: "devices/x/pending/y", authenticated: false)
+        XCTAssertTrue(try transport.lastRequest().url!.absoluteString.contains("key=test-key"))
     }
 
     func testAnAuthenticatedRequestWithoutASessionFailsClearly() async throws {
@@ -260,9 +281,18 @@ final class FirestoreRESTTests: XCTestCase {
 
         XCTAssertEqual(response.deviceId, "dev-9")
         XCTAssertEqual(response.pairCode, "JPNTY4F9")
+        // ⚠ FIELD NAMES verified against the backend's own caller,
+        // `dg-research-backend/auth/v2_flow.py::initiate_pair_remote`. It sends `pollSecretHash`,
+        // `machineName`, `hostname`, `os` — and no `platform`. This test asserted `secretHash` and
+        // `platform: "ios"`, both invented, so it would have passed a build that could not pair at all.
+        // A stub cannot tell you what the other end expects; only the other end can.
         let body = try transport.lastBodyJSON()
-        XCTAssertEqual(body["secretHash"] as? String, "abc123")
-        XCTAssertEqual(body["platform"] as? String, "ios")
+        XCTAssertEqual(body["pollSecretHash"] as? String, "abc123")
+        XCTAssertNil(body["secretHash"], "the old, wrong name must not come back")
+        XCTAssertNil(body["platform"], "there is no platform field in this route")
+        XCTAssertNotNil(body["machineName"])
+        XCTAssertNotNil(body["hostname"])
+        XCTAssertNotNil(body["os"])
     }
 
     func testPollPendingReturnsNilUntilTheCustomTokenAppears() async throws {

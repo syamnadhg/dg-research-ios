@@ -69,11 +69,36 @@ final class AppModel: ObservableObject {
     @Published var busyOpID: String? = nil
     @Published var toast: String? = nil
     @Published var pendingConfirm: Operation? = nil
+    /// Present only for the real backend: the five-stage pairing flow. `nil` on the preview backend,
+    /// which has nothing to pair against.
+    @Published var pairing: PairingController? = nil
+    /// Landing → not-paired → pairing. Only meaningful while unpaired; a paired device goes straight to
+    /// the dashboard.
+    @Published var screen: AppScreen = .landing
 
     private let backend: AppBackend
 
     init(backend: AppBackend) {
         self.backend = backend
+        if let device = backend as? DeviceBackend {
+            pairing = PairingController(
+                backend: device,
+                platforms: [
+                    PlatformState(id: "chatgpt", name: "ChatGPT", signedIn: nil),
+                    PlatformState(id: "gemini", name: "Gemini", signedIn: nil),
+                    PlatformState(id: "claude", name: "Claude", signedIn: nil),
+                    PlatformState(id: "notebooklm", name: "NotebookLM", signedIn: nil),
+                ]
+            )
+            // An already-paired device must start beating on launch, not wait for someone to pair
+            // again. Without this, relaunching the app leaves it looking offline to the web app.
+            device.resumeIfPaired()
+        }
+    }
+
+    /// Called on foreground/background so the heartbeat matches what iOS actually permits.
+    func applicationBecameActive() {
+        (backend as? DeviceBackend)?.resumeIfPaired()
     }
 
     func refresh() async {

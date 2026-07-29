@@ -291,7 +291,14 @@ public actor FirestoreREST {
         path: String, authenticated: Bool = true
     ) async throws -> [String: FirestoreValue]? {
         var url = "\(config.documentsRoot)/\(path)"
-        if !authenticated { url += "?key=\(config.apiKey)" }
+        // ⚠ NO api key on the unauthenticated read. The backend's own poller
+        // (`auth/v2_flow.py::poll_pending_token`) sends a bare GET, and that is the path proven in
+        // production. Appending `?key=` is not merely redundant: a key restricted by API or referrer
+        // would make this 403 where omitting it succeeds — turning the pairing bootstrap into a
+        // permissions error that points at the rules rather than at the key.
+        //
+        // The emulator ignores the key either way, so no gate would ever have caught this.
+        if !authenticated, config.emulatorHost != nil { url += "?key=\(config.apiKey)" }
         var request = URLRequest(url: URL(string: url)!)
         request.httpMethod = "GET"
         if authenticated { try await authorize(&request) }

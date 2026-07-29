@@ -23,6 +23,18 @@ public final class RESTPairingBackend: PairingBackend {
 
     public var now: Date { Date() }
 
+    /// What the frontend's Account page labels this device.
+    ///
+    /// The desktop backend sends its hostname. An iPhone has no hostname worth showing, so this sends
+    /// the user-visible device name ("Sammy's iPhone") — the same thing they would recognise in
+    /// Settings, which is the point of the field.
+    private var deviceName: String { Self.deviceNameProvider() }
+    private var osString: String { Self.osStringProvider() }
+
+    /// Injected so the core package stays UIKit-free and testable; the app supplies the real values.
+    public static var deviceNameProvider: @Sendable () -> String = { "iOS Simulator" }
+    public static var osStringProvider: @Sendable () -> String = { "iOS" }
+
     /// Exposed so the app can reuse the authenticated session for heartbeats, queue polls and
     /// `pipeline_events` writes rather than signing in a second time.
     public var firestore: FirestoreREST { client }
@@ -41,8 +53,21 @@ public final class RESTPairingBackend: PairingBackend {
         )
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // ⚠ FIELD NAMES VERIFIED against the backend's own caller
+        // (`dg-research-backend/auth/v2_flow.py::initiate_pair_remote`). They are
+        // `pollSecretHash` / `machineName` / `hostname` / `os` — NOT `secretHash`, and there is no
+        // `platform` field. My first version sent `{secretHash, platform}`, which the route would have
+        // rejected on the very first pairing attempt with an error naming neither field.
+        //
+        // This is the one request in the whole flow that talks to the frontend rather than to Firestore,
+        // so it is the one place where a name mismatch is invisible until a human tries to pair.
         request.httpBody = try JSONSerialization.data(
-            withJSONObject: ["secretHash": secretHash, "platform": "ios"]
+            withJSONObject: [
+                "pollSecretHash": secretHash,
+                "machineName": deviceName,
+                "hostname": deviceName,
+                "os": osString,
+            ]
         )
 
         let (data, status) = try await transport.send(request)

@@ -48,7 +48,11 @@ public enum QRCode {
     /// fails in the least debuggable way possible: it scans perfectly and opens the wrong site.
     public static func claimURL(baseURL: String, pairCode: String) -> String {
         let trimmed = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
-        return "\(trimmed)/account?pair=\(pairCode)"
+        // ⚠ `repair`, not `pair`. Verified in the frontend: `account/page.tsx` reads
+        // `searchParams.get("repair")`, uppercases it, strips non-alphanumerics and opens the pairing
+        // slot prefilled. `?pair=` is silently ignored — the QR scans, the account page opens, and
+        // nothing is filled in, which is the least debuggable kind of wrong.
+        return "\(trimmed)/account?repair=\(pairCode)"
     }
 
     /// Render *payload* as a QR `CIImage`.
