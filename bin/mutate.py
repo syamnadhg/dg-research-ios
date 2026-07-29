@@ -302,6 +302,42 @@ MUTATIONS = [
         "test_rest.py::test_run_query_tolerates_readtime_only_rows",
         "treating runQuery's readTime-only rows as documents",
     ),
+    # ---- golden fixtures ----
+    (
+        "emubackend/contract/fixtures.py",
+        "        if key in volatile:",
+        "        if False:",
+        "test_fixtures.py::test_volatile_values_become_type_markers_so_two_runs_agree",
+        "comparing epoch-millis values raw, so the fixture suite fails every single run",
+    ),
+    (
+        "emubackend/contract/fixtures.py",
+        '_ID_SEGMENT = re.compile(r"[0-9A-Za-z_-]{16,}")',
+        '_ID_SEGMENT = re.compile(r"[0-9A-Za-z_-]{4,}")',
+        "test_fixtures.py::test_short_path_segments_are_not_mistaken_for_ids",
+        "over-tokenising real path segments, so the comparison checks nothing useful",
+    ),
+    (
+        "emubackend/contract/fixtures.py",
+        "        if g.delete_paths != a.delete_paths:",
+        "        if False:",
+        "test_fixtures.py::test_a_dropped_delete_path_fails",
+        "missing a dropped expireAt delete - the atomic pair-confirm's entire purpose",
+    ),
+    (
+        "emubackend/contract/fixtures.py",
+        "    for i in range(max(len(golden), len(actual))):",
+        "    for i in range(min(len(golden), len(actual))):",
+        "test_fixtures.py::test_a_short_sequence_reports_what_is_missing",
+        "a truncated write sequence comparing clean",
+    ),
+    (
+        "emubackend/contract/fixtures.py",
+        "        for key in sorted(set(g.fields) | set(a.fields)):",
+        "        for key in sorted(set(g.fields) & set(a.fields)):",
+        "test_fixtures.py::test_every_difference_is_reported_not_just_the_first",
+        "ignoring fields that are missing or extra rather than merely different",
+    ),
 ]
 
 
@@ -312,7 +348,17 @@ def run(node: str) -> bool:
         cwd=ROOT,
         capture_output=True,
         text=True,
-        env={"PYTHONPATH": ".", "PATH": "/opt/homebrew/bin:/usr/bin:/bin"},
+        env={
+            "PYTHONPATH": ".",
+            "PATH": "/opt/homebrew/bin:/usr/bin:/bin",
+            # ⚠ Load-bearing. Python invalidates a cached .pyc on (mtime, size), and a
+            # same-LENGTH mutation ("max" -> "min") restores to an identical size. If the
+            # restore lands in the same mtime granule, the stale bytecode for the MUTATED
+            # source keeps being imported — so the mutation looks uncaught AND the clean
+            # verification run silently tests the mutant too. Both mutations reported MISSED
+            # in this harness's first run were this, not a test gap.
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
     )
     return p.returncode == 0
 
@@ -343,7 +389,21 @@ def probe_forbidden_call_detector(failures: list[str]) -> None:
     print(f"{status} {node}\n          simulates: our own code calling setup_firestore_run()")
 
 
+def _purge_bytecode() -> None:
+    """Remove stale __pycache__ trees before starting.
+
+    PYTHONDONTWRITEBYTECODE stops NEW caches being written, but a cache left by an ordinary
+    test run beforehand can still shadow a restored file for the same (mtime, size) reason.
+    """
+    import shutil
+
+    for cache in ROOT.rglob("__pycache__"):
+        if ".venv" not in cache.parts:
+            shutil.rmtree(cache, ignore_errors=True)
+
+
 def main() -> int:
+    _purge_bytecode()
     failures = []
     for rel, old, new, node, defect in MUTATIONS:
         path = ROOT / rel
