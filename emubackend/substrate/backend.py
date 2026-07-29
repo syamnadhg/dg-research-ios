@@ -311,15 +311,34 @@ class IOSSimulatorBackend(BrowserBackend):
         # Injection is idempotent and cheap ('already' on a hit), so paying it every calibration is
         # strictly better than diagnosing the race.
         await asyncio.to_thread(insp.evaluate_json, runtime_js.RUNTIME_JS)
-        tab.calibration = await asyncio.to_thread(
-            lambda: geometry.calibrate(
+
+        def measure():
+            return geometry.calibrate(
                 evaluate_json=insp.evaluate_json,
                 tap=lambda x, y: hid.tap(self.udid, x, y, screen=self._screen),
                 screen_width=self._screen.width,
                 screen_height=self._screen.height,
                 probe=geometry.SR_PROBE,
             )
-        )
+
+        # ⚠ One retry, and only for a layout that moved DURING the measurement.
+        #
+        # Safari's URL bar collapses the first time the page scrolls, which changes innerHeight
+        # (measured 749 -> now 714 in the case that surfaced this) — and the calibration probes
+        # themselves are what trigger it. So the first attempt on a fresh tab can legitimately be
+        # invalidated by its own side effect, while the second runs against the settled layout.
+        #
+        # `geometry.calibrate` is deliberately left strict: refusing a measurement that describes
+        # neither state is correct, and a transform averaged across a moving layout is exactly the
+        # off-by-the-URL-bar error that makes taps land near their target instead of on it. The
+        # retry is the CALLER's policy, capped at one, so a genuinely unstable layout still fails
+        # rather than looping.
+        try:
+            tab.calibration = await asyncio.to_thread(measure)
+        except geometry.CalibrationError as first:
+            if "layout changed during calibration" not in str(first):
+                raise
+            tab.calibration = await asyncio.to_thread(measure)
         return tab.calibration
 
     async def tap(self, tab: Tab, client_x: float, client_y: float) -> dict:

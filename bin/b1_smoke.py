@@ -117,12 +117,21 @@ async def main(udid: str) -> int:
             landed,
             f"isTrusted={event.get('isTrusted')} client=({event.get('clientX')},{event.get('clientY')})",
         )
-        fixture_events = await page.evaluate("window.__b0a.events") or []
-        hit_t1 = any(e.get("targetId") == "t1" for e in fixture_events)
+        # Asserted on the RETURNED event, which is what tap_element's own contract says is the
+        # evidence — "the caller is expected to assert on its targetId".
+        #
+        # ⚠ The previous version scanned the fixture's own `__b0a.events` recorder instead, and that
+        # was wrong in a way that made the check unreliable rather than strict: the recorder
+        # accumulates every tap the page sees, including the four calibration probe taps and their
+        # pointerdown/touchstart/click triples, and calibration resets `__sr.events` rather than
+        # `__b0a.events`. So the list it inspected was mostly calibration noise, and whether the aimed
+        # tap appeared in it depended on ordering the check did not control. The returned event is
+        # unambiguous: it is the event captured for THIS tap.
+        hit_target = event.get("targetId")
         record(
             "the tap hit the element we aimed at",
-            hit_t1,
-            f"fixture recorded targets={[e.get('targetId') for e in fixture_events]}",
+            hit_target == "t1",
+            f"targetId={hit_target!r} — the tap landed ON #t1, not merely somewhere trusted",
         )
 
         # The calibration overlay must be gone, or the page is left unusable.

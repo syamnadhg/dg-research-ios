@@ -68,6 +68,12 @@ def c1_covered() -> set[str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, default=None)
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="where to write the verdict; defaults to artifacts/coverage/verdict.json",
+    )
     args = parser.parse_args()
 
     manifest = selectors_mod.load_manifest(args.manifest)
@@ -106,8 +112,13 @@ def main() -> int:
             "'cleared' and this gate FAILS until C1 has been run against them."
         ),
     }
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps(verdict, indent=2))
+    # ⚠ A run against an alternate manifest must NOT overwrite the real verdict. Proving the gate
+    # blocks (with fixtures/manifests/one_platform_cleared.json) wrote a FAIL over the repo's genuine
+    # PASS the first time — a self-test that corrupts the artifact it is testing.
+    out = args.out or (OUT if args.manifest is None else
+                       OUT.parent / f"verdict-{args.manifest.stem}.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(verdict, indent=2))
 
     for failure in failures:
         print(f"  [FAIL] {failure}")
@@ -115,7 +126,7 @@ def main() -> int:
         print(f"  [PASS] cleared={sorted(cleared)} all covered by C1")
     if blocked:
         print(f"  [note] awaiting selectors (#82): {sorted(blocked)}")
-    print(f"\ncoverage: {'PASS' if not failures else 'FAIL'} -> {OUT}")
+    print(f"\ncoverage: {'PASS' if not failures else 'FAIL'} -> {out}")
     return 0 if not failures else 1
 
 

@@ -142,3 +142,85 @@ def test_the_real_repo_state_is_what_the_report_claims():
         "a real platform reports as cleared — if selectors have genuinely landed, run C1 against it; "
         "this test failing is the intended signal, not a nuisance"
     )
+
+
+# ======================================================================================
+# end-to-end: the real CLI, no monkeypatching
+# ======================================================================================
+
+
+def test_the_real_cli_exits_nonzero_when_a_cleared_platform_has_no_in_app_run(tmp_path):
+    """The enforcement proof, run as a subprocess against a real manifest file.
+
+    The monkeypatched tests above check the logic; this checks the **thing that will actually run** —
+    argument parsing, manifest loading, exit code. A mechanism verified only through its internals is
+    the kind that turns out to be wired to nothing.
+
+    `fixtures/manifests/one_platform_cleared.json` describes the state that does not exist yet: chatgpt
+    fully captured. Its selectors are plausible placeholders and are NOT a claim about real DOM — the
+    file exists to make the gate demonstrate that it blocks.
+    """
+    import subprocess
+
+    fixture = REPO / "fixtures" / "manifests" / "one_platform_cleared.json"
+    assert fixture.exists(), "the fixture manifest is missing"
+    out = tmp_path / "verdict.json"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO / "bin" / "coverage_gate.py"),
+            "--manifest", str(fixture),
+            "--out", str(out),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO,
+    )
+
+    assert result.returncode == 1, (
+        f"the gate must BLOCK when a platform clears C0 without an in-app run.\n{result.stdout}"
+    )
+    assert "cleared C0 but never run in-app: ['chatgpt']" in result.stdout
+    verdict = json.loads(out.read_text())
+    assert verdict["pass"] is False
+    assert "chatgpt" in verdict["cleared"]
+    assert "chatgpt" not in verdict["covered_by_c1"]
+
+
+def test_an_alternate_manifest_run_does_not_clobber_the_real_verdict(tmp_path):
+    """Found by doing it: the first proof run wrote a FAIL over the repo's genuine PASS.
+
+    A self-test that corrupts the artifact it is testing is worse than no self-test, because the
+    corrupted artifact then gets read as the current state.
+    """
+    import subprocess
+
+    real = REPO / "artifacts" / "coverage" / "verdict.json"
+    before = real.read_text() if real.exists() else None
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(REPO / "bin" / "coverage_gate.py"),
+            "--manifest", str(REPO / "fixtures" / "manifests" / "one_platform_cleared.json"),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO,
+    )
+
+    after = real.read_text() if real.exists() else None
+    assert after == before, "a --manifest run must write to its own verdict path"
+
+
+def test_the_real_cli_passes_on_the_repos_actual_state():
+    """The other direction, so the gate is not merely always-failing."""
+    import subprocess
+
+    result = subprocess.run(
+        [sys.executable, str(REPO / "bin" / "coverage_gate.py")],
+        capture_output=True, text=True, cwd=REPO,
+    )
+    assert result.returncode == 0, result.stdout
+    assert "mockplatform" in result.stdout

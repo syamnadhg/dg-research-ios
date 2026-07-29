@@ -22,6 +22,7 @@ __all__ = [
     "HidError",
     "Screen",
     "key",
+    "largest_frame",
     "screen_size",
     "screenshot",
     "swipe",
@@ -67,14 +68,44 @@ def screen_size(udid: str) -> Screen:
     booted but not yet finished starting up. ``xcrun simctl bootstatus <udid> -b`` first.
     """
     out = _axe("describe-ui", "--udid", udid)
-    match = _AXFRAME_RE.search(out)
-    if not match:
+    return largest_frame(out)
+
+
+def largest_frame(describe_ui_output: str) -> Screen:
+    """The screen, taken as the **largest** frame in the accessibility tree.
+
+    ⚠ Not the first one. The first version took `search()`'s first match and assumed it was the root,
+    which depends on which app happens to be frontmost and on how its tree is ordered — and it
+    silently returned **402x100pt** for a real device whose screen is 402x874. Every probe tap was
+    then computed inside a 100-point band, none of them reached the page, and the gate reported
+    "fewer than two probe taps produced a trusted event", which reads as a broken input channel rather
+    than a bad screen measurement. B1 had passed minutes earlier through the same code path, because
+    a different app was foreground.
+
+    Taking the maximum by area is measurement rather than assumption, in the same spirit as measuring
+    the screen at all instead of looking it up from a device table: the screen is by definition the
+    biggest frame present, whatever the tree order.
+    """
+    frames = [
+        Screen(width=float(m.group(3)), height=float(m.group(4)))
+        for m in _AXFRAME_RE.finditer(describe_ui_output)
+    ]
+    if not frames:
         raise HidError(
             "could not parse an AXFrame from `axe describe-ui`. If it said "
             "'No translation object returned', the device is still starting — run "
             "`xcrun simctl bootstatus <udid> -b` and retry."
         )
-    return Screen(width=float(match.group(3)), height=float(match.group(4)))
+    biggest = max(frames, key=lambda s: s.width * s.height)
+    # A floor, because a plausible-but-tiny result is the failure mode that wasted the most time here:
+    # it produces taps that are computed, validated and dispatched, and simply land nowhere.
+    if biggest.height < 300 or biggest.width < 200:
+        raise HidError(
+            f"the largest AXFrame is {biggest.width:g}x{biggest.height:g}pt, which is too small to be "
+            f"a device screen. The accessibility tree probably describes a single view rather than the "
+            f"window — bring the app you intend to drive to the foreground and retry."
+        )
+    return biggest
 
 
 def tap(udid: str, x: float, y: float, screen: Screen | None = None) -> None:

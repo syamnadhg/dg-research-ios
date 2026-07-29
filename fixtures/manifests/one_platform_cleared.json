@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "surface": "ios-mobile-safari",
+  "platforms": {
+    "chatgpt": {
+      "logged_in_marker": "#prompt-textarea",
+      "composer": "#prompt-textarea",
+      "send": "[data-testid=send-button]",
+      "deep_research_toggle": "[data-testid=research]",
+      "activity_panel": null,
+      "sources": "[data-testid=source]",
+      "response_container": "[data-message-author-role=assistant]"
+    },
+    "gemini": {
+      "logged_in_marker": null,
+      "composer": null,
+      "send": null,
+      "deep_research_toggle": null,
+      "start_research": null,
+      "sources": null,
+      "response_container": null
+    },
+    "claude": {
+      "logged_in_marker": null,
+      "composer": null,
+      "send": null,
+      "research_toggle": null,
+      "artifact_panel": null,
+      "sources": null,
+      "response_container": null
+    },
+    "notebooklm": {
+      "logged_in_marker": null,
+      "add_source": null,
+      "generate_audio": null,
+      "audio_ready_marker": null
+    }
+  }
+}
