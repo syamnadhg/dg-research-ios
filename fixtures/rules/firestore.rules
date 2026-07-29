@@ -1,0 +1,724 @@
+// ⚠ IMPORTANT — this file is the SOURCE OF TRUTH, but Firestore enforces the
+// LIVE rules that have been deployed. After editing, you MUST deploy:
+//     cd research-app/web
+//     npm run firebase:deploy-rules
+// (Or: `firebase deploy --only firestore:rules` — same thing.)
+//
+// The deploy is tied to .firebaserc which pins the project to super-research-492814.
+// If you fork to your own Firebase project, update .firebaserc accordingly.
+//
+// A silent drift between this file and the deployed rules was the root cause of
+// the "Permission denied" pairing bug in April 2026 — rules said read-if-authed
+// but Firebase was still enforcing the pre-research_tokens ruleset.
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ─── Track D helpers ──────────────────────────────────────────────
+    // BE authenticates as a synthetic Firebase Auth user (`device-{uuid}`)
+    // whose custom claims carry `{ownerUid, deviceId}`. When the BE writes
+    // on behalf of a user (own research, a sharer's research), the doc
+    // payload MUST include a `deviceId` field that matches the token's
+    // `deviceId` claim — `deviceWritingTo` verifies that, plus that the
+    // device is actually authorized for the target user tree (via the
+    // device doc's `ownerUid` or `sharedWith[]`).
+    //
+    // `get(/devices/...)` costs one doc read per cross-tree write. At the
+    // current scale (10s of devices, ~100 cross-tree writes per research)
+    // this is well under the free tier (50K reads/day). Heartbeats live
+    // at the top-level `devices/{deviceId}` collection (NOT inside any
+    // user tree), so they don't pay this cost.
+    function deviceOwnership(deviceId, userId) {
+      return get(/databases/$(database)/documents/devices/$(deviceId)).data.ownerUid == userId
+          || userId in get(/databases/$(database)/documents/devices/$(deviceId)).data.sharedWith;
+    }
+    // Read-side counterpart to deviceWritingTo. Synth user is allowed to
+    // READ user-tree paths when (a) its custom claim carries a deviceId,
+    // and (b) that device's top-level doc lists this userId as ownerUid
+    // or in sharedWith. No payload check needed (reads have no
+    // request.resource.data) — used on research docs, settings/prefs,
+    // researches/{rid}/{documents,messages,audios,pipeline_events}.
+    // Pre-Track-D the BE was Admin-SDK which bypassed rules entirely;
+    // this restores read access for the synth-user replacement without
+    // opening up the user tree to other authed users.
+    function deviceMemberOf(userId) {
+      return request.auth != null
+          && request.auth.token.deviceId is string
+          && deviceOwnership(request.auth.token.deviceId, userId);
+    }
+    function deviceWritingTo(userId) {
+      return request.auth != null
+          && request.auth.token.deviceId is string
+          && request.resource.data.deviceId == request.auth.token.deviceId
+          && deviceOwnership(request.auth.token.deviceId, userId);
+    }
+    // For UPDATE: both the existing doc AND the new payload must be
+    // bound to this device — prevents an attacker from re-pointing a
+    // doc to a different device by overwriting its `deviceId` field.
+    //
+    // 2026-05-28: tolerate a MISSING existing `deviceId`. Legacy /
+    // pre-Track-D research docs (and any FE-created doc that didn't stamp
+    // deviceId) have no `deviceId` field, so the strict
+    // `resource.data.deviceId == token.deviceId` denied EVERY BE update to
+    // them — a chicken-and-egg: the BE could never inject deviceId because
+    // the inject itself is an update. Result: phase/status writes 403'd and
+    // those runs' tiles/banners desynced (the 2026-05-28 403 sweep). The
+    // `.get(..., token.deviceId)` default passes when the field is absent
+    // (BE then self-heals it on this write); line below still REQUIRES the
+    // NEW payload to carry the correct deviceId, so a doc already bound to a
+    // DIFFERENT device is still rejected (no re-pointing). _be_payload
+    // injects deviceId into every BE update, so the self-heal is automatic.
+    function deviceUpdatingFor(userId) {
+      return request.auth != null
+          && request.auth.token.deviceId is string
+          && resource.data.get('deviceId', request.auth.token.deviceId) == request.auth.token.deviceId
+          && request.resource.data.deviceId == request.auth.token.deviceId
+          && deviceOwnership(request.auth.token.deviceId, userId);
+    }
+
+    // ─── User tree ────────────────────────────────────────────────────
+    // Users can only access their own data
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+
+      // Per-user prefs — primarily apiKeys (Anthropic / Gemini / Deepgram)
+      // the FE Account page writes. The BE (synth user under Track D)
+      // reads .apiKeys at pipeline start; without the deviceMemberOf
+      // read-allow, every pipeline run errors out with "No API key" the
+      // moment _read_firestore_api_keys() is called. Writes stay
+      // strictly owner-only — synth user has no business mutating user
+      // prefs.
+      match /settings/prefs {
+        allow read: if (request.auth != null && request.auth.uid == userId)
+          || deviceMemberOf(userId);
+        allow write: if request.auth != null && request.auth.uid == userId;
+      }
+
+      // Paired backend devices — one doc per PC the user has run
+      // `python research.py --pair` on. Client can read + upsert for the
+      // pairing flow, rename, and supervised-toggle. Backend admin SDK
+      // also writes here for heartbeats + auto-claim during --pair.
+      //
+      // Track D note: this LEGACY path stays read-only-and-writable-by-
+      // user during the Q10 dual-fanout transition (D3 → D8). The new
+      // canonical path is top-level `devices/{deviceId}` (see further
+      // down). Old clients reading this keep working; new clients fan
+      // out and dedupe by deviceId.
+      match /devices/{deviceId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+
+        // Device-scoped command channel. The FE's writeDeviceCommand
+        // helper writes here (currently only `hard_reset` from the
+        // Account-page Online pill); the BE's _start_device_command_
+        // listener consumes + tail-deletes. Owner-only mirrors the
+        // parent device doc — no rules inheritance, so this needs to
+        // be spelled out explicitly. Without it the FE's command
+        // write would PERMISSION_DENIED and the pill click would
+        // silently no-op.
+        match /commands/{commandId} {
+          allow read, write: if request.auth != null && request.auth.uid == userId;
+        }
+      }
+
+      // In-app notification inbox. Client writes (FE-side `writeInboxEntry`
+      // on pipeline complete / errors / etc.), reads, marks read, and clears.
+      // BE-as-synthetic-device may also create notifications on the
+      // submitter's behalf (pipeline-complete + error-notify in user-mode)
+      // — the doc must carry deviceId matching the device's token claim
+      // AND the device must be authorized for this user tree.
+      match /notifications/{notifId} {
+        allow read: if request.auth != null && request.auth.uid == userId;
+        allow create: if (request.auth != null && request.auth.uid == userId)
+                   || deviceWritingTo(userId);
+        allow update: if (request.auth != null && request.auth.uid == userId)
+                   || deviceUpdatingFor(userId);
+        // Delete stays strictly user-only — BE doesn't tombstone inbox entries.
+        allow delete: if request.auth != null && request.auth.uid == userId;
+      }
+
+      // FCM tokens — registered when user opts into push notifications.
+      // Owner reads + writes their own. BE-as-synthetic-device READS the
+      // user's tokens to fan out push messages (no write — registration
+      // is FE-only). The read rule checks device authorization without
+      // requiring the legacy fcm doc to carry a deviceId field.
+      match /fcm_tokens/{tokenId} {
+        allow read: if request.auth != null
+          && (request.auth.uid == userId
+              || (request.auth.token.deviceId is string
+                  && deviceOwnership(request.auth.token.deviceId, userId)));
+        allow write: if request.auth != null && request.auth.uid == userId;
+      }
+
+      // Server-authoritative notification dedup markers — one doc per logical
+      // event id (e.g. pipelineCompletion-{researchId}). Written EXCLUSIVELY by
+      // the Admin SDK in /api/notify (an atomic create() that gates the
+      // out-of-band push+email fan-out so a user signed in on 2+ devices doesn't
+      // get duplicate "Research Complete" emails). Client writes are DENIED so a
+      // client can't pre-create a marker to suppress a real notification; owner
+      // read is allowed for debugging only.
+      match /notify_dedup/{dedupKey} {
+        allow read:  if request.auth != null && request.auth.uid == userId;
+        allow write: if false;
+      }
+
+      // Active sessions — one doc per browser tab/device. Created on
+      // auth-resolve, heartbeated every 120s, deleted on signOut. Powers
+      // the Manage Sessions UI + per-session live revoke. Owner-only —
+      // a user can list AND revoke their own sessions, no cross-user.
+      match /sessions/{sessionId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+
+      // Agent sessions (#790) — one doc per connected Super Agent install,
+      // written by the bridge (which authenticates AS this account, owner
+      // branch) on connect + heartbeat, and read/renamed/revoked by the user
+      // from the "Shared with" popup. Owner-only, EXACTLY like /sessions above:
+      // the bridge writes its own tree and each viewer reads only their own
+      // agent rows (no cross-user — rules v2 doesn't inherit the users/{userId}
+      // allow, so this must be spelled out explicitly).
+      match /agentSessions/{agentSessionId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+
+      // Researches — owner writes, plus Track D cross-tree writes from a
+      // device the user owns or is sharing. Cross-tree writes require the
+      // doc carry a `deviceId` field that matches the BE's token claim,
+      // AND that device's doc lists this user as ownerUid or in
+      // sharedWith[]. See helper functions at the top.
+      match /researches/{researchId} {
+        // Track D: synth user reads research docs to drive pipeline
+        // execution (backendRunId, status, pipelineConfig, deviceId,
+        // topic). The deviceMemberOf helper gates on the synth's
+        // ownership of the device — no per-doc deviceId check needed
+        // (every research write already includes deviceId via
+        // deviceWritingTo / deviceUpdatingFor, so the device tree
+        // covers the relationship).
+        //
+        // 2026-06-01 (#723): add a per-doc deviceId READ fast-path. The
+        // queued→ongoing flip (research.py _flip_txn) is the ONE BE write
+        // that does a transactional READ first; on a freshly-created SHARER
+        // doc the deviceMemberOf get(/devices/...) can race the cross-tree
+        // device-doc and 403 the read (the only #720-era synth-403 observed
+        // — the flip is redundant so the run still completes, but the heal
+        // falsely latches "structural"). Mirror deviceUpdatingFor's self-heal
+        // philosophy on the read side: a doc already STAMPED with this exact
+        // device's token reads without the cross-tree device lookup.
+        //
+        // Deliberately does NOT also call deviceOwnership() here, even though
+        // deviceMemberOf does: that helper's get(/devices/{deviceId}) is the
+        // PRECISE lookup that raced and 403'd, so re-adding it would re-arm the
+        // bug this clause exists to dodge. Safe without it because the deviceId
+        // stamp is only ever written by deviceWritingTo / deviceUpdatingFor,
+        // both of which DO verify deviceOwnership at WRITE time — so a doc
+        // carrying deviceId == this token implies the device was authorized for
+        // this tree when it wrote. token.deviceId is a server-set custom claim
+        // (a normal authed user has none, so this disjunct can't widen their
+        // access), and the match is exact (device A can't read device B's docs).
+        // Residual surface is narrow + bounded: a de-authorized device could
+        // still READ research docs it itself previously created — never write
+        // (writes still gate on deviceOwnership via deviceUpdatingFor) and never
+        // read another device's or unrelated docs.
+        //
+        // DGOPS-9507's counterpart, DGOPS-9510: that residual is an ACCEPTED risk,
+        // kept rather than narrowed, and it is bounded in TIME as well as in scope.
+        // Every de-authorization path already revokes the synthetic device user's
+        // refresh tokens — devices/unpair-self (both the device-initiated branch,
+        // which also deleteUser()s the synth uid, and the owner-unlink branch) and
+        // devices/reset-pair-code — and createCustomToken(syntheticUid) is minted
+        // ONLY by devices/claim, which requires the pair code. So a de-authorized
+        // device cannot mint or refresh a token; it has to legitimately re-pair.
+        // Rules cannot see revocation (only verifyIdToken(token, true) can), so
+        // what remains is the device's already-issued ID token until it expires:
+        // read-only, its own historical output, at most the token lifetime. NOT
+        // open-ended.
+        //
+        // Why not narrowed. The two mechanisms considered on the ticket both fail
+        // on their own terms. A server-set claim is structurally incapable of
+        // closing this window — custom claims only take effect on token refresh,
+        // and refresh is precisely what de-authorization revokes, so there is no
+        // future token left to carry the new claim. A per-document revoked flag
+        // WOULD close it, at the cost of a write to every research doc the device
+        // ever created on every de-auth event (unbounded fan-out, plus a new
+        // partial-failure mode) to buy back a bounded read-only window on the
+        // device's own output. Neither trade is worth it; unpair-self's own comment
+        // already describes the same "bounded (~token-lifetime) stale-claim window".
+        // Revisit if the deviceId disjunct is ever widened beyond exact-match, or if
+        // research docs start carrying data the owner has not already seen.
+        allow read: if (request.auth != null && request.auth.uid == userId)
+          || deviceMemberOf(userId)
+          || (request.auth != null
+              && request.auth.token.deviceId is string
+              && resource.data.get('deviceId', '') == request.auth.token.deviceId);
+        allow create: if (request.auth != null && request.auth.uid == userId)
+                   || deviceWritingTo(userId);
+        allow update: if (request.auth != null && request.auth.uid == userId)
+                   || deviceUpdatingFor(userId);
+        // Deletes stay strictly user-only — BE never tombstones research.
+        allow delete: if request.auth != null && request.auth.uid == userId;
+
+        match /messages/{messageId} {
+          allow read: if (request.auth != null && request.auth.uid == userId)
+            || deviceMemberOf(userId);
+          allow create: if (request.auth != null && request.auth.uid == userId)
+                     || deviceWritingTo(userId);
+          allow update: if (request.auth != null && request.auth.uid == userId)
+                     || deviceUpdatingFor(userId);
+          allow delete: if request.auth != null && request.auth.uid == userId;
+        }
+
+        match /documents/{documentId} {
+          allow read: if (request.auth != null && request.auth.uid == userId)
+            || deviceMemberOf(userId);
+          allow create: if (request.auth != null && request.auth.uid == userId)
+                     || deviceWritingTo(userId);
+          allow update: if (request.auth != null && request.auth.uid == userId)
+                     || deviceUpdatingFor(userId);
+          allow delete: if request.auth != null && request.auth.uid == userId;
+        }
+
+        match /audios/{audioId} {
+          allow read: if (request.auth != null && request.auth.uid == userId)
+            || deviceMemberOf(userId);
+          allow create: if (request.auth != null && request.auth.uid == userId)
+                     || deviceWritingTo(userId);
+          allow update: if (request.auth != null && request.auth.uid == userId)
+                     || deviceUpdatingFor(userId);
+          allow delete: if request.auth != null && request.auth.uid == userId;
+        }
+
+        match /pipeline_events/{eventId} {
+          allow read: if (request.auth != null && request.auth.uid == userId)
+            || deviceMemberOf(userId);
+          // Owner-scoped create — FE-P4/P5 (Doc/email + YouTube moved from
+          // BE to FE in 2026-04/05) emits phase_start/phase_complete/
+          // phase_skipped/pipeline_complete via emitFePipelineEvent so
+          // PhaseDropdown reflects FE-side progress identically to
+          // BE-emitted events. Restricted to those four types — anything
+          // else was BE-Admin-SDK-only pre-Track-D. With Track D, BE
+          // (as synthetic device user) can also create events of any
+          // type as long as it includes its deviceId in the payload and
+          // the device is authorized for this user tree.
+          allow create: if request.auth != null && (
+            (request.auth.uid == userId
+              && request.resource.data.type in ['phase_start', 'phase_complete', 'phase_skipped', 'pipeline_complete']
+              && request.resource.data.seq is number
+              && request.resource.data.timestamp is number)
+            ||
+            (deviceWritingTo(userId)
+              && request.resource.data.seq is number
+              && request.resource.data.timestamp is number)
+          );
+          // Append-only history — no rewriting past events.
+          allow update: if false;
+          // Owner MUST be able to delete their own events, otherwise
+          // deleteResearch's atomic cascade-delete batch fails and the
+          // parent research doc never unlinks (April 2026 bug: clicking
+          // Delete on a research did nothing because pipeline_events
+          // deletes were rejected, taking the whole batch down with them).
+          allow delete: if request.auth != null && request.auth.uid == userId;
+        }
+
+        // Per-research command channel. Owner (FE) writes Stop / Pause /
+        // Resume / Retry / ping; BE (synthetic device user under Track D)
+        // reads + updates with `processed: true` + `pongedAt`. Under the
+        // pre-Track-D Admin-SDK BE this was owner-only and worked because
+        // Admin SDK bypasses rules; under Track D the BE is just another
+        // authed user and needs an explicit allowance.
+        //
+        // Synth-user access is gated on the doc carrying `deviceId` that
+        // matches the BE's auth.token.deviceId claim. The FE writeCommand
+        // helper now stamps the deviceId on every command create (resolved
+        // from the parent research doc) so this rule has the field to
+        // compare against.
+        match /commands/{commandId} {
+          // Synth user gates uniformly on deviceMemberOf for read /
+          // list / update / delete. Update could be tightened to
+          // deviceUpdatingFor (require resource.data.deviceId match)
+          // but that wedges legacy commands that pre-date the FE
+          // writeCommand deviceId-stamping (those have no deviceId
+          // field, so deviceUpdatingFor fails forever and they replay
+          // on every listener attach). One synth user per device-tree
+          // in Track D means deviceMemberOf is functionally equivalent
+          // to deviceUpdatingFor at the user-flow level.
+          allow read, list: if (request.auth != null && request.auth.uid == userId)
+            || deviceMemberOf(userId);
+          allow create: if (request.auth != null && request.auth.uid == userId)
+            || deviceWritingTo(userId);
+          allow update: if (request.auth != null && request.auth.uid == userId)
+            || deviceMemberOf(userId);
+          allow delete: if (request.auth != null && request.auth.uid == userId)
+            || deviceMemberOf(userId);
+        }
+      }
+    }
+
+    // ─── Top-level devices (Track D canonical) ────────────────────────
+    // The new device collection. `pairCode` identifies the device (FE
+    // resolves a code to a doc via collectionGroup-style query inside
+    // the claim Cloud Function). `syntheticDeviceUid` is the Firebase
+    // Auth uid that the BE signs in as; it has custom claims
+    // `{ownerUid, deviceId}` set during initial-pair / re-pair.
+    //
+    // Reads: owner, sharers, and the synthetic device user itself
+    // (so the BE can poll its own doc for pendingCustomToken + state).
+    //
+    // Writes: split between two principals — synthetic user updates
+    // heartbeat/status fields; owner updates display name / priority.
+    // Nobody else can update. Create + delete are admin-only.
+    match /devices/{deviceId} {
+      allow read: if request.auth != null && (
+        request.auth.uid == resource.data.ownerUid
+        || request.auth.uid in resource.data.sharedWith
+        || request.auth.uid == resource.data.syntheticDeviceUid
+      );
+
+      // Synthetic device user writes: lastHeartbeat, status, logins,
+      // authMode + the atomic-pair-confirm pair (pairConfirmedAt +
+      // expireAt) + multi-worker capacity (workerCount). Locked to
+      // those fields so a compromised device-token can't transfer
+      // ownership or rotate the pair code.
+      //
+      // The atomic-pair-confirm contract: claim Cloud Function sets
+      // expireAt:now+5min on ownership grant; this heartbeat sets
+      // pairConfirmedAt:true + FieldValue.delete() on expireAt every
+      // tick. If the BE never reaches its first heartbeat (custom-token
+      // exchange failed, keystore write failed), Firestore TTL on
+      // expireAt evaporates the device doc and listenToDevices on the
+      // FE never surfaces an orphan tile.
+      //
+      // workerCount (2026-05-21): N concurrent-run slots provisioned
+      // for the device. BE worker-1 writes this on every heartbeat
+      // (read from research_config.json's workerCount, set during
+      // pair Stage 4's multi-profile loop). FE reads it to gate
+      // "queued vs ongoing" on real capacity instead of treating any
+      // active run as "device busy".
+      allow update: if request.auth != null
+        && request.auth.uid == resource.data.syntheticDeviceUid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(
+          ['lastHeartbeat', 'status', 'logins', 'authMode',
+           'pairConfirmedAt', 'expireAt', 'supervised',
+           'currentRunId', 'currentRunOwnerUid', 'currentRunTitle',
+           'currentRunStartedAt',
+           // 2026-05-26: queue-ETA + queue-banner inputs. BE worker-1
+           // writes currentRunPhase + currentRunPhaseStartedAt on every
+           // phase_start emit (research.py:~9854) so queued docs can
+           // count down accurate ETAs and the FE QueuedBanner can show
+           // "Current run is in Phase X" for position #1. Pre-fix the
+           // synth-user rule's hasOnly() check blocked these fields →
+           // every phase_start emit logged "currentRunPhase publish
+           // failed (non-fatal): 403 Missing or insufficient
+           // permissions" and the FE banner stayed silent on head
+           // progress.
+           'currentRunPhase', 'currentRunPhaseStartedAt',
+           'workerCount',
+           // 2026-05-28: per-worker busy-set used by the FE QueuedBanner
+           // stall detector. Each worker writes its own WORKER_ID via
+           // array_union on claim + array_remove on release/exit/boot.
+           // FE reads `busyWorkerIds.length < workerCount` to know if
+           // ANY worker is idle (multi-worker idle detection — previously
+           // currentRunOwnerUid only covered worker-1). Gated on the
+           // synth user (same as the rest of this rule) so a sharer
+           // cannot tamper with worker-state.
+           'busyWorkerIds',
+           // 2026-05-28: per-sharer live usage for the owner's "Shared
+           // with" popup. `workers` is a map keyed by WORKER_ID → the run
+           // (uid/runId/title/phase/totalPhases) that worker is executing,
+           // written/cleared by ALL workers (mirrors busyWorkerIds, unlike
+           // the worker-1-only currentRun* fields). `queueOwners` is the
+           // ordered queued-run summary (uid/runId/title/position) rebuilt
+           // on each queue recompute. Dotted-path updates (workers.<id>)
+           // surface as the top-level key in affectedKeys(), so listing
+           // 'workers' alone covers nested writes. Owner + sharedWith can
+           // already READ the doc (rule above), so the FE listener surfaces
+           // these live with no read-rule change.
+           'workers', 'queueOwners',
+           // 2026-07-05: backend self-reported version + update signal. BE
+           // worker-1 writes `version` (its running superresearch package
+           // version) and `updateAvailable` (the newer version on PyPI, or
+           // null when current) on every heartbeat. The FE reads these to
+           // raise an in-app "run `superresearch --update` on the Research
+           // computer" notification — the agent no longer handles BE updates.
+           // Gated on the synth device user like the rest of this rule.
+           // `updateStatus` (2026-07-05): the outcome of an app-triggered remote
+           // update (already/started/deferred/failed/unsupported) the BE writes
+           // back so the About-page row can show progress + failures.
+           // `versionCheckedAt` (2026-07-05): millis the BE stamps after an
+           // app-triggered "check for updates" (check-update command) so the row's
+           // Check spinner knows the fresh check completed.
+           // `sourceCheckout` (2026-07-05): true when the BE runs from a dev
+           // source tree (not a pipx build) — the About row then shows "Source
+           // checkout · update with git pull" and hides the Check/Update control.
+           'version', 'updateAvailable', 'updateStatus', 'versionCheckedAt',
+           'sourceCheckout']
+        );
+      // Owner writes: cosmetic device name, ordering priority, and the
+      // On-StartUp (supervised) intent flag. `supervised` is a benign flag the
+      // BE (synth user) already writes on resurrect/retire; letting the OWNER
+      // set it is the intended Account-page "On StartUp" toggle (the FE flips it
+      // after the user confirms they ran --resurrect/--retire on the PC).
+      // `restingWorkerIds` (#903, 2026-07-06): owner-only worker rest/wake from
+      // the Shared-With popup — a listed worker takes no NEW runs (BE reads it
+      // at claim time); sharers can read it (queue "Workers paused" reason) but
+      // never write it.
+      // Reset Pair Code still goes through a Cloud Function (Admin SDK), not a
+      // direct doc write — owner cannot change pairCode/ownerUid/sharedWith here.
+      allow update: if request.auth != null
+        && request.auth.uid == resource.data.ownerUid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(
+          ['name', 'priority', 'supervised', 'restingWorkerIds']
+        );
+
+      // Device-member writes: feFifoCurrent (cross-worker FE-P4+P5
+      // FIFO lock). 2026-05-21 (PR 3) — with N concurrent workers, each
+      // run's FE Phase 4 (YouTube upload) + Phase 5 (Doc + email) can
+      // race the project-scoped quotas (YouTube ~6/day, Docs API rate
+      // limits). The FE serializes via this single device-level field
+      // {researchId, ownerUid, acquiredAt}: holder writes on acquire,
+      // clears on release (success OR fail). Owner + sharers both
+      // need write access — sharer-submitted runs hit the same quota
+      // and must participate in the same FIFO. Synth user (BE) does
+      // NOT write this — BE phases are P0-P3 only.
+      allow update: if request.auth != null
+        && (request.auth.uid == resource.data.ownerUid
+            || request.auth.uid in resource.data.sharedWith)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(
+          ['feFifoCurrent']
+        );
+
+      allow create, delete: if false;
+
+      // Pending-customToken inbox. Claim Cloud Function writes a fresh
+      // customToken here at the path `pending/{pollSecretHash}` — the
+      // hash is admin-only (lives in `_internal/device_secrets/...`),
+      // so a sharer who has read access to the parent device doc CANNOT
+      // construct the path to read the JWT. BE knows its own
+      // pollSecret locally and computes the hash to poll its specific
+      // doc. `allow get` permits BE's anonymous read; `allow list`
+      // would defeat the secret (lets attacker enumerate the
+      // subcollection) so it's denied. Writes are admin-SDK-only.
+      match /pending/{secretHash} {
+        allow get: if true;
+        allow list: if false;
+        allow create, update, delete: if false;
+      }
+
+      // FIFO queue — the Track D replacement for
+      // `research_tokens/{token}/queue/`. Sharers submit research from
+      // their own FE; the BE-as-synthetic-device consumes in arrival
+      // order. Reads + writes gated on device membership (owner OR
+      // sharedWith). Each enqueue carries `submittedBy: auth.uid` so
+      // the rule enforces "you can only enqueue under your own uid"
+      // (matches the legacy research_tokens/queue contract). BE
+      // (synthetic device user) reads to dequeue + delete after
+      // processing.
+      match /queue/{queueId} {
+        function isDeviceMember() {
+          return request.auth != null && (
+            request.auth.uid == get(/databases/$(database)/documents/devices/$(deviceId)).data.ownerUid
+            || request.auth.uid in get(/databases/$(database)/documents/devices/$(deviceId)).data.sharedWith
+          );
+        }
+        function isDeviceItself() {
+          return request.auth != null
+            && request.auth.uid == get(/databases/$(database)/documents/devices/$(deviceId)).data.syntheticDeviceUid;
+        }
+        allow read: if isDeviceMember() || isDeviceItself();
+        allow create: if isDeviceMember()
+                   && request.resource.data.submittedBy == request.auth.uid;
+        // Pre-multi-worker (workerCount=1) queue entries are still
+        // immutable — BE consumed via delete. With workerCount>1, the
+        // BE's claim TX (research.py:3554) writes [assignedWorker,
+        // claimedAt] to coordinate which worker picks up the doc.
+        // Restricted to the synth device user (not the owner / sharer)
+        // and to these fields only — owners cannot retro-pin a
+        // queue doc to a specific worker via this rule.
+        // `restDeferredAt` (#903): keep-alive the BE re-stamps on each
+        // rest-defer so the 12h ABANDONED sweep measures from the park,
+        // not the submit — a run queued behind a weekend-long rest must
+        // survive a BE restart.
+        allow update: if isDeviceItself()
+                   && request.resource.data.diff(resource.data).affectedKeys().hasOnly(
+                     ['assignedWorker', 'claimedAt', 'restDeferredAt']
+                   );
+        allow delete: if isDeviceItself()
+                   || (isDeviceMember() && resource.data.submittedBy == request.auth.uid);
+      }
+
+      // FE-P4 + FE-P5 FIFO waiter subcollection (2026-05-21, PR 3).
+      // Each concurrent run that wants to enter P4 or P5 writes a
+      // waiter doc keyed by researchId (idempotent across cross-tab
+      // races / retries). All waiters subscribe to this collection +
+      // the parent device doc; the oldest enqueuedAt acquires the
+      // device-level feFifoCurrent lock and deletes its own waiter
+      // entry inside the same transaction. Sub-doc uses researchId
+      // as the key (not addDoc auto-id) so a cross-tab double-call
+      // collapses to one waiter via setDoc-merge.
+      //
+      // Both owners and sharers participate — sharer-submitted runs
+      // share the same project-scoped YouTube + Docs API quotas, so
+      // the FIFO must serialize across user identities on the same
+      // physical device. Synth user (BE) has no business reading or
+      // writing this — FE phases only.
+      match /feFifoWaiters/{researchId} {
+        function isDeviceMember() {
+          return request.auth != null && (
+            request.auth.uid == get(/databases/$(database)/documents/devices/$(deviceId)).data.ownerUid
+            || request.auth.uid in get(/databases/$(database)/documents/devices/$(deviceId)).data.sharedWith
+          );
+        }
+        allow read: if isDeviceMember();
+        // Idempotent enqueue: setDoc with researchId as key collapses
+        // duplicate cross-tab calls. Writer stamps their own uid +
+        // serverTimestamp on enqueuedAt (rule doesn't validate
+        // serverTimestamp shape — Firestore enforces it server-side
+        // when the client uses serverTimestamp() sentinel).
+        allow create, update: if isDeviceMember()
+                           && request.resource.data.uid == request.auth.uid;
+        // Delete: only the waiter's own uid can delete their entry
+        // (prevents one sharer from racing-deleting another's queue
+        // position). The acquire TX is run by the winning waiter, so
+        // it deletes its own waiter doc on win. Stale waiters left by
+        // tab-close are ignored by client-side acquire logic via
+        // enqueuedAt age check, not cleaned up server-side.
+        allow delete: if isDeviceMember()
+                   && resource.data.uid == request.auth.uid;
+      }
+
+      // Device-scoped commands — for actions that target the BE
+      // process itself, not a particular research run (e.g. the
+      // Online-pill hard-reset on the Account page, or the
+      // clear_local_storage action from Settings → Manage Data).
+      // Owner + sharers write; the BE-as-synthetic-device reads +
+      // deletes after processing.
+      //
+      // `submittedBy: auth.uid` is required on create so the BE can
+      // audit-log which user issued the command (and so a sharer
+      // can't forge an action that looks like the owner's).
+      //
+      // 2026-05-25: clear_local_storage is OWNER-ONLY. The action
+      // rmtrees queue subdirs on the device's physical disk —
+      // sharers don't have any claim to wipe data on someone else's
+      // machine. The FE shows an "Owner only" toast as the friendly
+      // UX, but the rule is the load-bearing enforcement. Other
+      // device commands (hard_reset, etc.) keep the existing owner+
+      // sharer write access until product policy says otherwise.
+      match /commands/{commandId} {
+        function isDeviceOwner() {
+          return request.auth != null
+            && request.auth.uid == get(/databases/$(database)/documents/devices/$(deviceId)).data.ownerUid;
+        }
+        function isDeviceMember() {
+          return request.auth != null && (
+            request.auth.uid == get(/databases/$(database)/documents/devices/$(deviceId)).data.ownerUid
+            || request.auth.uid in get(/databases/$(database)/documents/devices/$(deviceId)).data.sharedWith
+          );
+        }
+        function isDeviceItself() {
+          return request.auth != null
+            && request.auth.uid == get(/databases/$(database)/documents/devices/$(deviceId)).data.syntheticDeviceUid;
+        }
+        allow read: if isDeviceMember() || isDeviceItself();
+        allow create: if (
+          isDeviceMember()
+          && request.resource.data.submittedBy == request.auth.uid
+          && (
+            // ALLOWLIST of sharer-permitted device commands (default-closed).
+            // `hard_reset` restarts the BE process; `check-update` runs a
+            // read-only PyPI version check — both safe for a sharer. Everything
+            // ELSE is owner-only, so a code-exec / destructive command can't
+            // accidentally default-open to sharers: `clear_local_storage` wipes
+            // device scratch, `update` (2026-07-05) triggers a remote `pipx`
+            // backend upgrade (code execution), and any FUTURE action a release
+            // adds is owner-only until it is explicitly added here.
+            request.resource.data.action in ["hard_reset", "check-update"]
+            || isDeviceOwner()
+          )
+        );
+        // Commands are immutable to owner/sharers (write-once create, then
+        // the BE consumes via delete). The ONE exception: the device itself
+        // (synth user) stamps idempotency markers on its own commands as it
+        // processes them — `processed` (skip re-fire on SDK reconnect) and
+        // `staleSkipped`. hard_reset specifically DEFERS its delete until
+        // after the sharedWith-dependent sweep (research.py:~3546), so it
+        // needs the `processed` marker to dedupe a mid-handler reconnect
+        // before the tail delete lands. Scoped to those two BE-only fields,
+        // so a sharer/owner still cannot mutate a command.
+        allow update: if isDeviceItself()
+                   && request.resource.data.diff(resource.data).affectedKeys().hasOnly(
+                     ['processed', 'staleSkipped']
+                   );
+        allow delete: if isDeviceItself()
+                   || (isDeviceMember() && resource.data.submittedBy == request.auth.uid);
+      }
+    }
+
+    // ─── Admin-only internal collections ──────────────────────────────
+    // Server-side rate limiter at `_internal/rate_limits/entries/{key}`
+    // and any other Cloud-Function-managed bookkeeping. Admin SDK
+    // bypasses these rules; client access is denied unconditionally.
+    match /_internal/{document=**} {
+      allow read, write: if false;
+    }
+
+    // Public shares — anyone with the unguessable shareId can read. Authed
+    // users create their own shares (createdBy must match their uid). Only the
+    // creator can update/delete, and updates are scoped to the `revoked` flag
+    // so the content stays immutable once shared. The shareId itself is a
+    // Firestore auto-id (20+ chars of random) — effectively unguessable.
+    match /shares/{shareId} {
+      // Public GET by the unguessable shareId — the public share-link path.
+      // Only blocked when the creator explicitly revokes the link via
+      // Settings > Manage Data > Revoke All Shares (which flips `revoked:
+      // true`). Use .get('revoked', false) so missing-field reads are
+      // guaranteed to evaluate as not-revoked across all rule versions.
+      // Auto-expiry was removed (May 2026): it broke shares that users had
+      // forwarded weeks earlier; the user wants only manual revocation to
+      // break a link, never a silent timer.
+      allow get:    if resource.data.get('revoked', false) != true;
+      // LIST is owner-scoped ONLY — `read` used to cover `list`, letting a
+      // signed-out client getDocs(collection('shares')) and harvest every
+      // non-revoked user's content + author uid. Firestore evaluates a list
+      // rule against each candidate doc, so this admits exactly the one
+      // owner-scoped query the app runs (revokeAllShares: where createdBy ==
+      // uid) and denies broad enumeration.
+      allow list:   if request.auth != null
+        && resource.data.createdBy == request.auth.uid;
+      allow create: if request.auth != null
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.type in ['document', 'audio'];
+      // Update = revoke only, by the creator. Shares minted for a delivered
+      // Phase-5 doc carry `permanent: true` (the durable "Super Research" main
+      // links) and CANNOT be revoked from the client — a delivered document's
+      // links must never break. revokeAllShares already skips them; this rule
+      // makes the guarantee enforceable at the DB level, not just client-side.
+      allow update: if request.auth != null
+        && resource.data.createdBy == request.auth.uid
+        && resource.data.get('permanent', false) != true
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['revoked']);
+      // Delete also blocked for permanent delivery shares — the DB rule is the
+      // ONLY enforcement of "a delivered doc's links never break", so it must
+      // guard delete as well as revoke (else a hand-crafted SDK delete could
+      // still break the link).
+      allow delete: if request.auth != null
+        && resource.data.createdBy == request.auth.uid
+        && resource.data.get('permanent', false) != true;
+    }
+
+    // Product "What's new" / system announcements (2026-05-30). A global,
+    // admin-curated feed: any signed-in user may READ it (the FE surfaces new
+    // entries as "System updates" notifications); clients may never write —
+    // entries are published only via the Admin SDK / Firebase console, so a
+    // user can't spoof an announcement to other users.
+    match /announcements/{announcementId} {
+      allow read:  if request.auth != null;
+      allow write: if false;
+    }
+
+    // Deny everything else
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

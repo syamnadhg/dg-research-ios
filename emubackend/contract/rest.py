@@ -67,6 +67,20 @@ class FirestoreRest:
     ``token_provider(force=True)`` on the retry, matching upstream's contract so a provider can
     be shared between the two.
 
+    ⚠ **The token it returns MUST carry the ``deviceId`` custom claim.** Verified against the real
+    rules in the emulator (`bin/rules_verify.py`): ``deviceWritingTo()`` and ``deviceMemberOf()``
+    both require ``request.auth.token.deviceId is string``, and it is the *only* custom claim the
+    ruleset reads — 15 times. Without it **every** write into the user tree
+    (``users/{uid}/researches/...``, including all ``pipeline_events``) is denied, and the denial says
+    "Missing or insufficient permissions" while naming neither the claim nor the rule. The claim is
+    minted into the custom token by the claim route, so the provider must carry it through rather
+    than re-minting a bare token.
+
+    ⚠ **And note the asymmetry**, which is easy to get backwards: the *device document* rule pins on
+    ``resource.data.syntheticDeviceUid == request.auth.uid`` and needs **no** claim, while the
+    *user-tree* rules need the claim and ignore the uid. Two different mechanisms guarding two
+    different paths — a heartbeat can succeed while every event write fails.
+
     *transport* is injectable so the whole class is testable without network. Defaulting to
     ``requests`` keeps the import lazy — the identity layer is useful without it.
     """

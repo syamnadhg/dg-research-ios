@@ -1,0 +1,15 @@
+{
+  "firestore": {
+    "rules": "fixtures/rules/firestore.rules",
+    "indexes": "fixtures/rules/firestore.indexes.json"
+  },
+  "emulators": {
+    "firestore": {
+      "port": 8181
+    },
+    "ui": {
+      "enabled": false
+    },
+    "singleProjectMode": true
+  }
+}
