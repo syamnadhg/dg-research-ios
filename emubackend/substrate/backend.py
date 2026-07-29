@@ -303,6 +303,14 @@ class IOSSimulatorBackend(BrowserBackend):
         if tab.calibration is not None and tab.calibration.is_valid_for(viewport):
             return tab.calibration
         insp = await self._attach(tab)
+        # ⚠ Re-inject unconditionally right here, rather than trusting the `_ensure_runtime` check
+        # above. That check is a check-then-USE race: the runtime can be wiped between the two by a
+        # navigation, a SPA route change, or the page replacing its own document — and calibration is
+        # the worst place for it, because it fails as `undefined is not an object` from inside a
+        # thread, with a traceback that points at geometry rather than at the missing runtime.
+        # Injection is idempotent and cheap ('already' on a hit), so paying it every calibration is
+        # strictly better than diagnosing the race.
+        await asyncio.to_thread(insp.evaluate_json, runtime_js.RUNTIME_JS)
         tab.calibration = await asyncio.to_thread(
             lambda: geometry.calibrate(
                 evaluate_json=insp.evaluate_json,
