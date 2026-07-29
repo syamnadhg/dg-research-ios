@@ -24,3 +24,7 @@ secrets/
 ios/**/xcuserdata/
 ios/**/*.xcworkspace/xcuserdata/
 DerivedData/
+
+# Swift
+ios/.build/
+ios/.swiftpm/
