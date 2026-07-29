@@ -1,13 +1,31 @@
-# Runbook — the two owner actions, and what each one unlocks
+# Runbook
 
-Everything that could be built and verified without credentials is done. Two inputs remain, and
-this is the shortest path from them to a finished iOS track.
+## Install and try the app right now
 
-**Do them in either order.** They unlock different clauses and do not depend on each other.
+```bash
+xcrun simctl boot EB3E3597-E62B-413B-B7E5-0FD286ACCC38   # any iOS 26.5 device
+bash bin/build_app.sh EB3E3597-E62B-413B-B7E5-0FD286ACCC38
+open -a Simulator
+```
+
+Unsigned, no Xcode project, no developer account — Simulator builds need none. Add `--shots` to
+render the paired and unpaired states to `artifacts/app/shots/`.
+
+The app currently runs against `PreviewBackend`, so it shows plausible state rather than live
+Firestore. Everything it renders is real UI over real, tested logic; swapping in
+`FirebasePairingBackend` is a one-line change once its package builds.
+
+## ✅ Firebase iOS — done
+
+App ID `1:441214203201:ios:47c2e9b9daaadd41b71dc0`, bundle `com.distributedglobal.superresearch`,
+config at `ios/GoogleService-Info.plist` (gitignored — it carries an API key). `super-research-492814`
+now has both a WEB and an IOS app. The build script bundles the plist automatically.
+
+## One owner action remains
 
 ---
 
-## Action 1 — platform logins → the 25 selector values
+### Platform logins → the 25 selector values
 
 **Unlocks:** a P0–P3 run against *real* platforms, in the Simulator and in the app.
 
@@ -58,18 +76,9 @@ PYTHONPATH=. .venv/bin/python -c \
 
 ---
 
-## Action 2 — register an iOS app → `GoogleService-Info.plist`
+## Building the Firebase package
 
-**Unlocks:** live-project pairing — the app appearing as a real device in the web app.
-
-In the Firebase console for **`super-research-492814`** (only a WEB app exists today), add an **iOS**
-app, then drop the downloaded `GoogleService-Info.plist` into `dg-research-ios/ios/`. It is
-`.gitignore`d — it carries an API key.
-
-> You chose to do this in the console rather than have me use your authenticated `firebase` CLI, so
-> nothing here does it for you.
-
-Then:
+The plist is in place; what is left is compiling the glue, which needs the SDK:
 
 ```bash
 cd dg-research-ios/ios/FirebaseGlue && swift build   # needs network for the SDK fetch
