@@ -170,6 +170,17 @@ final class PairingController: ObservableObject {
         stage = .ready
     }
 
+    /// Leave the flow. Refreshes first so the dashboard has real state to render, then tells the app
+    /// to show it — rather than relying on `paired` flipping on some later poll.
+    func dismiss() async {
+        busy = true
+        await onFinished?()
+        busy = false
+    }
+
+    /// Set by the app so stage 5's Finish can hand control back.
+    var onFinished: (() async -> Void)?
+
     var signedInCount: Int { loginState.values.filter { $0 }.count }
 
     private func advance() {
@@ -181,6 +192,7 @@ final class PairingController: ObservableObject {
 
 struct PairingFlowView: View {
     @ObservedObject var controller: PairingController
+    @State private var copied = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: DS.S.lg * 2) {
@@ -306,11 +318,53 @@ struct PairingFlowView: View {
                         Text("Pair code").font(DS.F.label).foregroundStyle(DS.C.textTertiary)
                     }
                     QRView(code: controller.pairCode, side: 220)
+
+                    // ⚠ The URL is PRINTED, not just encoded. A QR that does not work is otherwise
+                    // undebuggable from the outside: you cannot tell a wrong domain from a wrong path
+                    // from a scanner that dropped the query string. Showing the payload makes the
+                    // failure inspectable by the person holding the phone.
+                    Text(QRCode.claimURL(
+                        baseURL: AppConfig.frontendBaseURL, pairCode: controller.pairCode
+                    ))
+                    .font(DS.F.mono(9))
+                    .foregroundStyle(DS.C.textTertiary)
+                    .multilineTextAlignment(.center)
+                    .textSelection(.enabled)
+
+                    // The path that cannot fail. Scanning depends on a camera, a scanner that keeps
+                    // query strings, and a browser already signed in to the right account; typing eight
+                    // characters depends on nothing.
+                    HStack(spacing: DS.S.lg) {
+                        Button {
+                            UIPasteboard.general.string = controller.pairCode
+                            copied = true
+                        } label: {
+                            Text(copied ? "Copied" : "Copy code")
+                                .font(DS.F.label.weight(.medium))
+                                .foregroundStyle(copied ? DS.C.ok : DS.C.accent)
+                        }
+                        .frame(minHeight: DS.S.touch)
+
+                        Link(destination: URL(string: QRCode.claimURL(
+                            baseURL: AppConfig.frontendBaseURL, pairCode: controller.pairCode
+                        ))!) {
+                            Text("Open claim page")
+                                .font(DS.F.label.weight(.medium)).foregroundStyle(DS.C.accent)
+                        }
+                        .frame(minHeight: DS.S.touch)
+                    }
                 }
                 .frame(maxWidth: .infinity)
                 Text(controller.status).font(DS.F.label).foregroundStyle(DS.C.textSecondary)
-                Text("Web app → Account → Add device. Or scan the code.")
+                Text("Web app → Account → Add device, and type the code.")
                     .font(DS.F.label).foregroundStyle(DS.C.textTertiary)
+                // ⚠ Stated because it is the actual reason scanning fails, and it is invisible
+                // otherwise. The frontend's authed layout does `if (!loading && !user)
+                // router.replace("/")` — so a browser that is not already signed in gets redirected to
+                // the root and the `?repair=` param is DISCARDED. The QR is correct; the redirect eats
+                // it. Nothing the app can do about that, so the app says so and offers Copy instead.
+                Text("Scanning only works in a browser already signed in to Super Research — otherwise the sign-in redirect drops the code. Copying is the reliable route.")
+                    .font(DS.F.label).foregroundStyle(DS.C.warn)
                 // An escape hatch, because a code can expire, a claim can go to the wrong account, or
                 // the app can be interrupted mid-flow. Without it the only way out is deleting the app.
                 Button { Task { await controller.restart() } } label: {
@@ -426,6 +480,13 @@ struct PairingFlowView: View {
             }
             Text("The web app can fire runs at this device while the app is open.")
                 .font(DS.F.label).foregroundStyle(DS.C.textSecondary)
+
+            // ⚠ There was no button here, and stage 5 is terminal — so a completed pair had no way
+            // OUT of the flow. The dashboard appears on its own once `paired` reads true, but that
+            // depends on a refresh landing, and "wait and hope" is not an exit.
+            SRButton(title: "Finish", role: .primary) {
+                Task { await controller.dismiss() }
+            }
         }
         .srCard()
     }
@@ -513,14 +574,24 @@ private struct APIKeysStageView: View {
                     Text(revealed.wrappedValue ? "hide" : "show")
                         .font(DS.F.label).foregroundStyle(DS.C.textTertiary)
                 }
-                Button {
-                    // User-initiated, so iOS permits the read without a prompt loop.
-                    if let clip = UIPasteboard.general.string, !clip.isEmpty {
-                        text.wrappedValue = clip.trimmingCharacters(in: .whitespacesAndNewlines)
-                    }
-                } label: {
-                    Text("Paste").font(DS.F.label.weight(.medium)).foregroundStyle(DS.C.accent)
+                // ⚠ The SYSTEM `PasteButton`, not a plain Button reading `UIPasteboard`.
+                //
+                // A programmatic pasteboard read raises iOS's "Allow Paste?" alert every time, and if
+                // that alert is dismissed — or never appears, which happens in the Simulator — the read
+                // returns nothing and the button looks broken. `PasteButton` is granted access by the
+                // system precisely because the tap IS the consent, so it needs no prompt.
+                //
+                // ⚠ ALSO, for the Simulator specifically: text copied on the Mac only arrives if
+                // Simulator ▸ Edit ▸ Automatically Sync Pasteboard is on. When it is off, nothing an
+                // app does can help — the clipboard genuinely is empty. `xcrun simctl pbcopy <UDID>`
+                // pushes the Mac clipboard across manually.
+                PasteButton(payloadType: String.self) { strings in
+                    guard let first = strings.first else { return }
+                    text.wrappedValue = first.trimmingCharacters(in: .whitespacesAndNewlines)
                 }
+                .labelStyle(.iconOnly)
+                .buttonBorderShape(.capsule)
+                .tint(DS.C.accent)
             }
             .padding(DS.S.md)
             .background(DS.C.bg)

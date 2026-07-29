@@ -151,6 +151,12 @@ final class AppModel: ObservableObject {
                     PlatformState(id: "notebooklm", name: "NotebookLM", signedIn: nil),
                 ]
             )
+            // Stage 5's Finish hands control back here, rather than the flow waiting for `paired` to
+            // flip on some later poll.
+            pairing?.onFinished = { [weak self] in
+                await self?.refresh()
+                self?.screen = .landing
+            }
             // An already-paired device must start beating on launch, not wait for someone to pair
             // again. Without this, relaunching the app leaves it looking offline to the web app.
             device.resumeIfPaired()
