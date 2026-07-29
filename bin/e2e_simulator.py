@@ -135,6 +135,30 @@ async def run(udid: str, skip_reboot: bool) -> dict:
         # --- P0: logged in? -----------------------------------------------------
         record("P0 logged-in marker found", await driver.logged_in(), "#signed-in-marker present")
 
+        # --- the channel comparison that decides C1's shape ----------------------
+        #
+        # The same page, the same control, the two available input channels. The in-app C0 gate
+        # measured that a WKWebView script click reports isTrusted=false and CANNOT move a control
+        # gated on it. Here, AXe delivers a genuine HID tap through the Simulator, so the same control
+        # must MOVE. Asserting both halves is what makes the difference a measured fact rather than an
+        # assumption about which substrate to trust — and it is the concrete reason Stage 1 is not
+        # merely a stepping stone to the app.
+        gated_before = await page.evaluate(
+            "document.querySelector('[data-testid=\"trust-gated\"]').getAttribute('aria-pressed')"
+        )
+        gated_handle = await page.query_selector('[data-testid="trust-gated"]')
+        if gated_handle is not None:
+            await gated_handle.click()
+        gated_after = await page.evaluate(
+            "document.querySelector('[data-testid=\"trust-gated\"]').getAttribute('aria-pressed')"
+        )
+        record(
+            "CHANNEL: a trusted AXe tap DOES drive a trust-gated control",
+            gated_before == "false" and gated_after == "true",
+            f"aria-pressed {gated_before} -> {gated_after} — the same control the in-app WKWebView "
+            f"cannot move by script. Stage 1 has an input channel the app does not.",
+        )
+
         # --- P2's toggle: a REAL trusted tap on the deep-research control --------
         before = await page.evaluate(
             "document.querySelector('[data-testid=\"deep-research-toggle\"]').getAttribute('aria-pressed')"

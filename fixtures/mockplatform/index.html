@@ -31,6 +31,15 @@
 
   <button id="send" data-testid="send-button" aria-label="Send" disabled>Send</button>
 
+  <!-- ⚠ A control that IGNORES untrusted events. Not decoration: it measures the exact cost of the
+       C0 finding that a JS click in WKWebView reports isTrusted=false. Every other control here
+       accepts a synthetic click, so without this one the harness cannot tell "our dispatch works"
+       from "nothing on this page happens to check". If a real platform ever gates a control this
+       way, in-app automation cannot drive it by script at all — and it is far better to know that
+       boundary from a fixture than to discover it as an unexplained no-op on a live page. -->
+  <button id="trustgated" data-testid="trust-gated" aria-pressed="false"
+          aria-label="Trust gated control">Trust gated</button>
+
   <div class="spacer"></div>
   <div id="response" data-testid="response-container"></div>
   <div id="sources"></div>
@@ -51,6 +60,15 @@
   composer.addEventListener('input', function () {
     model = composer.textContent || "";
     send.disabled = model.trim().length === 0;
+  });
+
+  // The trust-gated control: activates ONLY for a real user event. This is the shape that would
+  // make script-driven automation impossible, so the harness asserts we CANNOT move it — a probe
+  // that quietly succeeded here would mean the gate is measuring nothing.
+  var trustgated = document.getElementById('trustgated');
+  trustgated.addEventListener('click', function (e) {
+    if (!e.isTrusted) { return; }
+    trustgated.setAttribute('aria-pressed', 'true');
   });
 
   dr.addEventListener('click', function () {

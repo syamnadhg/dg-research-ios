@@ -171,6 +171,29 @@ final class Harness: NSObject, WKNavigationDelegate {
         record("MEASURED: isTrusted for a JS click in WKWebView", trusted != nil,
                "isTrusted=\(trusted.map(String.init) ?? "nil") — recorded as a finding, not a pass/fail")
 
+        // What that finding COSTS. Every other control on this page accepts a synthetic click, so
+        // measuring isTrusted alone cannot distinguish "our dispatch works" from "nothing here
+        // checks". The trust-gated control checks, and the assertion is that we CANNOT move it — the
+        // full realistic sequence included, since dispatching pointerdown/mousedown/mouseup/click is
+        // the usual workaround and it does not change isTrusted.
+        let gated = await eval("""
+        (function () {
+          var el = document.querySelector('[data-testid="trust-gated"]');
+          ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function (type) {
+            el.dispatchEvent(new MouseEvent(type, {bubbles: true, cancelable: true, view: window}));
+          });
+          el.click();
+          return el.getAttribute('aria-pressed');
+        })()
+        """) as? String
+        record(
+            "BOUNDARY: a trust-gated control cannot be driven from script in-app",
+            gated == "false",
+            "aria-pressed=\(gated ?? "nil") after a full event sequence + .click() — "
+                + "so any real control gated on isTrusted is UNREACHABLE by in-app automation. "
+                + "This is the C1 viability question and it needs a real platform to settle."
+        )
+
         let arrived = await waitFor(
             "!!document.querySelector('[data-testid=\"response-container\"][data-state=\"complete\"]')",
             timeout: 20)
