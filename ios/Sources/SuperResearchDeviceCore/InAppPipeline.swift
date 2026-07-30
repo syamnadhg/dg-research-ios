@@ -251,7 +251,32 @@ public struct InAppPhaseDriver {
     /// link-only harvest returned zero for an entire run while every click landed and the run reported
     /// success. Extraction failures are the dominant silent class, which is why this returns the count
     /// for a caller to judge rather than swallowing an empty result.
-    public func harvestSources() async throws -> [String] {
+    public func harvestSources(
+        settleWindow: TimeInterval = 12,
+        sleep: (TimeInterval) async -> Void = {
+            try? await Task.sleep(nanoseconds: UInt64($0 * 1e9))
+        }
+    ) async throws -> [String] {
+        // Retried within a short window, because CITATIONS ATTACH AFTER THE PROSE.
+        //
+        // Content stability is the right completion signal — it asks whether the answer stopped growing —
+        // and it is nonetheless too eager for this one consumer: on real ChatGPT the text settles and the
+        // citations paint a moment later, so a single harvest at completion legitimately found zero.
+        //
+        // Fixed HERE rather than by making the wait later, so there stays one honest completion signal
+        // instead of one tuned per consumer. The retry is bounded and it never fabricates: an empty result
+        // after the window is still returned empty, for the caller to judge.
+        var attempts = 0
+        let maxAttempts = max(1, Int(settleWindow / 1.5))
+        while true {
+            let found = try await harvestOnce()
+            if !found.isEmpty || attempts >= maxAttempts { return found }
+            attempts += 1
+            await sleep(1.5)
+        }
+    }
+
+    private func harvestOnce() async throws -> [String] {
         var out: [String] = []
         for css in manifest["sources"] ?? [] {
             let handles = try await page.querySelectorAll(css)

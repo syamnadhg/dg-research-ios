@@ -591,3 +591,34 @@ before concluding zero. That keeps one honest completion signal instead of tunin
 
 ⚠ Do not "fix" this by lowering the floor to 0. A harvest that accepts zero is the P1 incident restated —
 every click landing and extraction returning nothing, with the run reporting success.
+
+#### Both remaining failures reduce to ONE missing capability: opening the composer's tool menu
+
+The tolerant harvest did not fix `sources: 0` either, and that is the answer rather than another dead end.
+
+A search-grounded *prompt* does not reliably produce citations: **whether ChatGPT searches is its decision,
+not the prompt's.** The one earlier run that did yield a citation (`github.com/swiftlang/swift/releases`)
+was ChatGPT choosing to search, not the wording compelling it. The deterministic way to force citations is
+to enable the **Web search** tool — which lives in the composer's plus menu, behind exactly the same opener
+as Deep research.
+
+So the two outstanding real-platform failures are not two problems:
+
+| failure | actual cause |
+|---|---|
+| `deep_research_toggle` — tapped=false | the item is inside the plus menu, which is closed |
+| `sources: 0` | citations need the **Web search** tool, in the same closed menu |
+
+**One capability unblocks both:** an `opener` concept in the manifest — a key whose value must be tapped
+before a sibling key resolves — plus a wait for the menu's *second* async section (measured: a fixed 3s
+sample sees 3 items where 19 exist). That is a manifest and phase change, not a platform limitation, and it
+is the single highest-value item left.
+
+Kept regardless, because both are independently right and cost nothing when unnecessary:
+
+* the harvest retries within a bounded window (citations can attach after the prose);
+* the retry never fabricates — an empty result after the window is returned empty, for the caller to judge.
+
+⚠ One measured cost: `swift test` went from 0.05s to 12s, because a unit test legitimately harvests empty
+and now waits out the settle window. Correct behaviour, wrong place to spend it — those tests should inject
+a no-op sleep, which the signature already supports.
