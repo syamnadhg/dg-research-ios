@@ -29,6 +29,29 @@ PY = ROOT / ".venv/bin/python"
 
 # (file, old, new, test-node-id-that-MUST-fail, what-real-defect-this-simulates)
 MUTATIONS = [
+    # --- regressions the gate re-run caught, after the predicate port -------------------------
+    (
+        "emubackend/selectors.py",
+        "        if platform in named",
+        "        if platform in ALLOWED_KEYS",
+        "test_selectors_and_phases.py::test_a_single_platform_manifest_is_measured_against_that_platform",
+        "a one-platform manifest judged against all 25 keys, failing the e2e gate on a correct file",
+    ),
+    (
+        "emubackend/phases.py",
+        "        if (p.hasAttribute('aria-pressed') || p.hasAttribute('aria-checked')",
+        "        if (false && p.hasAttribute('aria-checked')",
+        "test_toggle_idempotence.py::test_a_control_carrying_state_is_not_mistaken_for_the_indicator",
+        "the toggle becoming its own on-signal, so enable_deep_research never taps and DR stays off",
+    ),
+    (
+        "emubackend/phases.py",
+        "        on = control_on or pill_visible or placeholder_research",
+        "        on = pill_visible or placeholder_research",
+        "test_toggle_idempotence.py::test_the_controls_own_state_is_enough_on_its_own",
+        "ignoring the control's own aria-pressed, so a well-behaved toggle reports off after a tap",
+    ),
+
     # --- the deep-research predicate ported from the backend ---------------------------------
     (
         "emubackend/phases.py",
@@ -46,21 +69,21 @@ MUTATIONS = [
     ),
     (
         "emubackend/phases.py",
-        "            on = pill_visible or placeholder_research",
-        "            on = pill_visible and placeholder_research",
+        "        on = control_on or pill_visible or placeholder_research",
+        "        on = control_on or placeholder_research",
         "test_toggle_idempotence.py::test_chatgpts_visible_pill_alone_reads_as_on",
         "ChatGPT's visible DR pill no longer reading as active, so an ON toggle gets tapped OFF",
     ),
     (
         "emubackend/phases.py",
-        "            on = placeholder_research or pressed or (pill_visible and pressed)",
-        "            on = pressed or (pill_visible and pressed)",
+        "        on = control_on or pill_visible or placeholder_research",
+        "        on = control_on or pill_visible",
         "test_toggle_idempotence.py::test_a_research_placeholder_reads_as_ON_without_any_aria_state",
         "dropping the placeholder signal — the exact aria-only read that toggled a working DR off",
     ),
     (
         "emubackend/phases.py",
-        '            "off": (placeholder_chat and not on) or (pill_visible and not pressed and not on),',
+        '            "off": (control_off or placeholder_chat) and not on,',
         '            "off": not on,',
         "test_toggle_idempotence.py::test_an_ambiguous_state_is_neither_on_nor_confirmed_off",
         "confirmed-off degrading to `not on`, authorising a click on a control of unknown state",
@@ -87,7 +110,7 @@ MUTATIONS = [
         "        for platform, keys in ALLOWED_KEYS.items()",
         "        platform: {}\n"
         "        for platform, keys in ALLOWED_KEYS.items()",
-        "test_selectors_and_phases.py::test_coverage_counts_against_every_baseline_key_not_just_the_supplied_ones",
+        "test_selectors_and_phases.py::test_coverage_counts_every_key_of_a_named_platform_not_just_the_supplied_ones",
         "a partial manifest shrinking the denominator, so 7-of-25 captured keys report 7/7 complete",
     ),
     (

@@ -119,21 +119,25 @@ def test_an_unknown_key_names_what_is_available(tmp_path):
         m.entry("chatgpt", "nope")
 
 
-def test_coverage_counts_against_every_baseline_key_not_just_the_supplied_ones(tmp_path):
-    """A partial manifest must not shrink the denominator.
+def test_coverage_counts_every_key_of_a_named_platform_not_just_the_supplied_ones(tmp_path):
+    """A partial manifest must not shrink the denominator *within* a platform.
 
     It used to: the loaded file *replaced* the baseline structure, so a file holding two keys reported
     ``(2, 2)`` — complete — and ``missing()`` returned nothing. Measured on the first real capture,
     where seven of twenty-five keys read as 7/7 done. The two functions whose only job is to report how
     far along the capture is were the two that lied about it.
+
+    The denominator is that platform's full key set (7 for ChatGPT), not the whole baseline — see
+    ``test_a_single_platform_manifest_is_measured_against_that_platform`` for why scoping to named
+    platforms matters, and the multi-platform test for the 25 case.
     """
     path = tmp_path / "m.json"
     path.write_text(
         json.dumps({"platforms": {"chatgpt": {"composer": "#c", "send": "#s"}}})
     )
     manifest = selectors.load_manifest(path)
-    assert manifest.coverage() == (2, 25)
-    assert len(manifest.missing()) == 23
+    assert manifest.coverage() == (2, 7)
+    assert "chatgpt.sources" in manifest.missing()
 
 
 def test_a_supplied_value_still_wins_over_the_baseline(tmp_path):
@@ -476,3 +480,39 @@ def test_typing_uses_the_editor_aware_fill_path(tmp_path):
     asyncio.run(bodies[1](None))
     assert page.typed == [deps.topic]
     assert page.clicks.count("#prompt-textarea") >= 1, "fill focuses by a real tap first"
+
+
+def test_a_single_platform_manifest_is_measured_against_that_platform(tmp_path):
+    """The correction to the correction, and a real gate failure.
+
+    Merging onto EVERY baseline platform fixed the honesty bug (a 7-key file reporting 7/7 complete) and
+    created a new one: the mock e2e's manifest deliberately covers one platform, so judging it against
+    all twenty-five made `done == total` false and the gate failed on a manifest that was entirely
+    correct. Caught by re-running bin/all_gates.sh rather than by reasoning.
+    """
+    path = tmp_path / "mock.json"
+    path.write_text(
+        json.dumps({"platforms": {"chatgpt": {
+            key: "#x" for key in sorted(selectors.ALLOWED_KEYS["chatgpt"])
+        }}})
+    )
+    manifest = selectors.load_manifest(path)
+    assert manifest.coverage() == (7, 7), "one platform named -> one platform's denominator"
+    assert manifest.missing() == []
+
+
+def test_a_multi_platform_manifest_still_counts_every_platform_it_names(tmp_path):
+    """The honesty fix must survive: naming four platforms means being judged on four."""
+    path = tmp_path / "m.json"
+    path.write_text(
+        json.dumps({"platforms": {
+            "chatgpt": {"composer": "#c"}, "gemini": {"composer": "#c"},
+            "claude": {"composer": "#c"}, "notebooklm": {"logged_in_marker": "#m"},
+        }})
+    )
+    done, total = selectors.load_manifest(path).coverage()
+    assert (done, total) == (4, 25)
+
+
+def test_the_baseline_alone_still_covers_every_platform(tmp_path):
+    assert selectors.load_manifest(path=tmp_path / "nope.json").coverage() == (0, 25)

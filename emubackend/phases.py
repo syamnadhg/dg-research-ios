@@ -74,9 +74,23 @@ _TOGGLE_STATE_JS = """((name) => {
     // Scoped to the form: an unscoped text search matches tooltips and help copy, which the backend
     // notes false-positived this check once already.
     const scope = (ce && ce.closest('form')) || document.querySelector('form') || document.body;
+    // A pill is an INDICATOR, so it must not be the control itself.
+    //
+    // Without this the toggle becomes its own on-signal whenever it is visible and labelled with the
+    // feature's name — and then `enable_deep_research` reports "already enabled", never taps, and the
+    // run proceeds with deep research off. Measured on the mock platform, whose toggle sits in the form
+    // carrying `aria-pressed`: the predicate returned True while aria-pressed went false -> false. The
+    // P1 shape exactly, produced by the very check meant to prevent it.
+    //
+    // The distinction that separates them is state, not tag: a control carries `aria-pressed` /
+    // `aria-checked` / `aria-selected`, an indicator carries none. Verified against real ChatGPT both
+    // ways — its menu item has `aria-checked` (excluded, correctly, it is the control) while its active
+    // composer pill has no state attribute at all (kept).
     let pill = null;
     for (const p of scope.querySelectorAll('button, [role="button"], span, div')) {
         if (!p.offsetParent) continue;
+        if (p.hasAttribute('aria-pressed') || p.hasAttribute('aria-checked')
+            || p.hasAttribute('aria-selected')) continue;
         if (norm(p.textContent) === target) { pill = p; break; }
     }
     let pressed = false, pillCls = '';
@@ -268,28 +282,48 @@ class PlatformDriver:
         """
         if self.page is None:
             return {"on": False, "off": False, "reason": "no page"}
+        # The CONTROL's own state, read from the manifest's selector rather than from a text scan.
+        #
+        # The third signal, and it cannot come from the pill: the pill scan deliberately skips anything
+        # carrying `aria-pressed`/`aria-checked` (an indicator has no state, a control does), so a
+        # `pressed` derived from the pill is structurally always false. Omitting the control's own
+        # attribute therefore left a page whose ONLY signal is the toggle's `aria-pressed` with no signal
+        # at all — measured on the mock platform, where the tap correctly flipped false -> true and the
+        # predicate still said off. Copying `_cgpt_state_js` verbatim is what caused it: the backend's
+        # `pressed` is about the pill, and its platforms happen to supply other evidence.
+        control_on = control_off = False
+        entry = self.deps.manifest.entry(self.platform, key)
+        if entry.resolvable:
+            handle = await resolve(self.page, entry)
+            if handle is not None:
+                state = await handle.get_attribute("aria-pressed")
+                if state is None:
+                    state = await handle.get_attribute("aria-checked")
+                control_on = state == "true"
+                control_off = state == "false"
+
         # Interpolated rather than passed as an argument: `PageShim.evaluate` takes a single
         # expression, so a two-arg call type-errors against the real page and only shows up at runtime.
         name = "research" if self.platform == "claude" else "deep research"
         raw = await self.page.evaluate(_TOGGLE_STATE_JS % json.dumps(name))
         if not isinstance(raw, dict):
-            return {"on": False, "off": False, "reason": "state probe returned nothing"}
+            return {"on": control_on, "off": control_off, "reason": "state probe returned nothing"}
         placeholder_research = bool(raw.get("placeholderResearch"))
         placeholder_chat = bool(raw.get("placeholderChat"))
         pill_visible = bool(raw.get("pillVisible"))
-        pressed = bool(raw.get("pressed"))
-        if self.platform == "chatgpt":
-            on = pill_visible or placeholder_research
-        else:
-            on = placeholder_research or pressed or (pill_visible and pressed)
+        # Three independent ways a platform says "on", and each is the ONLY one somewhere:
+        # the control's own attribute (the mock, and any well-behaved toggle), a visible indicator pill
+        # (real ChatGPT, whose menu item is gone once the menu closes), the composer placeholder (Gemini).
+        on = control_on or pill_visible or placeholder_research
         return {
             "on": on,
-            # A positive off-signal, never `not on`. The composer saying "ask gemini" is the platform
-            # asserting chat mode; a pill that exists and reports itself unpressed is the same claim.
-            "off": (placeholder_chat and not on) or (pill_visible and not pressed and not on),
+            # A positive off-signal, never `not on`. The control reporting itself unpressed, or the
+            # composer saying "ask gemini", are both the platform asserting chat mode. "Cannot tell"
+            # stays false, so escalation is refused rather than guessed.
+            "off": (control_off or placeholder_chat) and not on,
             "placeholder": raw.get("placeholder"),
             "pillVisible": pill_visible,
-            "pressed": pressed,
+            "pressed": control_on,
         }
 
     def _toggle_on_predicate(self, key: str):

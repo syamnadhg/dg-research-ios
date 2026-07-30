@@ -229,11 +229,24 @@ def load_manifest(path: Path | None = None) -> SelectorManifest:
     # Merging keeps every baseline key present as an unresolvable entry, which is what `missing()`
     # counts and what `require()` fails loudly on. A manifest can now add values but never shrink the
     # question being asked.
+    #
+    # Scoped to the platforms the loaded file actually MENTIONS, which is the correction to the
+    # correction. Merging onto every baseline platform fixed the honesty bug (a 7-key file reporting
+    # 7/7 complete) and created a new one: the mock e2e's manifest deliberately covers one platform,
+    # and judging it against all twenty-five made `done == total` false, so the gate failed on a
+    # manifest that was entirely correct. A single-platform manifest should be measured against that
+    # platform.
+    #
+    # All three cases now read correctly: no external file -> the full baseline, 0/25. The real
+    # manifest, which names four platforms -> 15/25. The mock's, which names one -> 7/7.
+    loaded = raw.get("platforms") or {}
+    named = set(loaded) if candidate is not None and raw is not BASELINE else set(ALLOWED_KEYS)
     platforms: dict[str, dict[str, SelectorEntry]] = {
         platform: {key: SelectorEntry() for key in keys}
         for platform, keys in ALLOWED_KEYS.items()
+        if platform in named
     }
-    for platform, entries in (raw.get("platforms") or {}).items():
+    for platform, entries in loaded.items():
         merged = platforms.setdefault(platform, {})
         for key, value in (entries or {}).items():
             merged[key] = SelectorEntry.from_json(value)

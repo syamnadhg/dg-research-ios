@@ -240,13 +240,23 @@ def _driver_with(state: dict, platform: str = "gemini"):
     return phases.PlatformDriver(platform, deps), page
 
 
+#: Coherent off: no indicator pill AND a chat placeholder.
+#:
+#: This carried `pillVisible: True` at first, which is self-contradictory once the pill is defined as a
+#: stateless INDICATOR — an element reading "Deep research" cannot be visible while the composer says
+#: "Ask Gemini". Third time a fixture in this suite has been incoherent with the model it stands for, and
+#: each time the symptom was a test failing for a reason that had nothing to do with the code.
 OFF_STATE = {
-    "pillVisible": True, "pressed": False, "placeholderResearch": False,
+    "pillVisible": False, "pressed": False, "placeholderResearch": False,
     "placeholderChat": True, "placeholder": "ask gemini",
 }
-#: The state that broke the old reader: on, with no ARIA anywhere.
+#: The state that broke the old reader: on, with no ARIA anywhere — and no pill either.
+#:
+#: `pillVisible` was True here, which meant the test named "placeholder only" was actually passing on the
+#: pill and would have kept passing with the placeholder signal deleted. bin/mutate.py caught it. A
+#: fixture that names one signal has to carry only that signal, or it proves nothing about it.
 PLACEHOLDER_ONLY_ON = {
-    "pillVisible": True, "pressed": False, "placeholderResearch": True,
+    "pillVisible": False, "pressed": False, "placeholderResearch": True,
     "placeholderChat": False, "placeholder": "what do you want to research",
 }
 
@@ -391,3 +401,60 @@ def test_the_measured_chatgpt_on_state_reads_as_ON_though_pressed_is_false():
     assert asyncio.run(driver._toggle_off_predicate("deep_research_toggle")()) is False, (
         "and the two predicates must never both fire"
     )
+
+
+def test_a_control_carrying_state_is_not_mistaken_for_the_indicator():
+    """The toggle must not be its own on-signal.
+
+    Measured on the mock platform, whose toggle sits in the form with `aria-pressed`: the predicate
+    returned True while aria-pressed went false -> false, so `enable_deep_research` reported "already
+    enabled", never tapped, and the run continued with deep research OFF. The P1 shape, produced by the
+    check meant to prevent it.
+
+    A control carries aria-pressed/aria-checked/aria-selected; an indicator carries none. Verified both
+    ways against real ChatGPT: its menu item has aria-checked (excluded), its active composer pill has
+    no state attribute (kept).
+    """
+    js = phases._TOGGLE_STATE_JS
+    for attr in ("aria-pressed", "aria-checked", "aria-selected"):
+        assert f"p.hasAttribute('{attr}')" in js, (
+            f"an element carrying {attr} is a control, not the indicator"
+        )
+    assert js.index("hasAttribute('aria-pressed')") < js.index("=== target"), (
+        "the exclusion must run BEFORE the text match, or the control is still selected"
+    )
+
+
+def test_the_controls_own_state_is_enough_on_its_own():
+    """A well-behaved toggle reports its own aria-pressed, and that must be sufficient.
+
+    Measured on the mock platform: the tap flipped aria-pressed false -> true and the predicate still
+    said off, because the ChatGPT branch read only pill + placeholder. Copying `_cgpt_state_js` verbatim
+    caused it — the backend's `pressed` is about the pill, and its platforms supply other evidence. The
+    pill cannot supply it here either, since the pill scan skips state-carrying elements by design.
+    """
+
+    class ControlStatePage(StatePage):
+        def __init__(self, state, pressed):
+            super().__init__(state)
+            self._pressed = pressed
+
+        async def get_attribute(self, name):
+            if name == "aria-pressed":
+                return "true" if self._pressed else "false"
+            return None
+
+    silent = {"pillVisible": False, "pressed": False, "placeholderResearch": False,
+              "placeholderChat": False, "placeholder": "type here"}
+    for platform in ("chatgpt", "gemini", "claude"):
+        key = "research_toggle" if platform == "claude" else "deep_research_toggle"
+        driver, _ = _driver_with(silent, platform=platform)
+        driver.page = ControlStatePage(silent, pressed=True)
+        assert asyncio.run(driver._toggle_on_predicate(key)()) is True, (
+            f"{platform}: the control's own aria-pressed=true must read as ON"
+        )
+        driver.page = ControlStatePage(silent, pressed=False)
+        assert asyncio.run(driver._toggle_on_predicate(key)()) is False
+        assert asyncio.run(driver._toggle_off_predicate(key)()) is True, (
+            f"{platform}: aria-pressed=false is a positive off-signal"
+        )
