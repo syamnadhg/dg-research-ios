@@ -650,3 +650,34 @@ reintroduces exactly this.
 **The declaration is reverted; the plumbing is kept.** The capability is inert without an `opener` key in
 the manifest, so the tree is strictly better than before — the mechanism exists and is tested — rather than
 carrying a regression. Re-declaring it is one line once the dismissal exists.
+
+#### The dismissal works — and enabling deep research SWAPS THE COMPOSER
+
+`dismissOpener` dispatches Escape and then **verifies the menu is gone** before returning, called on both
+paths of `enableDeepResearch` (including the already-on early return, which is where it is easiest to
+forget). With it, the previous regression is gone: the item resolved, the tap took, the menu closed.
+
+And P1 failed for a **new** reason:
+
+```
+DIAGNOSTIC at fill time: {"url":"https://chatgpt.com/c/6a6ad475-...","promptTextarea":0,
+                          "plusBtn":1,"splash":0,"editables":0,"textareas":1}
+```
+
+Enabling deep research **navigates** — the URL became `/c/<id>` — and the composer element **changes**:
+`promptTextarea 0`, `editables 0`, `textareas 1`. The contenteditable is gone and a plain `<textarea>` sits
+in its place.
+
+So `composer` is **state-dependent**, exactly as `response_container` turned out to be. This is the third
+instance of one lesson, and it is now unmistakable: on these platforms a selector is a function of *state*,
+not of platform. Idle, post-web-search, and post-deep-research are three different DOMs, and a manifest with
+one value per key cannot describe all three.
+
+That is a manifest-shape question, not another selector to capture: either `composer` carries a chain that
+covers both shapes (the contenteditable *and* the textarea), or entries become state-qualified. The chain is
+almost certainly right — `resolve` already tries candidates in order — and it wants the post-DR value
+measured rather than guessed.
+
+**The opener declaration is reverted again; the dismissal code stays.** Both mechanisms are correct and
+tested; what is missing is the post-DR composer value. Verified after the revert: real ChatGPT is back to
+P0 / P1 composer / P2 send / P2 response / full-run / ordering / boundary all passing.

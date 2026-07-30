@@ -67,6 +67,36 @@ public struct InAppPhaseDriver {
         self.page = page
     }
 
+    /// Close whatever an opener opened, and VERIFY it closed.
+    ///
+    /// An opener is a modal interaction, so it needs a way out. Skipping this is not a tidiness issue: the
+    /// menu stays over the composer and the NEXT phase cannot act — measured, `send` failed and the
+    /// pipeline threw on a run whose only change was declaring an opener.
+    ///
+    /// Escape rather than a second tap on the trigger, because re-tapping a toggle-style trigger is
+    /// ambiguous (some reopen, some do nothing) while Escape is what every menu implementation honours.
+    /// Verified rather than assumed — a dismissal that silently fails reintroduces exactly the bug it is
+    /// here to prevent, and it would present as an unrelated failure one phase later.
+    @discardableResult
+    private func dismissOpener(_ key: String) async throws -> Bool {
+        guard openers[key] != nil else { return true }
+        _ = try? await page.evaluateJSON(
+            "(function(){var e=new KeyboardEvent('keydown',{key:'Escape',code:'Escape',"
+                + "keyCode:27,which:27,bubbles:true,cancelable:true});"
+                + "document.activeElement && document.activeElement.dispatchEvent(e);"
+                + "document.dispatchEvent(e); return true;})()"
+        )
+        for _ in 0..<8 {
+            var stillOpen = false
+            for css in manifest[key] ?? [] where !stillOpen {
+                if try await page.querySelector(css) != nil { stillOpen = true }
+            }
+            if !stillOpen, try await resolveByText(key) == nil { return true }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        return false
+    }
+
     /// Tap this key's opener, then wait for the target to appear.
     ///
     /// ⚠ The wait is not optional and its length is measured, not guessed. ChatGPT's plus menu renders in
@@ -173,9 +203,16 @@ public struct InAppPhaseDriver {
         guard let toggle = try await optional("deep_research_toggle") else { return false }
         // Checked with the same predicate that judges the action, so "already on" cannot drift from
         // "is it on now".
-        if try await togglePressed(toggle) { return false }
+        if try await togglePressed(toggle) {
+            // Dismissed on THIS path too. The early return is exactly where it is easiest to forget, and
+            // forgetting leaves the menu over the composer for every subsequent phase.
+            try await dismissOpener("deep_research_toggle")
+            return false
+        }
         try await page.click(toggle)
-        guard try await togglePressed(toggle) else {
+        let confirmed = try await togglePressed(toggle)
+        try await dismissOpener("deep_research_toggle")
+        guard confirmed else {
             throw InAppPhaseError.outcomeUnconfirmed(intent: "\(platform).deep_research_toggle")
         }
         return true

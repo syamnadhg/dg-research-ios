@@ -88,10 +88,18 @@ def _array_literal(source: str, fragment: str) -> str:
 def test_the_swift_toggle_step_checks_before_it_taps():
     """Idempotence. Without this the second run of any device disables deep research silently."""
     body = _body_of(_code(SWIFT_PIPELINE), "public func enableDeepResearch()")
-    assert "if try await togglePressed(toggle) { return false }" in body, (
-        "enableDeepResearch must return early when the toggle is already on. Deep-research state "
-        "persists across sessions, so an unconditional tap turns it OFF on every run after the first "
-        "— and the run then completes with it disabled while reporting success."
+    # Asserted as ORDER rather than as one exact line. The early-return block gained an opener dismissal,
+    # which broke a substring match while leaving the property untouched — the kind of test that fails for
+    # a reason unrelated to what it protects. What matters is that the CHECK precedes the TAP.
+    check = body.index("togglePressed(toggle)")
+    tap = body.index("page.click(toggle)")
+    assert check < tap, (
+        "enableDeepResearch must test the toggle BEFORE tapping it. Deep-research state persists across "
+        "sessions, so an unconditional tap turns it OFF on every run after the first — and the run then "
+        "completes with it disabled while reporting success."
+    )
+    assert "return false" in body[:tap], (
+        "the already-on path must return early rather than falling through to the tap"
     )
 
 
