@@ -265,3 +265,31 @@ success would report this as a completed P2 and harvest an error message as rese
 
 Note also what the arming produced, useful for the predicate: the composer pill's accessible name is
 `Deep research, click to remove`, and a sibling control reads `Sites, search the web, no sites saved`.
+
+### Retry cleared the error and left an EMPTY assistant turn — for six minutes
+
+Clicking the platform's own `Retry` worked as a click: the error text went away. What replaced it was an
+assistant turn containing nothing at all, still empty after 360s of polling:
+
+```
++20s  activity=0  answer='ChatGPT said: '
+...
++360s activity=0  answer='ChatGPT said: '
+```
+
+Two things this settles, both by measurement rather than argument:
+
+1. **"The response container appeared" is not a success signal.** `[data-turn=assistant]` resolves here,
+   visibly, for six minutes, with no content behind it. A run judging P2 by container presence reports
+   success and harvests an empty string. This is the harvest-predicate doctrine — judge the *content*,
+   never the node — confirmed on a real platform rather than a mock.
+2. **ChatGPT's deep research may simply not work inside the app's WKWebView.** "Error loading app /
+   Failed to fetch template" is a sub-application failing to load, and the retry produced silence rather
+   than progress. That would make `chatgpt.activity_panel` uncapturable on this surface — not a missing
+   selector, an unavailable feature.
+
+Unresolved deliberately: I have one data point on one account in one session, which is not enough to
+declare the feature unavailable in a WKWebView. What it IS enough for: the first two entries in the
+agent's real failure catalogue, neither of which was on the imagined list (human-verification prompts,
+quota modals, mid-wait logout). The observed pair is *the feature's own sub-app failing to load*, and
+*a retry that succeeds as a click and produces nothing*.
