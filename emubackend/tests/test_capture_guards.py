@@ -622,3 +622,60 @@ def test_the_build_script_does_not_uninstall_unconditionally():
 def test_the_build_script_still_installs_over_the_top():
     code = _shell_code_only((REPO / "bin" / "build_app.sh").read_text())
     assert "simctl install" in code
+
+
+# --- the shipped manifest's own invariants ----------------------------------------------------
+
+
+def _shipped():
+    import json as _json
+    return _json.loads((REPO / "selectors_mobile.json").read_text())
+
+
+def test_every_sources_selector_is_scoped_to_the_response_container():
+    """An unscoped source selector harvests the page furniture.
+
+    Measured: ChatGPT's bare `a[href^=http]` returns its nav chrome — Images, Plugins, "See plans and
+    pricing" — all visible, all unique, none of them a source. Scoped to the assistant turn it returns
+    exactly the citation. This is the P1 shape in miniature, and the reason the capture tool refuses to
+    propose an href probe as an identity at all.
+    """
+    for platform, entries in _shipped()["platforms"].items():
+        entry = entries.get("sources")
+        if not entry:
+            continue
+        for css in entry["css"]:
+            assert " " in css or css.startswith("["), (
+                f"{platform}.sources selector {css!r} is unscoped — it will match page furniture"
+            )
+
+
+def test_chatgpts_sources_chain_prefers_the_unverified_testid_over_the_verified_anchor():
+    """Deliberate ordering, and worth asserting because it looks like a mistake.
+
+    The known P1 incident is that deep-research sources render as NON-anchor nodes, so a link-only
+    harvest returns zero for a whole run while every click lands. Listing the testid variant first means
+    a DR answer is matched by structure when it has it, and the measured anchor is the fallback rather
+    than the assumption.
+    """
+    css = _shipped()["platforms"]["chatgpt"]["sources"]["css"]
+    assert "testid" in css[0], "the structural (DR) shape must be tried first"
+    assert "a[href" in css[-1], "the measured anchor is the fallback"
+
+
+def test_no_shipped_selector_carries_a_generated_or_indexed_handle():
+    """The two classes that produced wrong values on the first real capture, banned repo-wide.
+
+    `#_r_3q_` and `#base-ui-_r_15_` (render ids) and `conversation-turn-1` / `mat-button-toggle-1-button`
+    (positional). Asserted against the shipped file, not just the capture tool, because a value can also
+    arrive by hand.
+    """
+    import re
+
+    generated = re.compile(r"(^|-|#)_r_|_R_|radix-|base-ui-|headlessui-")
+    indexed = re.compile(r"[=\-\"]\w*(^|-)\d+(-|\b)")
+    for platform, entries in _shipped()["platforms"].items():
+        for key, entry in entries.items():
+            for css in entry.get("css", []):
+                assert not generated.search(css), f"{platform}.{key}: generated handle in {css!r}"
+                assert not indexed.search(css), f"{platform}.{key}: positional handle in {css!r}"

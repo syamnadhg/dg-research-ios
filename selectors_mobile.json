@@ -64,6 +64,13 @@
         "css": [],
         "text_contains": "Deep research",
         "provenance": "DRIVEN@ios-app-webview: opened the plus menu by HID tap, clicked this item by TEXT among menu roles (the same path resolve() takes, aria-checked=false before), and the ported predicate flipped OFF->ON via pillVisible. NOTE pressed stayed FALSE throughout \u2014 an aria-pressed reader sees no change across an activation that plainly happened. TWO steps: open [data-testid=composer-plus-btn] first. NO css on purpose \u2014 resolve() tries css before text and a broad [role=menuitem] would match 'Camera', the first of 19 items."
+      },
+      "sources": {
+        "css": [
+          "[data-message-author-role=assistant] [data-testid*=source]",
+          "[data-message-author-role=assistant] a[href^=http]"
+        ],
+        "provenance": "resolved@ios-app-webview: SCOPED to the response container, which is the whole point \u2014 an unscoped a[href^=http] matches ChatGPT's nav chrome (Images / Plugins / See plans and pricing) and would harvest the sidebar as sources. Measured on a web-search answer: 1 match, text 'github.com' -> https://github.com/swiftlang/swift/releases. testid variant listed FIRST and unverified: it is the shape a deep-research answer is expected to use, and the known P1 failure is precisely that DR sources render as NON-anchor nodes, so a link-only harvest returns zero. Re-verify against a real deep-research response before trusting P2."
       }
     },
     "gemini": {
