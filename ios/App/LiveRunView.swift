@@ -141,11 +141,28 @@ final class PlatformWebViews {
         if let existing = views[platform] { return existing }
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()   // the signed-in session lives here
+        // Ask for the desktop surface when told to.
+        //
+        // Not cosmetic — it decides whether P2 is possible at all. The backend's own intents say the
+        // deep-research control exists on every platform (`region: form` on ChatGPT with roles
+        // menuitem/menuitemradio, `region: composer` on Gemini and Claude), and at 402pt none of them
+        // is reachable: Claude's composer row collapses to plus/model/send, and ChatGPT's plus menu
+        // shows Camera/Photos/Files. Measured by opening each container on real signed-in accounts.
+        // The controls are not missing, they are collapsed.
+        if ProcessInfo.processInfo.environment["SR_DESKTOP_WEB"] == "1" {
+            config.defaultWebpagePreferences.preferredContentMode = .desktop
+        }
         let web = WKWebView(frame: .zero, configuration: config)
         web.enableInspectionInSimulator()
-        web.customUserAgent =
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
-            + "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+        // ⚠ Left to WebKit in desktop mode. `.desktop` picks a matching desktop UA, and pinning the
+        // iPhone one over it produces the contradiction that gets a request served the mobile page
+        // anyway — the override exists for Google's embedded-web-view OAuth block, which only matters
+        // while signing in.
+        if ProcessInfo.processInfo.environment["SR_DESKTOP_WEB"] != "1" {
+            web.customUserAgent =
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
+                + "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+        }
         web.load(URLRequest(url: LoginFlowView.url(for: platform)))
         views[platform] = web
         return web

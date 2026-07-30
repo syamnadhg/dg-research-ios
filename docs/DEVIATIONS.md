@@ -128,3 +128,47 @@ Three ways out, and the choice is a product decision rather than a capture probl
    captured selector would need re-verifying against the desktop DOM.
 3. **Accept P2 without the toggle on iOS** and say so, rather than shipping a run that silently does
    ordinary chat under a deep-research label.
+
+### Correction, from reading the backend's own intents
+
+The section above concluded the control "does not exist" on mobile web. **That was wrong, and the
+backend says so.** `dg-research-backend/selfheal_intents.json` (read-only — A8 forbids editing it, not
+reading it) already describes all three:
+
+| | region | accessible name | outcome predicate |
+|---|---|---|---|
+| chatgpt | `form` | "deep research" | `cgpt_state:active` |
+| gemini | `composer` | "deep research" | `gemini_dr_state:placeholderResearch||pressed` |
+| claude | `composer` | "research" | `claude_research_tool:on` |
+
+Two things follow that matter more than the selectors:
+
+1. **Claude's control is named "research", not "deep research"** — and ChatGPT's carries roles
+   `menuitem`/`menuitemradio`, i.e. it lives in a menu. Both are things I would have kept missing.
+2. **The predicate contract on iOS is weaker than the backend's.** `phases.py::_toggle_on_predicate`
+   reads `aria-pressed`/`aria-checked` only. The backend uses platform-specific state — Gemini's is
+   *the composer placeholder changing to "what do you want to research"*, which is exactly the kind of
+   signal an `aria-pressed` reader cannot see. **This is the real defect**, and it is independent of
+   which surface we drive: a correct selector with this predicate still reports failure and shadows.
+
+Gemini's control **was** found on mobile after all, in the "Upload and tools" drawer:
+`<toolbox-drawer-item>` with text "Deep Research — Get detailed reports". Two steps (open drawer, then
+the item), custom-element tag, no testid — so `text_contains` on `toolbox-drawer-item` addresses it.
+
+### Desktop content mode: measured, and not the fix
+
+`config.defaultWebpagePreferences.preferredContentMode = .desktop` (env-gated on `SR_DESKTOP_WEB=1`,
+off by default) does take effect — the app's web views report a Macintosh user agent and `claude.ai`
+renders at `innerWidth` 980. It does **not** unlock the controls:
+
+* **chatgpt.com and gemini stay at `innerWidth` 402** and render the same mobile composer. They honour
+  their own viewport meta regardless of the user agent, so nothing about the layout changes.
+* **claude.ai at 980 loses `[data-testid="chat-input"]`** — the captured composer no longer resolves.
+  So the surface switch invalidates captured selectors, as suspected, without buying the controls.
+
+⚠ It also breaks the app-vs-Safari discriminator: `capture_selectors.APP_UA_TOKEN` /
+`drive_selectors.APP_UA_TOKEN` match `Version/17.0`, which the desktop UA does not contain. The durable
+fix is a `WKUserScript` at document start setting a marker (`window.__srApp = true`) instead of
+inferring the surface from a user agent we also want to vary.
+
+**So the remaining lever is a genuinely wider screen — an iPad simulator — not a user-agent switch.**
