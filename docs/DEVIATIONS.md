@@ -205,3 +205,24 @@ Two things follow:
 
 ChatGPT's entry carries **no css on purpose**: `resolve()` tries css before text, so a broad
 `[role=menuitem]` would match "Camera" — the first of the nineteen.
+
+### Claude is the genuine exception — measured the right way this time
+
+Having learned that a script-driven negative is worthless, Claude's plus menu was re-opened with a real
+HID tap (after "Take over") and sampled at 3s, 4s and 5s in case of a late second section. It returns
+**five** items at every sample:
+
+```
+Add files or photos ⌘U   Add to project ›   Skills ›   Add connector ›   Add plugins...
+```
+
+No research entry, and no second section arriving late — unlike ChatGPT, whose menu grew from 3 to 19.
+Claude's Research control is a separate button in the desktop composer row, and that row collapses to
+plus / model / send at 402pt. So `claude.research_toggle` is the one key that really is out of reach on
+a phone-width surface, and it is recorded as a gap rather than filled with the nearest plausible
+control.
+
+Gemini's, by contrast, IS reachable — but not where the naming suggested. `bard-mode-menu-button` is the
+**model** picker (3.5 Flash-Lite / 3.6 Flash / 3.1 Pro / Extended thinking) and contains no Deep
+Research. The control is a `<toolbox-drawer-item>` reading "Deep Research — Get detailed reports" inside
+the **"Upload and tools"** drawer: verified unique on the page (6 items, 1 match, visible).

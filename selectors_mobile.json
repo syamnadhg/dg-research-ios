@@ -92,6 +92,13 @@
           "model-response"
         ],
         "provenance": "resolved@ios-app-webview:custom element \u2014 the platform's own component name"
+      },
+      "deep_research_toggle": {
+        "css": [
+          "toolbox-drawer-item"
+        ],
+        "text_contains": "Deep Research",
+        "provenance": "resolved@ios-app-webview:custom element + text, inside the 'Upload and tools' drawer (TWO steps: tap button[aria-label=\"Upload and tools\"], then this). Verified unique: 6 toolbox-drawer-items on the page, exactly 1 matching 'Deep Research', visible. NOT [data-test-id=bard-mode-menu-button] \u2014 that is the MODEL picker (3.5 Flash-Lite / 3.6 Flash / 3.1 Pro / Extended thinking), which contains no Deep Research at all."
       }
     },
     "claude": {
