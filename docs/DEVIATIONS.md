@@ -333,3 +333,37 @@ So real-platform in-app coverage was never one selector away. It needs one of:
 (1) is the only one that measures the thing the goal actually asks about. Worth stating plainly that the
 gate has been passing against the mock all along precisely because the mock needs no session, so this
 gap could not have surfaced before a real platform was pointed at it.
+
+### The fix for the third jar: run C1 *inside* the SuperResearch app, not a harness beside it
+
+Three candidate routes, and only one measures what the goal asks:
+
+1. **Rename the harness's bundle to `com.distributedglobal.superresearch`.** Same bundle id means the
+   same Data container, so the jar is shared. But installing it *replaces* the real app binary, and a
+   gate that overwrites the app under test is a gate you cannot run while using the product.
+2. **Transplant the session** into the harness container. Simulator-only, and it changes what the gate
+   proves: that the *harness* can drive a signed-in page, not that the app can.
+3. **Give the real app a C1 mode**, entered by launch environment exactly as `SR_SCREENSHOT_STATE`
+   already does — `SIMCTL_CHILD_SR_C1=<platform>` runs the phase bodies against that platform's manifest
+   and writes the same `verdict.json`. ✅
+
+(3) is correct for a reason beyond convenience: **it makes the gate exercise the production path.** In
+production the run happens inside the SuperResearch app, driving `PlatformWebViews`' retained web views
+with the owner's session. A separate harness has never been that, and the mock hid the difference because
+a mock needs no session.
+
+Concretely, next session:
+
+* `ios/App/main.swift` — alongside the existing `SR_SCREENSHOT_STATE` branch, read `SR_C1`; when set,
+  build `PhaseDeps` from `SRManifest` and run P0–P3 against `PlatformWebViews.shared.view(for:)` rather
+  than presenting the UI.
+* `bin/c1_in_app.sh` — drop the separate `SRC1.app` build; instead `bin/build_app.sh` (which already
+  install-upgrades in place and preserves the jar), then
+  `SIMCTL_CHILD_SR_C1=$PLATFORM xcrun simctl launch …`, then read the verdict from the SuperResearch
+  container's `tmp/sr-c1/verdict.json`.
+* Keep `c1_gen_manifest.py` exactly as is — including its `--url` "WIRING PROOF, not real coverage"
+  provenance, which correctly refused to credit the run that exposed all of this.
+
+⚠ Do **not** pass `--url` for a real run. That flag exists to prove wiring against the mock, and
+`coverage_gate.py` is built to notice it — it caught this author trying to count a wiring proof as
+coverage, which is the whole reason the provenance field exists.
