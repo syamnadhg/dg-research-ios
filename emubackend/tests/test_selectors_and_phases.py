@@ -188,6 +188,8 @@ class FakePage:
         self.clicks: list[str] = []
         self.typed: list[str] = []
         self.focused: str | None = None
+        #: What the text-fallback query returns, independent of its exact selector string.
+        self.text_candidates: list = []
         #: Override the deep-research state probe *independently* of ``toggles``.
         #:
         #: Needed to test the not-found invariant at all. While the probe's answer was derived from
@@ -205,6 +207,11 @@ class FakePage:
     async def query_selector_all(self, css):
         if css in self.dom:
             return list(self.dom[css])
+        # The text-fallback query is a comma list of roles, and a fake keyed on its exact string is a
+        # fake that breaks whenever the list is extended — which is what happened when `[role=menuitem]`
+        # was added for ChatGPT's deep-research item. Match the *shape* instead.
+        if "," in css and self.text_candidates:
+            return list(self.text_candidates)
         return []
 
     async def evaluate(self, _js):
@@ -420,10 +427,41 @@ def test_resolve_falls_back_to_text_last():
 
     because matching on copy is fragile in the opposite direction (an i18n change breaks it).
     """
-    page = FakePage(dom={"button, a, [role=button]": []})
-    page.dom["button, a, [role=button]"] = [FakeHandle(page, "#x", "Start research")]
+    page = FakePage()
+    page.text_candidates = [FakeHandle(page, "#x", "Start research")]
     entry = selectors.SelectorEntry(css=("#missing",), text_contains="start research")
     assert asyncio.run(phases.resolve(page, entry)) is not None
+
+
+def test_the_text_fallback_reaches_menu_items_not_just_buttons():
+    """ChatGPT's deep-research control is a `[role=menuitem]` with no testid and no id.
+
+    Text is its only handle, and the fallback query used to cover `button, a, [role=button]` only — so
+    the one control that had just been located by hand would still have been unreachable. Measured on
+    the real page: 19 items in the composer's plus menu, "Deep research" at index 7, each
+    `role=menuitem` carrying `aria-checked`.
+    """
+    page = FakePage()
+    seen: list[str] = []
+
+    class Recorder(FakePage):
+        async def query_selector_all(self, css):
+            seen.append(css)
+            return [FakeHandle(self, "#dr", "Deep research")]
+
+    entry = selectors.SelectorEntry(css=(), text_contains="Deep research")
+    found = asyncio.run(phases.resolve(Recorder(), entry))
+    assert found is not None
+    assert "[role=menuitem]" in seen[0], f"menu roles must be queried; got {seen[0]!r}"
+
+
+def test_a_text_only_entry_is_resolvable_without_any_css():
+    """ChatGPT's entry deliberately carries NO css: a broad `[role=menuitem]` would match "Camera",
+
+    the first of 19 items, because resolve() tries css before text.
+    """
+    entry = selectors.SelectorEntry(css=(), text_contains="Deep research")
+    assert entry.resolvable
 
 
 def test_resolve_returns_none_rather_than_guessing():

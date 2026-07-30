@@ -110,7 +110,14 @@ async def resolve(page: Any, entry: SelectorEntry) -> Any | None:
     if entry.text_contains:
         # Text is the fallback for structure that moves but labels that do not. Deliberately
         # last — matching on copy is fragile in the opposite direction (an i18n change breaks it).
-        candidates = await page.query_selector_all("button, a, [role=button]")
+        #
+        # ⚠ Menu roles are in this list for a measured reason. ChatGPT's deep-research control is a
+        # `[role=menuitem]` inside the composer's plus menu, carrying no testid and no id — text is the
+        # ONLY handle it has. With the old `button, a, [role=button]` list it could never be found, so
+        # the one platform whose control had just been located would still have reported "no selector".
+        candidates = await page.query_selector_all(
+            "button, a, [role=button], [role=menuitem], [role=menuitemradio], [role=option]"
+        )
         for handle in candidates:
             try:
                 text = await handle.inner_text()

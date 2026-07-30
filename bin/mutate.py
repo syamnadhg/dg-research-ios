@@ -32,6 +32,13 @@ MUTATIONS = [
     # --- the deep-research predicate ported from the backend ---------------------------------
     (
         "emubackend/phases.py",
+        '            "button, a, [role=button], [role=menuitem], [role=menuitemradio], [role=option]"',
+        '            "button, a, [role=button]"',
+        "test_selectors_and_phases.py::test_the_text_fallback_reaches_menu_items_not_just_buttons",
+        "the text fallback missing menu items, so ChatGPT's deep-research item is unreachable by text",
+    ),
+    (
+        "emubackend/phases.py",
         "            on = pill_visible or placeholder_research",
         "            on = pill_visible and placeholder_research",
         "test_toggle_idempotence.py::test_chatgpts_visible_pill_alone_reads_as_on",

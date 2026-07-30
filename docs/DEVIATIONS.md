@@ -172,3 +172,36 @@ fix is a `WKUserScript` at document start setting a marker (`window.__srApp = tr
 inferring the surface from a user agent we also want to vary.
 
 **So the remaining lever is a genuinely wider screen — an iPad simulator — not a user-agent switch.**
+
+### Correction #2: the controls ARE reachable on the phone — my probe was the problem
+
+The owner said both ChatGPT's and Claude's plus menus have research. They were right, and the way I
+was looking is what hid it.
+
+**A script click plus a fixed 3-second sample undercounts a menu that renders in two passes.** My
+survey of ChatGPT's `composer-plus-btn` menu reported three items — Camera, Photos, Files — and I
+recorded "deep research is not there". Repeating it with a real HID tap and a later sample:
+
+```
+19 menu items in the DOM
+  Camera  Photos  Files  Create image  Web search  Create task  Deep research  Documents
+  Fal  Figma  Google Calendar  Google Drive  Mobbin  Notion  OpenAI Developers  PDF
+  Presentations  Spreadsheets  Visualize
+```
+
+`Deep research` sits at index 7, `role=menuitem`, and **carries `aria-checked`** — which the ported
+predicate reads. The first three items are one section; everything from "Create image" down is a second
+section (tools and connectors) that arrives asynchronously, after the sample I took.
+
+Two things follow:
+
+* **A negative from a script-driven probe is not a negative.** Read-only is also load-bearing here:
+  `LiveRunView` sets `allowsHitTesting(interactive)`, so an HID tap does nothing at all until "Take
+  over" is pressed — an earlier tap on Claude's `+` was swallowed silently, which looks exactly like a
+  control that is not there.
+* **`resolve()` could not have found it anyway.** Its text fallback queried
+  `button, a, [role=button]`, and a `[role=menuitem]` matches none of those. So the control I had just
+  located by hand would still have reported "no selector". Menu roles are in the query now.
+
+ChatGPT's entry carries **no css on purpose**: `resolve()` tries css before text, so a broad
+`[role=menuitem]` would match "Camera" — the first of the nineteen.

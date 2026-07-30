@@ -59,6 +59,11 @@
           "[data-message-author-role=assistant]"
         ],
         "provenance": "resolved@ios-app-webview:semantic attribute; NOT conversation-turn-N, which binds to one turn"
+      },
+      "deep_research_toggle": {
+        "css": [],
+        "text_contains": "Deep research",
+        "provenance": "resolved@ios-app-webview:role=menuitem + text, inside the composer's plus menu (TWO steps: open [data-testid=composer-plus-btn], then this). Carries aria-checked, which the ported predicate reads. NO css on purpose \u2014 a broad [role=menuitem] would match 'Camera', the first of 19 items, since resolve() tries css before text."
       }
     },
     "gemini": {
