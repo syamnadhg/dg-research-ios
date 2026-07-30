@@ -91,6 +91,15 @@ public final class C1Runner: NSObject {
 
         let driver = InAppPhaseDriver(platform: platform, manifest: manifest, texts: texts, page: bridge)
 
+        // 20s is right for the mock and wrong for everything else.
+        //
+        // The mock answers immediately by design. A real platform does not: a measured web-search reply on
+        // ChatGPT took 72 SECONDS, and deep research runs 5-45 minutes. A timeout tuned to the fixture
+        // reports "no response" on a platform that is answering perfectly well — a false failure, which is
+        // the thing this codebase treats as worse than a crash, and it cascades: no response means no
+        // citations, so `sources` reports 0 and looks like a harvest bug.
+        let responseTimeout: TimeInterval = platform == "mockplatform" ? 20 : 240
+
         // Wait for the COMPOSER, not merely for the document.
         //
         // `waitForReady` answers "did the URL load", and on a single-page app that is true long before the
@@ -183,7 +192,7 @@ public final class C1Runner: NSObject {
         do { try await driver.send() } catch { sendOK = false }
         record("P2: send accepted and its predicate confirmed", sendOK, "")
 
-        let arrived = (try? await driver.awaitResponse(timeout: 20)) ?? false
+        let arrived = (try? await driver.awaitResponse(timeout: responseTimeout)) ?? false
         record("P2: response arrived (late, as on a real platform)", arrived, "")
 
         let sources = (try? await driver.harvestSources()) ?? []
@@ -198,7 +207,7 @@ public final class C1Runner: NSObject {
         // this script calling phases in an order it chose itself.
         var pipeline = InAppPipeline(driver: driver, topic: "quantum error correction, 2026 review")
         var outcome: InAppPipeline.Outcome?
-        do { outcome = try await pipeline.run(responseTimeout: 20) } catch { outcome = nil }
+        do { outcome = try await pipeline.run(responseTimeout: responseTimeout) } catch { outcome = nil }
         record(
             "FULL P0-P3 RUN COMPLETED INSIDE THE NATIVE APP",
             outcome?.status == "complete" && outcome?.phasesCompleted.count == 4,

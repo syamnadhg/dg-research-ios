@@ -522,3 +522,44 @@ Real ChatGPT, in the real app, with the owner's session, now passes: P0 logged-i
 hydration, the composer fill through the execCommand path, and the de-mocked isTrusted boundary. P2 send
 onward still fails and is not yet diagnosed — the same instrument-then-look approach applies, and the
 runner already reports enough to start.
+
+#### A full P0–P3 now completes in-app on real ChatGPT — and the last failure is a third hardcoded mock signal
+
+Two fixes, each the same shape as the hydration one:
+
+* **`send()` checked its acceptance predicate ONCE**, immediately after the click. The predicate is right —
+  acceptance, never completion — but the container does not exist the instant `click` returns. The mock is
+  synchronous enough to hide it; real ChatGPT returned `outcomeUnconfirmed` on a send that had in fact been
+  accepted. Now polled within a bounded acceptance window, which keeps the assertion instead of dropping it.
+* **The response timeout was 20s for every platform.** Right for the mock, wrong for everything else: a
+  measured web-search reply took 72 seconds and deep research runs 5–45 minutes. Now platform-aware.
+
+Result on real ChatGPT, in the real app, with the owner's session:
+
+```
+[PASS] P0: logged-in marker found in-app
+[PASS] P1: composer written through the MODEL-updating path: path=execCommand, composer resolved=true
+[PASS] P2: send accepted and its predicate confirmed
+[PASS] FULL P0-P3 RUN COMPLETED INSIDE THE NATIVE APP: status=complete, phases=4
+[PASS] the phase event sequence is start/complete per phase, in order
+[PASS] BOUNDARY: not applicable — no trust-gated fixture on this platform
+```
+
+**The remaining failure is fully identified and it is ours, not the platform's.** `awaitResponse` polls:
+
+```swift
+"!!document.querySelector('[data-state=\"complete\"]')"
+```
+
+`data-state="complete"` is an attribute **the mock fixture sets**. Real ChatGPT never does, so the wait can
+only ever time out — 240s made no difference because it is not a timeout problem. That cascades into
+`sources: 0`, which then looks like a harvest bug and is not one.
+
+This is the *third* mock-only signal found in this pipeline, after the idempotence check's
+`[data-testid=deep-research-toggle]` and the boundary probe's `[data-testid=trust-gated]`. The pattern is
+worth naming: **anything the mock alone can satisfy is a gate that cannot fail on a fixture and cannot pass
+on a platform.** Completion needs a real signal — a manifest key, the streaming attribute clearing, or
+content stability across polls — and picking between those wants one measurement, not a guess.
+
+Still outstanding beyond that: `enable_deep_research` needs to open the composer's plus menu first (the
+two-step `opener` concept), and the tools section arrives in a *second* async pass.

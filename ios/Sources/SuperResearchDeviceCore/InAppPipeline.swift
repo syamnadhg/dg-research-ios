@@ -170,12 +170,33 @@ public struct InAppPhaseDriver {
     /// a false failure on every single run, because the response arrives hundreds of milliseconds
     /// later — and a false failure is worse than no predicate, since it escalates an agent onto a
     /// perfectly healthy page.
-    public func send() async throws {
+    public func send(
+        acceptanceWindow: TimeInterval = 10,
+        sleep: (TimeInterval) async -> Void = {
+            try? await Task.sleep(nanoseconds: UInt64($0 * 1e9))
+        }
+    ) async throws {
         let button = try await resolve("send")
         try await page.click(button)
-        guard try await optional("response_container") != nil else {
-            throw InAppPhaseError.outcomeUnconfirmed(intent: "\(platform).send")
+        // POLLED, not checked once.
+        //
+        // The predicate is right — acceptance, never completion — but it was evaluated with zero
+        // tolerance for a render tick, and the container does not exist the instant the click returns.
+        // The mock is synchronous enough to hide that; real ChatGPT is not, and the symptom was
+        // `outcomeUnconfirmed` on a send that had in fact been accepted. A false failure on a healthy page
+        // is the failure this codebase treats as worse than a crash, so the window is the fix rather than
+        // dropping the assertion.
+        //
+        // Bounded deliberately: this waits for the response to START, not to finish. `awaitResponse` is
+        // the separate, longer wait, because a deep-research answer can take 45 minutes and an acceptance
+        // predicate that waited that long would stop being one.
+        var waited: TimeInterval = 0
+        while waited < acceptanceWindow {
+            if try await optional("response_container") != nil { return }
+            await sleep(0.5)
+            waited += 0.5
         }
+        throw InAppPhaseError.outcomeUnconfirmed(intent: "\(platform).send")
     }
 
     /// Wait for the response to finish. Polls, because there is no completion event to listen for.
