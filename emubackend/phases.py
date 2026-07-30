@@ -111,8 +111,66 @@ __all__ = [
     "PhaseDeps",
     "PlatformDriver",
     "build_phase_bodies",
+    "classify_response",
     "resolve",
 ]
+
+#: Platform-side error banners, verbatim from what the platform rendered.
+#:
+#: Fragments rather than whole strings, and matched case-insensitively, because the surrounding copy
+#: changes far more readily than the phrase does. Each entry is something OBSERVED, not imagined — the
+#: imagined list (human-verification prompts, quota modals, mid-wait logout) contained none of these, and
+#: the first real deep-research attempt hit two of them.
+PLATFORM_ERROR_FRAGMENTS = (
+    "error loading app",
+    "failed to fetch template",
+    "something went wrong",
+    "an error occurred",
+    "please try again",
+    "network error",
+    "you've reached your limit",
+    "usage limit",
+    "rate limit",
+    "verify you are human",
+)
+
+#: The label a platform offers alongside its own error, so a report can say recovery was available.
+RECOVERY_LABELS = ("retry", "try again", "regenerate", "reload")
+
+#: A turn holding nothing but the platform's own speaker prefix is EMPTY, not content.
+#:
+#: Measured: six minutes of `'ChatGPT said: '` and nothing else. Stripped before the emptiness test,
+#: because a naive `len(text) > 0` reads that as an answer — which is the whole trap.
+SPEAKER_PREFIXES = ("chatgpt said:", "claude said:", "gemini said:", "you said:")
+
+
+def classify_response(text: str) -> dict:
+    """Sort a response container's text into ``content`` / ``empty`` / ``error``.
+
+    Split out as a free function so it is testable without a page, a Simulator or a platform — the
+    classification is the interesting part and it should not need any of those to be pinned.
+
+    Error is checked FIRST. An error banner is non-empty text, so an emptiness-first order would classify
+    ``Error loading app`` as content and hand it to the harvester as research.
+    """
+    raw = " ".join((text or "").split())
+    low = raw.lower()
+    for fragment in PLATFORM_ERROR_FRAGMENTS:
+        if fragment in low:
+            offered = [label for label in RECOVERY_LABELS if label in low]
+            return {
+                "state": "error",
+                "matched": fragment,
+                "recovery_offered": offered,
+                "text": raw[:200],
+            }
+    stripped = low
+    for prefix in SPEAKER_PREFIXES:
+        if stripped.startswith(prefix):
+            stripped = stripped[len(prefix):].strip()
+    if not stripped:
+        return {"state": "empty", "text": raw[:200]}
+    return {"state": "content", "chars": len(stripped), "text": raw[:200]}
 
 
 async def resolve(page: Any, entry: SelectorEntry) -> Any | None:
@@ -213,6 +271,40 @@ class PlatformDriver:
         complete). Waiting for completion is a separate, explicit wait — not this predicate's job.
         """
         return await self._present("response_container")
+
+    async def response_health(self) -> dict:
+        """Classify what is actually IN the response container: content, empty, or a platform error.
+
+        The first two entries in the agent's real failure catalogue, both measured on live ChatGPT and
+        neither on the imagined list of human-verification prompts, quota modals and mid-wait logouts:
+
+        * **the feature's own sub-app failed to load** — the assistant turn read
+          ``Error loading app  Failed to fetch template  Retry``. Not a network error and not an
+          automation error: the platform offered its own recovery control.
+        * **a retry that succeeds as a click and produces nothing** — clicking that ``Retry`` cleared the
+          error and left the turn *empty for six minutes*.
+
+        Both defeat presence-based judgement, and that is the point. ``response_present`` is deliberately
+        true for a container in *any* state, because asserting completion at send time reports a false
+        failure on every run. The cost of that correctness is that presence alone cannot tell a streaming
+        answer from an error banner from six minutes of nothing — so the run needs a second, separate
+        question, asked later. This is it.
+
+        Returns a classification rather than a bool because the three outcomes need different handling: a
+        run continues on ``content``, waits on ``empty``, and must **stop rather than harvest** on
+        ``error``. Harvesting an error banner as research is the failure this exists to prevent — and it
+        is worse than crashing, because the output looks like an answer.
+        """
+        if self.page is None:
+            return {"state": "absent", "reason": "no page"}
+        entry = self.deps.manifest.entry(self.platform, "response_container")
+        if not entry.resolvable:
+            return {"state": "absent", "reason": "response_container not captured"}
+        handle = await resolve(self.page, entry)
+        if handle is None:
+            return {"state": "absent", "reason": "container did not resolve"}
+        text = (await handle.inner_text()) or ""
+        return classify_response(text)
 
     # -- intents -----------------------------------------------------------------
 

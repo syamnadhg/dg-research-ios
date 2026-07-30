@@ -29,6 +29,22 @@ PY = ROOT / ".venv/bin/python"
 
 # (file, old, new, test-node-id-that-MUST-fail, what-real-defect-this-simulates)
 MUTATIONS = [
+    # --- the agent's first real failure catalogue ----------------------------------------------
+    (
+        "emubackend/phases.py",
+        "    for fragment in PLATFORM_ERROR_FRAGMENTS:\n        if fragment in low:",
+        "    for fragment in []:\n        if fragment in low:",
+        "test_response_health.py::test_the_real_error_banner_is_an_error_not_content",
+        "a platform error banner classified as content and harvested as research",
+    ),
+    (
+        "emubackend/phases.py",
+        "    if not stripped:",
+        "    if not raw:",
+        "test_response_health.py::test_the_real_empty_turn_is_empty_not_content",
+        "six minutes of 'ChatGPT said: ' counting as an answer because the prefix was not stripped",
+    ),
+
     # --- selectors verified against the wrong STATE --------------------------------------------
     (
         "selectors_mobile.json",
