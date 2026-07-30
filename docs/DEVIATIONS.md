@@ -430,3 +430,35 @@ pipeline was — a gate measuring the fixture rather than the code:
 
 Mock C1 still passes 11/11 through both entry points after the change, which is what makes it a
 de-mocking rather than a loosening.
+
+#### The generator fix landed, and it separated two failures that looked like one
+
+`text_contains` now crosses into Swift (`SRManifest.texts`), `InAppPhaseDriver` falls back to it over the
+same role list the Python `resolve()` uses, and the mock C1 still passes with zero failures through both
+entry points. Verified on the generated file: `deep_research_toggle: "Deep research"` is present where it
+was previously absent altogether.
+
+Real ChatGPT in the real app now reports:
+
+```
+[PASS] P0: logged-in marker found in-app
+[PASS] BOUNDARY: not applicable — no trust-gated fixture on this platform
+[FAIL] P1: enabling deep research TWICE ... tapped=false, tapped=false, still on=false
+[FAIL] P1: composer written through the MODEL-updating path: path=
+```
+
+So the generator was **necessary but not sufficient**, and the two remaining failures are now
+distinguishable rather than tangled:
+
+1. **The toggle is a genuine two-step.** `resolveByText` searches for a `[role=menuitem]` whose text
+   contains "Deep research" — and the composer's plus menu is CLOSED, so no such element exists. The fix
+   belongs in `enableDeepResearch()`: open `[data-testid=composer-plus-btn]`, wait for the tools section
+   (it arrives in a *second* async pass — a fixed 3s sample sees 3 items where 19 exist), then resolve the
+   item. Every platform's research control is behind an opener, so this wants to be a manifest concept
+   (`opener` key) rather than a ChatGPT special case.
+2. **`fillComposer` returned `""`, cause not yet established.** Do not guess: `#prompt-textarea` resolves
+   from the Python side on this same page, so the difference is in the Swift bridge or in the timing after
+   load, and the honest next step is to read what `insertText` returns rather than infer.
+
+Worth stating plainly: had the generator not been fixed first, (1) would have been indistinguishable from
+it — a missing key and a closed menu both present as `tapped=false`.

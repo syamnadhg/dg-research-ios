@@ -39,8 +39,16 @@ ORIGINS = {
 
 def selectors_for(
     platform: str, manifest_path: Path | None
-) -> tuple[dict[str, list[str]], str, str]:
-    """Returns (selectors, url, provenance).
+) -> tuple[dict[str, list[str]], dict[str, str], str, str]:
+    """Returns (selectors, texts, url, provenance).
+
+    ⚠ ``texts`` exists because dropping it was a real defect, not a hypothetical one. This used to emit
+    only ``{key: entry.css}`` filtered by ``if entry.css`` — so an entry that is deliberately TEXT-ONLY
+    vanished from the Swift manifest entirely. ChatGPT's ``deep_research_toggle`` is exactly that: it
+    carries no css on purpose, because ``resolve()`` tries css before text and a broad ``[role=menuitem]``
+    would match "Camera", the first of nineteen menu items. The in-app run therefore reported
+    ``tapped=false`` twice and "still on=false", which reads as a platform or a two-step-menu problem and
+    was neither — the key simply was not there.
 
     ⚠ The provenance is not decoration. It travels into the verdict, and the coverage gate credits a
     platform ONLY when its C1 run used the real manifest. Without it, a wiring-proof run against a
@@ -50,7 +58,12 @@ def selectors_for(
     if platform == "mockplatform":
         raw = json.loads(MOCK_SELECTORS.read_text())["platforms"]["chatgpt"]
         return (
-            {key: list(entry["css"]) for key, entry in raw.items()},
+            {key: list(entry["css"]) for key, entry in raw.items() if entry.get("css")},
+            {
+                key: entry["text_contains"]
+                for key, entry in raw.items()
+                if entry.get("text_contains")
+            },
             MOCK_URL,
             "fixtures/mockplatform/selectors_mock.json",
         )
@@ -76,13 +89,24 @@ def selectors_for(
         raise SystemExit(f"no origin known for {platform!r}; add it to ORIGINS in this generator")
     return (
         {key: list(entry.css) for key, entry in entries.items() if entry.css},
+        {
+            key: entry.text_contains
+            for key, entry in entries.items()
+            if entry.text_contains
+        },
         ORIGINS[platform],
         # "baseline (...)" or the manifest path — load_manifest records where it came from.
         manifest.source,
     )
 
 
-def render(platform: str, selectors: dict[str, list[str]], url: str, provenance: str) -> str:
+def render(
+    platform: str,
+    selectors: dict[str, list[str]],
+    texts: dict[str, str],
+    url: str,
+    provenance: str,
+) -> str:
     def literal(text: str) -> str:
         r"""JSON string escaping, with `ensure_ascii=False`.
 
@@ -109,7 +133,19 @@ def render(platform: str, selectors: dict[str, list[str]], url: str, provenance:
     for key, values in sorted(selectors.items()):
         rendered = ", ".join(literal(value) for value in values)
         lines.append(f"        {literal(key)}: [{rendered}],")
-    lines += ["    ]", "}", ""]
+    lines.append("    ]")
+    # The text fallbacks, carried across the boundary rather than discarded. A key may appear here with
+    # NO css entry above it — that is the point, and the reason the old shape lost ChatGPT's toggle.
+    # ⚠ Swift rejects `[]` for a dictionary — "use [:] to get an empty dictionary literal". The mock has
+    # no text fallbacks at all, so the empty case is the COMMON one here, not an edge case.
+    if texts:
+        lines.append("    static let texts: [String: String] = [")
+        for key, value in sorted(texts.items()):
+            lines.append(f"        {literal(key)}: {literal(value)},")
+        lines.append("    ]")
+    else:
+        lines.append("    static let texts: [String: String] = [:]")
+    lines += ["}", ""]
     return "\n".join(lines)
 
 
@@ -126,10 +162,10 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    selectors, url, provenance = selectors_for(args.platform, args.manifest)
+    selectors, texts, url, provenance = selectors_for(args.platform, args.manifest)
     if args.url:
         url = args.url
         provenance = f"{provenance} (url overridden — WIRING PROOF, not real coverage)"
-    args.out.write_text(render(args.platform, selectors, url, provenance))
+    args.out.write_text(render(args.platform, selectors, texts, url, provenance))
     print(f"    {args.platform}: {len(selectors)} selector keys -> {args.out.name}")
     print(f"    provenance: {provenance}")

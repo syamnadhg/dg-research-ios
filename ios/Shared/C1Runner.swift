@@ -37,16 +37,18 @@ public final class C1Runner: NSObject {
     /// in one binary.
     let platform: String
     let manifest: [String: [String]]
+    let texts: [String: String]
     let runtimeJS: String
     let pageURL: String
     let manifestSource: String
 
     public init(
-        platform: String, manifest: [String: [String]], runtimeJS: String,
-        pageURL: String, manifestSource: String
+        platform: String, manifest: [String: [String]], texts: [String: String],
+        runtimeJS: String, pageURL: String, manifestSource: String
     ) {
         self.platform = platform
         self.manifest = manifest
+        self.texts = texts
         self.runtimeJS = runtimeJS
         self.pageURL = pageURL
         self.manifestSource = manifestSource
@@ -76,7 +78,7 @@ public final class C1Runner: NSObject {
         let injected = (try? await bridge.injectRuntime()) ?? "failed"
         record("runtime injected", injected == "installed" || injected == "already", injected)
 
-        let driver = InAppPhaseDriver(platform: platform, manifest: manifest, page: bridge)
+        let driver = InAppPhaseDriver(platform: platform, manifest: manifest, texts: texts, page: bridge)
 
         // Each phase is also asserted individually, because "the run completed" alone cannot
         // distinguish a real pass from a pipeline that skipped everything.

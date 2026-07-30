@@ -43,12 +43,41 @@ public enum InAppPhaseError: Error, Equatable {
 public struct InAppPhaseDriver {
     public let platform: String
     public let manifest: [String: [String]]
+    /// Text fallbacks, keyed the same way. A key may appear ONLY here — ChatGPT's
+    /// `deep_research_toggle` carries no css on purpose, because css is tried first and a broad
+    /// `[role=menuitem]` matches "Camera", the first of nineteen menu items.
+    public let texts: [String: String]
     private let page: WebPage
 
-    public init(platform: String, manifest: [String: [String]], page: WebPage) {
+    public init(
+        platform: String, manifest: [String: [String]], texts: [String: String] = [:],
+        page: WebPage
+    ) {
         self.platform = platform
         self.manifest = manifest
+        self.texts = texts
         self.page = page
+    }
+
+    /// Roles searched when falling back to text — the SAME list the Python `resolve()` uses.
+    ///
+    /// Menu roles are included for a measured reason: ChatGPT's deep-research control is a
+    /// `[role=menuitem]`, which `button, a, [role=button]` does not match, so a hand-found selector
+    /// would still have reported "no selector". Divergence between the two lists is divergence between
+    /// the two surfaces, which is the thing this file exists to prevent.
+    static let textFallbackRoles =
+        "button, a, [role=button], [role=menuitem], [role=menuitemradio], [role=option]"
+
+    /// Find a handle by visible text, case-insensitively, as the last resort.
+    private func resolveByText(_ key: String) async throws -> Int? {
+        guard let needle = texts[key]?.lowercased(), !needle.isEmpty else { return nil }
+        for handle in try await page.querySelectorAll(Self.textFallbackRoles) {
+            if let text = try await page.innerText(handle),
+               text.lowercased().contains(needle) {
+                return handle
+            }
+        }
+        return nil
     }
 
     /// Resolve a manifest key to a live handle, trying each candidate in order.
@@ -60,6 +89,9 @@ public struct InAppPhaseDriver {
         for css in candidates {
             if let handle = try await page.querySelector(css) { return handle }
         }
+        // Text LAST, matching the Python side's order: matching on copy is fragile in the opposite
+        // direction, so it is the fallback rather than the first choice.
+        if let handle = try await resolveByText(key) { return handle }
         throw InAppPhaseError.unresolved(platform: platform, key: key, tried: candidates)
     }
 
@@ -67,7 +99,7 @@ public struct InAppPhaseDriver {
         for css in manifest[key] ?? [] {
             if let handle = try await page.querySelector(css) { return handle }
         }
-        return nil
+        return try await resolveByText(key)
     }
 
     // MARK: - P0

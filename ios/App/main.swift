@@ -47,6 +47,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             let runner = C1Runner(
                 platform: SRManifest.platform,
                 manifest: SRManifest.selectors,
+                texts: SRManifest.texts,
                 runtimeJS: SRRuntime.source,
                 pageURL: SRManifest.pageURL,
                 manifestSource: SRManifest.manifestSource
