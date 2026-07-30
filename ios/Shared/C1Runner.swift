@@ -38,17 +38,19 @@ public final class C1Runner: NSObject {
     let platform: String
     let manifest: [String: [String]]
     let texts: [String: String]
+    let openers: [String: String]
     let runtimeJS: String
     let pageURL: String
     let manifestSource: String
 
     public init(
         platform: String, manifest: [String: [String]], texts: [String: String],
-        runtimeJS: String, pageURL: String, manifestSource: String
+        openers: [String: String], runtimeJS: String, pageURL: String, manifestSource: String
     ) {
         self.platform = platform
         self.manifest = manifest
         self.texts = texts
+        self.openers = openers
         self.runtimeJS = runtimeJS
         self.pageURL = pageURL
         self.manifestSource = manifestSource
@@ -89,7 +91,7 @@ public final class C1Runner: NSObject {
         let injected = (try? await bridge.injectRuntime()) ?? "failed"
         record("runtime injected", injected == "installed" || injected == "already", injected)
 
-        let driver = InAppPhaseDriver(platform: platform, manifest: manifest, texts: texts, page: bridge)
+        let driver = InAppPhaseDriver(platform: platform, manifest: manifest, texts: texts, openers: openers, page: bridge)
 
         // 20s is right for the mock and wrong for everything else.
         //

@@ -136,17 +136,27 @@ def test_a_skipped_phase_is_announced_rather_than_silent():
 
 def test_send_asserts_acceptance_and_not_completion():
     """Gating send on a finished response reported a false failure on every single run."""
-    body = _body_of(_code(SWIFT_PIPELINE), "public func send()")
+    # `after=` is REQUIRED here, and for the reason `_body_of`'s own docstring gives: send's signature now
+    # carries a closure default argument (`{ try? await Task.sleep(...) }`), so "the first `{` after the
+    # name" lands inside the parameter list and the extracted "body" is a default value. Same trap the
+    # `run(` tests hit; I walked into it again by adding a parameter.
+    body = _body_of(_code(SWIFT_PIPELINE), "public func send(", after="async throws {")
     assert "response_container" in body, "send's predicate must check the container exists"
-    assert "complete" not in body, (
-        "send must NOT wait for completion — the response arrives hundreds of ms later, and a false "
-        "failure escalates an agent onto a healthy page"
+    # ⚠ The property is unchanged and still worth pinning: send waits for the response to START, never to
+    # FINISH. It now POLLS within a bounded window, because checking once tolerated no render tick and
+    # reported outcomeUnconfirmed on a send real ChatGPT had accepted — a false failure on a healthy page.
+    # So the assertion is about the WAIT's bound, not about the absence of a loop.
+    assert "acceptanceWindow" in body, "the acceptance wait must be explicitly bounded"
+    assert "awaitResponse" not in body, (
+        "send must not wait for completion — that is awaitResponse's separate, much longer job, because a "
+        "deep-research answer can take 45 minutes"
     )
 
 
 def test_sources_are_harvested_by_text_not_by_href():
     """The P1 incident: every click landed, extraction returned 0 for an entire run."""
-    body = _body_of(_code(SWIFT_PIPELINE), "public func harvestSources()")
+    # The public entry now retries; the extraction itself moved to `harvestOnce`.
+    body = _body_of(_code(SWIFT_PIPELINE), "private func harvestOnce()")
     assert "innerText" in body
     assert "href" not in body, "a link-only harvest finds zero on a panel that renders non-anchors"
 

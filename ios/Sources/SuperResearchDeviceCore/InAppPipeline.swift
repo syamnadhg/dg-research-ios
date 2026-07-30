@@ -47,16 +47,46 @@ public struct InAppPhaseDriver {
     /// `deep_research_toggle` carries no css on purpose, because css is tried first and a broad
     /// `[role=menuitem]` matches "Camera", the first of nineteen menu items.
     public let texts: [String: String]
+    /// Controls that must be TAPPED before the keyed entry can resolve.
+    ///
+    /// Two real-platform failures turned out to be one missing capability: ChatGPT's deep-research item and
+    /// its Web-search tool both sit inside the composer's plus menu, so neither entry can resolve while the
+    /// menu is shut. The phase should not have to know that, which is why the opener is a property of the
+    /// TARGET rather than a step in the pipeline.
+    public let openers: [String: String]
     private let page: WebPage
 
     public init(
         platform: String, manifest: [String: [String]], texts: [String: String] = [:],
-        page: WebPage
+        openers: [String: String] = [:], page: WebPage
     ) {
         self.platform = platform
         self.manifest = manifest
         self.texts = texts
+        self.openers = openers
         self.page = page
+    }
+
+    /// Tap this key's opener, then wait for the target to appear.
+    ///
+    /// ⚠ The wait is not optional and its length is measured, not guessed. ChatGPT's plus menu renders in
+    /// TWO passes: the attachment rows arrive immediately and the tools/plugins section a moment later. A
+    /// fixed short sample sees 3 items where 19 exist, and "Deep research" is the 7th — so a probe that
+    /// looked once concluded the control did not exist. It does; it had not painted.
+    private func openThenFind(_ key: String) async throws -> Int? {
+        guard let openerCSS = openers[key],
+              let opener = try await page.querySelector(openerCSS) else { return nil }
+        try await page.click(opener)
+        var waited = 0
+        while waited < 12 {
+            for css in manifest[key] ?? [] {
+                if let handle = try await page.querySelector(css) { return handle }
+            }
+            if let handle = try await resolveByText(key) { return handle }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            waited += 1
+        }
+        return nil
     }
 
     /// Roles searched when falling back to text — the SAME list the Python `resolve()` uses.
@@ -92,6 +122,8 @@ public struct InAppPhaseDriver {
         // Text LAST, matching the Python side's order: matching on copy is fragile in the opposite
         // direction, so it is the fallback rather than the first choice.
         if let handle = try await resolveByText(key) { return handle }
+        // Last: the target may be behind an opener that has not been tapped yet.
+        if let handle = try await openThenFind(key) { return handle }
         throw InAppPhaseError.unresolved(platform: platform, key: key, tried: candidates)
     }
 
@@ -99,7 +131,8 @@ public struct InAppPhaseDriver {
         for css in manifest[key] ?? [] {
             if let handle = try await page.querySelector(css) { return handle }
         }
-        return try await resolveByText(key)
+        if let handle = try await resolveByText(key) { return handle }
+        return try await openThenFind(key)
     }
 
     // MARK: - P0

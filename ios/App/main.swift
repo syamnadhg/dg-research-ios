@@ -48,6 +48,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                 platform: SRManifest.platform,
                 manifest: SRManifest.selectors,
                 texts: SRManifest.texts,
+                openers: SRManifest.openers,
                 runtimeJS: SRRuntime.source,
                 pageURL: SRManifest.pageURL,
                 manifestSource: SRManifest.manifestSource

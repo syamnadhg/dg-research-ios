@@ -107,6 +107,14 @@ class SelectorEntry:
     text_contains: str | None = None
     #: A request URL fragment observed when this target is genuinely engaged. The durable signal.
     network_hint: str | None = None
+    #: A control that must be TAPPED before this entry can resolve at all.
+    #:
+    #: Added because two separate real-platform failures turned out to be one missing capability. ChatGPT's
+    #: deep-research item and its Web-search tool both live inside the composer's plus menu, so the entry
+    #: cannot resolve while the menu is closed — the run reported `tapped=false` and `sources: 0`, neither
+    #: of which was about the selector. An opener is a property of the TARGET, not of the phase, which is
+    #: why it belongs here: the phase should not need to know that one platform buries a control in a menu.
+    opener: str | None = None
     #: Where this came from — hand-derived, or proposed by the offline repair agent (phase A2).
     provenance: str = "unset"
 
@@ -130,6 +138,7 @@ class SelectorEntry:
                 css=tuple(css or ()),
                 text_contains=raw.get("text_contains"),
                 network_hint=raw.get("network_hint"),
+                opener=raw.get("opener"),
                 provenance=raw.get("provenance", "manifest"),
             )
         raise ValueError(f"cannot read a selector entry from {type(raw).__name__}")

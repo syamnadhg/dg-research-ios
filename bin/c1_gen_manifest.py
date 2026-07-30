@@ -39,8 +39,8 @@ ORIGINS = {
 
 def selectors_for(
     platform: str, manifest_path: Path | None
-) -> tuple[dict[str, list[str]], dict[str, str], str, str]:
-    """Returns (selectors, texts, url, provenance).
+) -> tuple[dict[str, list[str]], dict[str, str], dict[str, str], str, str]:
+    """Returns (selectors, texts, openers, url, provenance).
 
     ⚠ ``texts`` exists because dropping it was a real defect, not a hypothetical one. This used to emit
     only ``{key: entry.css}`` filtered by ``if entry.css`` — so an entry that is deliberately TEXT-ONLY
@@ -63,6 +63,11 @@ def selectors_for(
                 key: entry["text_contains"]
                 for key, entry in raw.items()
                 if entry.get("text_contains")
+            },
+            {
+                key: entry["opener"]
+                for key, entry in raw.items()
+                if entry.get("opener")
             },
             MOCK_URL,
             "fixtures/mockplatform/selectors_mock.json",
@@ -94,6 +99,11 @@ def selectors_for(
             for key, entry in entries.items()
             if entry.text_contains
         },
+        {
+            key: entry.opener
+            for key, entry in entries.items()
+            if entry.opener
+        },
         ORIGINS[platform],
         # "baseline (...)" or the manifest path — load_manifest records where it came from.
         manifest.source,
@@ -104,6 +114,7 @@ def render(
     platform: str,
     selectors: dict[str, list[str]],
     texts: dict[str, str],
+    openers: dict[str, str],
     url: str,
     provenance: str,
 ) -> str:
@@ -145,6 +156,13 @@ def render(
         lines.append("    ]")
     else:
         lines.append("    static let texts: [String: String] = [:]")
+    if openers:
+        lines.append("    static let openers: [String: String] = [")
+        for key, value in sorted(openers.items()):
+            lines.append(f"        {literal(key)}: {literal(value)},")
+        lines.append("    ]")
+    else:
+        lines.append("    static let openers: [String: String] = [:]")
     lines += ["}", ""]
     return "\n".join(lines)
 
@@ -162,10 +180,10 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    selectors, texts, url, provenance = selectors_for(args.platform, args.manifest)
+    selectors, texts, openers, url, provenance = selectors_for(args.platform, args.manifest)
     if args.url:
         url = args.url
         provenance = f"{provenance} (url overridden — WIRING PROOF, not real coverage)"
-    args.out.write_text(render(args.platform, selectors, texts, url, provenance))
+    args.out.write_text(render(args.platform, selectors, texts, openers, url, provenance))
     print(f"    {args.platform}: {len(selectors)} selector keys -> {args.out.name}")
     print(f"    provenance: {provenance}")

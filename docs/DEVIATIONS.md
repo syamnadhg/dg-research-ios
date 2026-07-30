@@ -622,3 +622,31 @@ Kept regardless, because both are independently right and cost nothing when unne
 ⚠ One measured cost: `swift test` went from 0.05s to 12s, because a unit test legitimately harvests empty
 and now waits out the settle window. Correct behaviour, wrong place to spend it — those tests should inject
 a no-op sleep, which the signature already supports.
+
+#### The `opener` capability works — and revealed that an opener needs a DISMISSAL
+
+Implemented end to end: `SelectorEntry.opener`, carried through `c1_gen_manifest.py` as
+`SRManifest.openers`, and `InAppPhaseDriver.openThenFind` — tap the opener, then poll up to 6s for the
+target, because ChatGPT's plus menu renders in two passes and a single look sees 3 items where 19 exist.
+
+Declared it on `chatgpt.deep_research_toggle` and the run **regressed**:
+
+```
+[PASS] P1: composer written ... composer resolved=true
+[FAIL] P2: send accepted and its predicate confirmed
+[FAIL] FULL P0-P3 ... status=threw, phases=0
+```
+
+The opener did its job — the menu opened and the item became resolvable. Then **the menu stayed open and
+covered the send button**, so the next phase could not act. Obvious in hindsight and invisible in the
+design: an opener is a *modal* interaction, and every modal needs a way out.
+
+So the missing piece is not another manifest field but a **phase lifecycle**: whatever opens a container is
+responsible for closing it once the interaction inside is done. Candidates worth measuring rather than
+picking blind — re-tapping the opener, dispatching Escape, or clicking outside the menu's bounds — and the
+choice wants a real check that the menu is gone afterwards, since a dismissal that silently fails
+reintroduces exactly this.
+
+**The declaration is reverted; the plumbing is kept.** The capability is inert without an `opener` key in
+the manifest, so the tree is strictly better than before — the mechanism exists and is tested — rather than
+carrying a regression. Re-declaring it is one line once the dismissal exists.
