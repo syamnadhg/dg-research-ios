@@ -681,3 +681,30 @@ measured rather than guessed.
 **The opener declaration is reverted again; the dismissal code stays.** Both mechanisms are correct and
 tested; what is missing is the post-DR composer value. Verified after the revert: real ChatGPT is back to
 P0 / P1 composer / P2 send / P2 response / full-run / ordering / boundary all passing.
+
+#### Correction: the composer is NOT swapped after deep research — it is re-mounted, and we measured too early
+
+The previous entry concluded that enabling deep research swaps the contenteditable for a `<textarea>`. **That
+was wrong**, and measuring it directly is what showed so. Waiting 8s after the DR activation and dumping every
+text input:
+
+```
+<div> vis=true  contenteditable='true'  class='ProseMirror'  id='prompt-textarea'
+      role='textbox'  aria-label='Chat with ChatGPT'  aria-hidden='true'
+```
+
+`#prompt-textarea` is still there, still the same ProseMirror contenteditable. The C1 run saw
+`promptTextarea: 0` because the DR activation **navigates**, and the composer had not re-mounted at the moment
+it looked. Same root cause as the splash-shell failure, one state later: *the readiness wait ran once, before
+the toggle, and nothing re-established readiness after the navigation it caused.*
+
+So `composer` does **not** need a state-qualified chain. What it needs is for readiness to be re-checked after
+any step that navigates — which is a property of the *pipeline*, not of the manifest, and a smaller change
+than the one the previous entry proposed. Recording the correction rather than quietly editing it, because the
+wrong conclusion is instructive: three of this session's failures presented as "the selector is wrong" and
+every one was a timing or a state question.
+
+⚠ One detail worth carrying forward rather than dismissing: the element carries `aria-hidden='true'`. It
+resolved and the fill worked in the pre-DR state, so this is probably ChatGPT's own overlay bookkeeping rather
+than a real interactability barrier — but "probably" is doing work in that sentence, and it should be checked
+by driving it in the post-DR state rather than assumed.
