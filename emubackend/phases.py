@@ -62,9 +62,14 @@ _TOGGLE_STATE_JS = """((name) => {
     }
     const placeholderResearch = placeholder.includes('research')
         || placeholder.includes('what do you want to');
-    // "ask gemini" / "write a message" / "ask chatgpt" — the platform asserting ordinary chat mode.
+    // The platform asserting ordinary chat mode. `chat with` is here because ChatGPT's real composer
+    // placeholder is "Chat with ChatGPT" — measured while driving its toggle, where the guessed
+    // "ask chatgpt" matched nothing and ChatGPT could therefore never report confirmed_off. That is the
+    // safe direction (escalation stays refused) but it also blocks legitimate recovery forever, so a
+    // guard that can never say "off" is only half a guard.
     const placeholderChat = placeholder.includes('ask gemini') || placeholder.includes('ask chatgpt')
-        || placeholder.includes('write a message') || placeholder.includes('message ');
+        || placeholder.includes('chat with') || placeholder.includes('write a message')
+        || placeholder.includes('message ');
 
     // Scoped to the form: an unscoped text search matches tooltips and help copy, which the backend
     // notes false-positived this check once already.

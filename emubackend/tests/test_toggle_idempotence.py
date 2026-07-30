@@ -342,3 +342,52 @@ def test_the_control_name_differs_per_platform():
         assert captured["script"].rstrip().endswith(expected + ")"), (
             f"{platform} must probe for {expected}, got …{captured['script'][-40:]!r}"
         )
+
+
+def test_chatgpts_real_placeholder_is_recognised_as_chat_mode():
+    """"Chat with ChatGPT" — the actual string, measured while driving the toggle.
+
+    The first version of the chat-placeholder list guessed "ask chatgpt", which matches nothing on
+    ChatGPT. The effect was one-sided and easy to miss: the on-signal still worked, so runs looked fine,
+    but `confirmed_off` could never fire for that platform and escalation was therefore refused forever.
+    A guard that can never say "off" is half a guard.
+
+    Asserted against the CALL, not the bare phrase: the first version checked `"chat with" in js` and
+    passed even with the check deleted, because the comment explaining the fix contains `chat with` too.
+    bin/mutate.py caught that — the same grep-cannot-tell-code-from-commentary trap `_code_only` exists
+    for elsewhere in this repo.
+    """
+    js = phases._TOGGLE_STATE_JS
+    assert "includes('chat with')" in js
+    for other in ("ask gemini", "write a message"):
+        assert f"includes('{other}')" in js, f"{other} must still be recognised"
+
+
+def test_the_measured_chatgpt_on_state_reads_as_ON_though_pressed_is_false():
+    """Verbatim from driving the real control: the pill appears, `pressed` never becomes true.
+
+    BEFORE {pillVisible: false, pressed: false, placeholder: "chat with chatgpt"}
+    AFTER  {pillVisible: true,  pressed: false, placeholder: "chat with chatgpt"}
+
+    An aria-pressed reader sees no change across an activation that plainly happened. This is the whole
+    reason the predicate was ported, pinned to the numbers the real page produced.
+    """
+    driver, _ = _driver_with(
+        {"pillVisible": False, "pressed": False, "placeholderResearch": False,
+         "placeholderChat": True, "placeholder": "chat with chatgpt"},
+        platform="chatgpt",
+    )
+    assert asyncio.run(driver._toggle_on_predicate("deep_research_toggle")()) is False
+    assert asyncio.run(driver._toggle_off_predicate("deep_research_toggle")()) is True
+
+    driver, _ = _driver_with(
+        {"pillVisible": True, "pressed": False, "placeholderResearch": False,
+         "placeholderChat": True, "placeholder": "chat with chatgpt"},
+        platform="chatgpt",
+    )
+    assert asyncio.run(driver._toggle_on_predicate("deep_research_toggle")()) is True, (
+        "the pill appearing IS ChatGPT's on-signal"
+    )
+    assert asyncio.run(driver._toggle_off_predicate("deep_research_toggle")()) is False, (
+        "and the two predicates must never both fire"
+    )

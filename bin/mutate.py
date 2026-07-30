@@ -32,6 +32,13 @@ MUTATIONS = [
     # --- the deep-research predicate ported from the backend ---------------------------------
     (
         "emubackend/phases.py",
+        "        || placeholder.includes('chat with') || placeholder.includes('write a message')",
+        "        || placeholder.includes('write a message')",
+        "test_toggle_idempotence.py::test_chatgpts_real_placeholder_is_recognised_as_chat_mode",
+        "ChatGPT never able to report confirmed_off, so escalation is refused forever",
+    ),
+    (
+        "emubackend/phases.py",
         '            "button, a, [role=button], [role=menuitem], [role=menuitemradio], [role=option]"',
         '            "button, a, [role=button]"',
         "test_selectors_and_phases.py::test_the_text_fallback_reaches_menu_items_not_just_buttons",
