@@ -810,3 +810,35 @@ Three coverage-gate tests then failed, and all three were snapshots of a world t
 
 Remaining, and neither is a mystery: claude / gemini / notebooklm selectors (8 keys, the method is proven),
 and the contract writes, which need the Firestore emulator alongside a real run.
+
+## ✅ CONTRACT WRITES MATCH THE GOLDEN FIXTURE — from a real-platform run, twice
+
+```
+[PASS] contract: signed in as the synthetic device
+[PASS] contract: the full P0-P3 write sequence was ACCEPTED by the real rules
+[PASS] 11 writes match the golden fixture exactly
+[PASS] 9 pipeline_events landed in the emulator, phases [0, 1, 2, 3]
+C1 contract: PASS          (and PASS again on a second consecutive run)
+```
+
+Reached by routing real platforms through the **app** inside `bin/c1_in_app.sh`, which is what the third
+cookie jar demanded: the standalone harness bundle has its own `WKWebsiteDataStore` and is signed out of every
+platform, while the owner's sessions live in the SuperResearch container. The harness is kept for the mock so
+its passing run keeps regression-testing the shared `C1Runner` extraction.
+
+`bin/c1_contract_gate.sh` now takes a platform and a manifest and forwards both. The write **sequence** is
+platform-independent — same pipeline, same emitter — so the golden fixture applies unchanged, and that is
+precisely what makes the check meaningful: it proves the contract holds for a run that actually drove a real
+platform against the real `firestore.rules`, rather than for a fixture that needs no session.
+
+So the goal's step 4 is now satisfiable with its own documented commands:
+
+```bash
+bash bin/c1_in_app.sh <UDID> chatgpt selectors_mobile.json        # PASS
+bash bin/c1_contract_gate.sh <UDID> chatgpt selectors_mobile.json # PASS
+```
+
+**Remaining, honestly:** the Simulator/Safari half is a credential gate (Safari is signed out and iOS gives an
+app no way to share its jar), 8 selectors for claude/gemini/notebooklm, and the rest of the agent's failure
+catalogue — human-verification prompts, quota modals, mid-wait logout — of which two entries are built and
+wired.

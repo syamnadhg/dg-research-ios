@@ -121,14 +121,38 @@ PLIST
 
 codesign --force --sign - "$APP" >/dev/null 2>&1 || codesign --force --sign - "$APP"
 
-echo "==> installing and running in the Simulator"
-xcrun simctl bootstatus "$UDID" -b >/dev/null 2>&1 || true
-xcrun simctl uninstall "$UDID" "$BUNDLE_ID" >/dev/null 2>&1 || true
-xcrun simctl install "$UDID" "$APP"
+# ⚠ REAL PLATFORMS RUN IN THE APP, NOT IN THIS HARNESS — and it is a cookie jar, not a preference.
+#
+# This separate bundle (com.distributedglobal.src1) has its own WKWebsiteDataStore, so it is SIGNED OUT of
+# every platform while the owner's hand-made sessions live in the SuperResearch container. Measured: 168K of
+# HTTPStorages there, none here. Against the mock that is invisible, because a mock needs no session — which
+# is exactly why the gap survived until a real platform was pointed at it.
+#
+# The app has an SR_C1 mode for this, mirroring SR_SCREENSHOT_STATE, and running there also makes the gate
+# exercise the PRODUCTION path: in production the run happens in the app, against its web views, with its
+# session. The harness stays for the mock so its currently-passing run keeps regression-testing the shared
+# C1Runner extraction.
+APP_BUNDLE="com.distributedglobal.superresearch"
+if [ "$PLATFORM" != "mockplatform" ]; then
+  echo "==> real platform: running in the APP (shared cookie jar), not the standalone harness"
+  SR_C1_PLATFORM="$PLATFORM" SR_C1_MANIFEST="$MANIFEST_ARG" SR_C1_URL="$URL_ARG" \
+    bash "$REPO/bin/build_app.sh" "$UDID" >/dev/null
+  xcrun simctl terminate "$UDID" "$APP_BUNDLE" >/dev/null 2>&1 || true
+  set +e
+  SIMCTL_CHILD_SR_C1="$PLATFORM" \
+    xcrun simctl launch --console-pty "$UDID" "$APP_BUNDLE" 2>&1 | tee "$BUILD/run.log"
+  set -e
+  BUNDLE_ID="$APP_BUNDLE"
+else
+  echo "==> installing and running in the Simulator"
+  xcrun simctl bootstatus "$UDID" -b >/dev/null 2>&1 || true
+  xcrun simctl uninstall "$UDID" "$BUNDLE_ID" >/dev/null 2>&1 || true
+  xcrun simctl install "$UDID" "$APP"
 
-set +e
-xcrun simctl launch --console-pty "$UDID" "$BUNDLE_ID" 2>&1 | tee "$BUILD/run.log"
-set -e
+  set +e
+  xcrun simctl launch --console-pty "$UDID" "$BUNDLE_ID" 2>&1 | tee "$BUILD/run.log"
+  set -e
+fi
 
 # The app writes its verdict into its own container, so it is copied out to the repo's artifacts.
 CONTAINER="$(xcrun simctl get_app_container "$UDID" "$BUNDLE_ID" data 2>/dev/null || true)"

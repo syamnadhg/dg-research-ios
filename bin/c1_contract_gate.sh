@@ -15,6 +15,12 @@
 # Usage: bin/c1_contract_gate.sh <UDID>
 set -euo pipefail
 
+# Contract writes from a REAL platform run: pass a platform and its manifest through to c1_in_app.sh,
+# which routes real platforms into the app (the only bundle with the owner's session). The write SEQUENCE is
+# platform-independent — same pipeline, same emitter — so the golden fixture applies unchanged, and that is
+# the point: it proves the contract holds for a run that actually drove a real platform.
+PLATFORM="${2:-mockplatform}"
+MANIFEST="${3:-}"
 UDID="${1:?usage: c1_contract_gate.sh <UDID>}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="$REPO/artifacts/c1contract"
@@ -67,7 +73,8 @@ SIMCTL_CHILD_SR_CUSTOM_TOKEN="$CUSTOM_TOKEN" \
 SIMCTL_CHILD_SR_UID="$UID_VALUE" \
 SIMCTL_CHILD_SR_RESEARCH_ID="$RESEARCH_ID" \
 SIMCTL_CHILD_SR_DEVICE_ID="$DEVICE_ID" \
-  bash "$REPO/bin/c1_in_app.sh" "$UDID" 2>&1 | tee "$OUT/run.log" || true
+  bash "$REPO/bin/c1_in_app.sh" "$UDID" "${PLATFORM:-mockplatform}" "${MANIFEST:-}" 2>&1 \
+    | tee "$OUT/run.log" || true
 
 echo "==> diffing the emitted sequence against the golden fixture"
 "$PY" "$REPO/bin/c1_contract_verify.py" "$OUT/run.log" "$UID_VALUE" "$RESEARCH_ID" \
