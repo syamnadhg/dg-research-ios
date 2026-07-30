@@ -367,3 +367,25 @@ Concretely, next session:
 ⚠ Do **not** pass `--url` for a real run. That flag exists to prove wiring against the mock, and
 `coverage_gate.py` is built to notice it — it caught this author trying to count a wiring proof as
 coverage, which is the whole reason the provenance field exists.
+
+#### The one wrinkle in that plan, found by looking rather than assuming
+
+`ios/C1Harness/main.swift` is **255 lines of top-level code ending in `UIApplicationMain(...)`**, and
+`bin/c1_in_app.sh` compiles it *without* `ios/App/*.swift`. Two `main.swift` files cannot coexist in one
+binary, so the real app cannot simply gain the harness by adding it to the source list.
+
+The refactor is therefore:
+
+1. Extract everything above `UIApplicationMain` out of `ios/C1Harness/main.swift` into a callable type —
+   `C1Runner.run(platform:manifest:) async -> Verdict` — living in `ios/Sources/SuperResearchDeviceCore/`
+   so both binaries can see it. `Check`/`Verdict` move with it.
+2. `ios/C1Harness/main.swift` shrinks to an entry point that calls it, so the standalone harness keeps
+   working and its currently-passing mock run stays a regression test for the extraction.
+3. `bin/build_app.sh` also compiles the generated `SRRuntime.swift` + `SRManifest.swift`, and
+   `ios/App/main.swift` gains an `SR_C1` branch that calls `C1Runner`.
+4. `bin/c1_in_app.sh` stops building `SRC1.app` for real platforms and instead uses `bin/build_app.sh`
+   plus `SIMCTL_CHILD_SR_C1=$PLATFORM xcrun simctl launch`.
+
+Order matters: do (1) and (2) first and re-run the **mock** C1 to prove the extraction changed nothing.
+Only then wire (3) and (4). Doing it the other way round means a failure could be either the extraction or
+the wiring, with no way to tell which.
