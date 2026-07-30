@@ -221,20 +221,19 @@ public struct InAppPhaseDriver {
     /// Returns whether a tap was needed, so a caller can tell "enabled it" from "already was".
     @discardableResult
     public func enableDeepResearch() async throws -> Bool {
-        guard let toggle = try await optional("deep_research_toggle") else { return false }
-        // Checked with the same predicate that judges the action, so "already on" cannot drift from
-        // "is it on now".
-        if try await togglePressed(toggle) {
-            // Dismissed on THIS path too. The early return is exactly where it is easiest to forget, and
-            // forgetting leaves the menu over the composer for every subsequent phase.
+        if try await deepResearchOn("deep_research_toggle") {
             try await dismissOpener("deep_research_toggle")
             return false
         }
+        // Resolved only AFTER the already-on check, and the order is deliberate: `optional` may TAP an
+        // opener to find the item, and opening a menu to ask a question the page had already answered is
+        // both wasteful and a state change nobody asked for.
+        guard let toggle = try await optional("deep_research_toggle") else { return false }
         try await page.click(toggle)
-        let confirmed = try await togglePressed(toggle)
         try await dismissOpener("deep_research_toggle")
-        // The tap may have navigated, so readiness has to be re-established before the next phase types.
         try await awaitComposerReady()
+        // Judged by the PAGE, not by a handle that the activation may have destroyed.
+        let confirmed = try await deepResearchOn("deep_research_toggle")
         guard confirmed else {
             throw InAppPhaseError.outcomeUnconfirmed(intent: "\(platform).deep_research_toggle")
         }
@@ -248,13 +247,59 @@ public struct InAppPhaseDriver {
     /// could never pass on a real platform however correct the pipeline was. A gate that hardcodes the
     /// fixture is measuring the fixture.
     public func deepResearchIsOn() async throws -> Bool {
-        guard let toggle = try await optional("deep_research_toggle") else { return false }
-        return try await togglePressed(toggle)
+        try await deepResearchOn("deep_research_toggle")
     }
 
-    private func togglePressed(_ handle: Int) async throws -> Bool {
-        if let pressed = try await page.attribute(handle, "aria-pressed") { return pressed == "true" }
-        return try await page.attribute(handle, "aria-checked") == "true"
+    /// The deep-research state, read the way the PYTHON side reads it.
+    ///
+    /// ⚠ This used to be `togglePressed`, reading only the handle's `aria-pressed`/`aria-checked`. That is the
+    /// narrow predicate the backend's own comment warns about — from `research.py::_GEMINI_DR_STATE_JS`:
+    /// *"the DR pill's class carries NO reliable pressed marker, so a pressed-class-only check
+    /// false-negatived an ACTIVE pill last E2E and the CUA fallback then toggled the working DR OFF."*
+    ///
+    /// It bit here in a second way the Python side never sees: on ChatGPT the control lives inside a menu that
+    /// CLOSES on activation and the page then navigates, so a post-tap read of the handle lands on a stale
+    /// item and returns false — `enableDeepResearch` threw `outcomeUnconfirmed` on an activation that had
+    /// plainly worked (`tapped=true, still on=false`).
+    ///
+    /// Three signals, each the only one available somewhere. Measured on real ChatGPT: the pill appears while
+    /// `pressed` stays FALSE throughout, so a pressed-only read sees no change across an activation.
+    private func deepResearchOn(_ key: String) async throws -> Bool {
+        let name = platform == "claude" ? "research" : "deep research"
+        let js = """
+        (function (name) {
+          var norm = function (s) { return (s || '').replace(/\\s+/g, ' ').trim().toLowerCase(); };
+          var target = norm(name);
+          var ce = document.querySelector('rich-textarea div[contenteditable="true"]')
+                || document.querySelector('#prompt-textarea')
+                || document.querySelector('[data-testid="chat-input"]');
+          var placeholder = ce ? norm(ce.getAttribute('data-placeholder')
+                || ce.getAttribute('placeholder') || ce.getAttribute('aria-label')) : '';
+          var research = placeholder.indexOf('research') >= 0
+                || placeholder.indexOf('what do you want to') >= 0;
+          var scope = (ce && ce.closest('form')) || document.querySelector('form') || document.body;
+          var pill = null;
+          var nodes = scope.querySelectorAll('button, [role="button"], span, div');
+          for (var i = 0; i < nodes.length; i++) {
+            var p = nodes[i];
+            if (!p.offsetParent) continue;
+            // An INDICATOR has no toggle state; a CONTROL does. Without this the toggle becomes its own
+            // on-signal and `enable_deep_research` never taps.
+            if (p.hasAttribute('aria-pressed') || p.hasAttribute('aria-checked')
+                || p.hasAttribute('aria-selected')) continue;
+            if (norm(p.textContent) === target) { pill = p; break; }
+          }
+          return !!pill || research;
+        })(%@)
+        """.replacingOccurrences(of: "%@", with: "'\(name)'")
+        if let on = try await page.evaluateJSON(js) as? Bool, on { return true }
+        // The control's own state, last: a well-behaved toggle reports it, and a page whose only signal is
+        // that attribute would otherwise have no signal at all.
+        if let handle = try await optional(key) {
+            if let pressed = try await page.attribute(handle, "aria-pressed") { return pressed == "true" }
+            if let checked = try await page.attribute(handle, "aria-checked") { return checked == "true" }
+        }
+        return false
     }
 
     /// Tap send and confirm it was **accepted**.

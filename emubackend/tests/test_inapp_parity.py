@@ -91,7 +91,11 @@ def test_the_swift_toggle_step_checks_before_it_taps():
     # Asserted as ORDER rather than as one exact line. The early-return block gained an opener dismissal,
     # which broke a substring match while leaving the property untouched — the kind of test that fails for
     # a reason unrelated to what it protects. What matters is that the CHECK precedes the TAP.
-    check = body.index("togglePressed(toggle)")
+    # `togglePressed` became `deepResearchOn` when the rich Python predicate was ported: the old one read
+    # only the handle's aria state, which after activation lands on an item the closing menu destroyed. The
+    # property under test is unchanged — CHECK before TAP — so the test follows the rename rather than
+    # pinning a name.
+    check = body.index('deepResearchOn("deep_research_toggle")')
     tap = body.index("page.click(toggle)")
     assert check < tap, (
         "enableDeepResearch must test the toggle BEFORE tapping it. Deep-research state persists across "

@@ -735,3 +735,40 @@ is the narrow predicate the backend warned about, in the other language.
 That is the single highest-value item remaining, and it is a port rather than a discovery. The opener
 declaration is reverted so the tree stays at its known-good state; re-declaring is one line once the Swift
 predicate matches the Python one.
+
+#### The deep-research toggle PASSES on real ChatGPT — idempotence and all
+
+Porting the Python predicate to Swift was the last piece. `togglePressed` (handle aria-state only) became
+`deepResearchOn`, reading the same three signals in the same order: the composer placeholder, a form-scoped
+pill whose text is the control's name and which carries **no** toggle-state attribute, then the control's own
+state last. Plus the ordering fix that only matters in-app: **ask the page before resolving the item**, because
+`optional` may tap an opener, and opening a menu to answer a question the page has already answered is a state
+change nobody asked for.
+
+Real ChatGPT, in the real app, with the owner's session:
+
+```
+[PASS] P1: enabling deep research TWICE leaves it enabled (idempotent):
+           first call tapped=true, second call tapped=false, still on=true
+[PASS] P1: composer written through the MODEL-updating path: path=execCommand
+[PASS] P2: send accepted and its predicate confirmed
+[PASS] P2: response arrived
+[PASS] FULL P0-P3 RUN COMPLETED INSIDE THE NATIVE APP: status=complete, phases=4
+[PASS] the phase event sequence is start/complete per phase, in order
+[PASS] BOUNDARY: not applicable — no trust-gated fixture on this platform
+[FAIL] P3: sources harvested by TEXT, not href: 0 sources
+```
+
+**Nine of ten, and the one that passed is the one this whole initiative was about:** the second call correctly
+declined to tap, so deep research is still ON afterwards. That property was previously provable only against a
+mock whose toggle is a well-behaved `aria-pressed` control — a shape no real platform here actually has.
+
+Four mechanisms were needed and each was earned by a measured failure: the **opener** (the item is in a closed
+menu), its **verified dismissal** (an open menu covers send), **readiness re-established after navigation**
+(the tap changes the URL and the composer re-mounts), and the **page-level predicate** (the activation destroys
+the handle you would otherwise ask).
+
+Remaining: `sources: 0`. Deep research is now genuinely ON, so the answer is a DR answer — 5 to 45 minutes —
+and the 240s timeout is short for that. That is a *budget* question, and it is also the point at which the gate
+stops being a gate: a check that waits 45 minutes is not one. The honest options are a separate long-running
+P3 check, or asserting sources against a web-search answer while asserting the DR *toggle* separately.
