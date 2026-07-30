@@ -67,6 +67,27 @@ public struct InAppPhaseDriver {
         self.page = page
     }
 
+    /// Wait for the composer to be usable again after a step that may have NAVIGATED.
+    ///
+    /// Readiness is not a one-time fact. The gate waits for the composer before the phases run, and then a
+    /// step navigates and invalidates it — enabling deep research changes the URL to /c/<id> and the composer
+    /// re-mounts. Measured: the run saw `promptTextarea: 0` at fill time and the very same element was
+    /// present 8s later, unchanged. So the failure was never the selector; the wait simply never happened
+    /// again after the thing that made it necessary.
+    ///
+    /// Public so a caller that knows it navigated can re-establish readiness explicitly, which is preferable
+    /// to a blanket sleep after every step.
+    @discardableResult
+    public func awaitComposerReady(timeout: TimeInterval = 20) async throws -> Bool {
+        var waited: TimeInterval = 0
+        while waited < timeout {
+            if try await optional("composer") != nil { return true }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            waited += 0.5
+        }
+        return false
+    }
+
     /// Close whatever an opener opened, and VERIFY it closed.
     ///
     /// An opener is a modal interaction, so it needs a way out. Skipping this is not a tidiness issue: the
@@ -212,6 +233,8 @@ public struct InAppPhaseDriver {
         try await page.click(toggle)
         let confirmed = try await togglePressed(toggle)
         try await dismissOpener("deep_research_toggle")
+        // The tap may have navigated, so readiness has to be re-established before the next phase types.
+        try await awaitComposerReady()
         guard confirmed else {
             throw InAppPhaseError.outcomeUnconfirmed(intent: "\(platform).deep_research_toggle")
         }

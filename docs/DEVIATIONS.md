@@ -708,3 +708,30 @@ every one was a timing or a state question.
 resolved and the fill worked in the pre-DR state, so this is probably ChatGPT's own overlay bookkeeping rather
 than a real interactability barrier — but "probably" is doing work in that sentence, and it should be checked
 by driving it in the post-DR state rather than assumed.
+
+#### The readiness re-check works. The last blocker is the SWIFT toggle predicate, unported.
+
+`awaitComposerReady` after the toggle tap fixed the re-mount problem outright — with the opener enabled the
+run reported `promptTextarea: 1, editables: 1` at fill time, and **P1 composer, P2 send and P2 response all
+passed**. Three mechanisms now exist and each is verified: the opener, its Escape dismissal (verified closed),
+and readiness re-established after a navigating step.
+
+What is left is one thing, and it is not a mystery:
+
+```
+[FAIL] P1: enabling deep research TWICE ... first call tapped=false, second call tapped=true, still on=false
+[FAIL] FULL P0-P3 ... status=threw
+```
+
+`InAppPhaseDriver.togglePressed` reads **only** the handle's `aria-pressed`/`aria-checked`. After activation
+the menu has closed and the page has navigated, so that read lands on a stale item and returns false —
+`enableDeepResearch` then throws `outcomeUnconfirmed` on an activation that succeeded.
+
+**The Python side was already fixed for exactly this**, and the fix is documented above: read the composer
+placeholder, a form-scoped pill whose text is the control's name, and the control's own state — with an
+explicit note that ChatGPT's pill appears while `pressed` stays false. Swift never received that port, so it
+is the narrow predicate the backend warned about, in the other language.
+
+That is the single highest-value item remaining, and it is a port rather than a discovery. The opener
+declaration is reverted so the tree stays at its known-good state; re-declaring is one line once the Swift
+predicate matches the Python one.
