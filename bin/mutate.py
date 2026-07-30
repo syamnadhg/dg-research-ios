@@ -32,6 +32,13 @@ MUTATIONS = [
     # --- the agent's first real failure catalogue ----------------------------------------------
     (
         "emubackend/phases.py",
+        '        if health["state"] == "error":',
+        '        if health["state"] == "never":',
+        "test_response_health.py::test_harvest_refuses_to_extract_from_a_platform_error",
+        "harvesting a platform error banner as research — a run reporting success with a plausible body",
+    ),
+    (
+        "emubackend/phases.py",
         "    for fragment in PLATFORM_ERROR_FRAGMENTS:\n        if fragment in low:",
         "    for fragment in []:\n        if fragment in low:",
         "test_response_health.py::test_the_real_error_banner_is_an_error_not_content",

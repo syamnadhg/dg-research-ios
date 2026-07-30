@@ -115,6 +115,16 @@ __all__ = [
     "resolve",
 ]
 
+class PlatformStateError(RuntimeError):
+    """The PAGE is in a failed state — distinct from our selectors being wrong.
+
+    Kept separate from ``ManifestError`` because the two demand opposite responses. A manifest error means
+    the selector rotted and the agent should try to repair it. This means the selector is fine and the
+    platform failed, so repairing anything would be chasing a healthy target — the recipe's "escalate onto
+    a healthy page" failure, arrived at by mis-attributing the fault.
+    """
+
+
 #: Platform-side error banners, verbatim from what the platform rendered.
 #:
 #: Fragments rather than whole strings, and matched case-insensitively, because the surrounding copy
@@ -515,6 +525,30 @@ class PlatformDriver:
         return None
 
     async def harvest_sources(self) -> harvest.HarvestVerdict:
+        # Check the response's HEALTH before extracting anything from it.
+        #
+        # Wired here rather than left as a library function, because the failure it prevents happens at
+        # exactly this call. Measured on live ChatGPT: the deep-research sub-app failed with "Error
+        # loading app / Failed to fetch template / Retry", and the assistant turn containing that banner
+        # resolves perfectly. Extracting from it harvests the error text AS RESEARCH — a run that reports
+        # success with a plausible-looking body, which is worse than a crash because nothing surfaces it.
+        #
+        # Raised, not returned as an empty harvest. An empty harvest is a *read drift* signal and would
+        # send the agent to repair selectors that are working correctly; the page is the problem, and the
+        # verdict has to say so. `recovery_offered` travels with it because the platform gave a Retry
+        # control, and "it failed, and there was a Retry" is actionable where "it failed" is not.
+        health = await self.response_health()
+        if health["state"] == "error":
+            raise PlatformStateError(
+                f"{self.platform}: the platform reported an error instead of a response "
+                f"(matched {health['matched']!r}"
+                + (
+                    f", recovery offered: {health['recovery_offered']}"
+                    if health.get("recovery_offered")
+                    else ", no recovery control offered"
+                )
+                + f"). Text: {health['text']!r}"
+            )
         entry = self.deps.manifest.require(self.platform, "sources")
 
         async def _extract() -> list[str]:

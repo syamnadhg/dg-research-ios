@@ -90,3 +90,92 @@ def test_the_prefix_is_stripped_rather_than_searched_for():
     """
     got = classify_response("Earlier in the thread ChatGPT said: hello, and that mattered because...")
     assert got["state"] == "content"
+
+
+# ======================================================================================
+# wired into the run — a classifier nobody calls is dead code
+# ======================================================================================
+
+import asyncio
+
+from emubackend import harvest, intents, phases
+from emubackend.selectors import SelectorEntry, SelectorManifest
+
+
+class _Handle:
+    def __init__(self, text):
+        self.text = text
+
+    async def inner_text(self):
+        return self.text
+
+
+class _Page:
+    """Response container and sources both resolve; only the CONTENT differs per test."""
+
+    def __init__(self, text):
+        self.text = text
+
+    async def query_selector(self, css):
+        return _Handle(self.text)
+
+    async def query_selector_all(self, css):
+        return [_Handle(self.text)]
+
+    async def evaluate(self, js, *a):
+        return None
+
+
+def _driver(text):
+    manifest = SelectorManifest(
+        platforms={
+            "chatgpt": {
+                key: SelectorEntry(css=("#x",), provenance="test")
+                for key in ("logged_in_marker", "composer", "send", "sources", "response_container")
+            }
+        },
+        source="test",
+    )
+    return phases.PlatformDriver(
+        "chatgpt",
+        phases.PhaseDeps(
+            manifest=manifest,
+            registry=intents.IntentRegistry(),
+            history=harvest.HarvestHistory(),
+            pages={"chatgpt": _Page(text)},
+            topic="t",
+        ),
+    )
+
+
+def test_harvest_refuses_to_extract_from_a_platform_error():
+    """The banner's container resolves perfectly. Extracting harvests the error AS RESEARCH."""
+    with pytest.raises(phases.PlatformStateError) as exc:
+        asyncio.run(_driver(REAL_ERROR).harvest_sources())
+    assert "error loading app" in str(exc.value)
+
+
+def test_the_refusal_names_the_recovery_the_platform_offered():
+    """"It failed, and there was a Retry" is actionable; "it failed" is not."""
+    with pytest.raises(phases.PlatformStateError, match="recovery offered"):
+        asyncio.run(_driver(REAL_ERROR).harvest_sources())
+
+
+def test_the_refusal_is_not_a_manifest_error():
+    """Different fault, opposite response.
+
+    A ManifestError means the selector rotted and the agent should repair it. This means the selector is
+    FINE and the platform failed — repairing would chase a healthy target, which is the recipe's
+    "escalate onto a healthy page" failure reached by mis-attributing the fault.
+    """
+    from emubackend.selectors import ManifestError
+
+    assert not issubclass(phases.PlatformStateError, ManifestError)
+
+
+def test_a_healthy_response_still_harvests_normally():
+    """The guard must not become the outage: real content passes straight through."""
+    verdict = asyncio.run(
+        _driver("ChatGPT said: A real answer with plenty of substance to it.").harvest_sources()
+    )
+    assert verdict is not None
