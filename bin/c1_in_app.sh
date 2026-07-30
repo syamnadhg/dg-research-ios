@@ -87,6 +87,7 @@ xcrun swiftc \
   "$BUILD/SRRuntime.swift" \
   "$BUILD/SRManifest.swift" \
   "$REPO"/ios/Sources/SuperResearchDeviceCore/*.swift \
+  "$REPO"/ios/Shared/*.swift \
   "$REPO/ios/C1Harness/main.swift"
 
 cat > "$APP/Info.plist" <<PLIST

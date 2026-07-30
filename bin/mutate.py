@@ -29,6 +29,15 @@ PY = ROOT / ".venv/bin/python"
 
 # (file, old, new, test-node-id-that-MUST-fail, what-real-defect-this-simulates)
 MUTATIONS = [
+    # --- the C1-in-app extraction --------------------------------------------------------------
+    (
+        "ios/App/main.swift",
+        "                manifestSource: SRManifest.manifestSource",
+        '                manifestSource: "placeholder"',
+        "test_inapp_parity.py::test_the_verdict_carries_its_manifests_provenance",
+        "an entry point feeding fake provenance, so a wiring proof earns real coverage credit",
+    ),
+
     # --- the agent's first real failure catalogue ----------------------------------------------
     (
         "emubackend/phases.py",

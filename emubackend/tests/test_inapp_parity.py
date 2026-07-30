@@ -180,9 +180,39 @@ def test_the_harness_does_not_inline_a_manifest():
 
 
 def test_the_verdict_carries_its_manifests_provenance():
-    """Without it the coverage gate cannot tell a wiring proof from real coverage."""
-    code = _code(SWIFT_HARNESS)
-    assert '"manifest_source": SRManifest.manifestSource' in code
+    """Without it the coverage gate cannot tell a wiring proof from real coverage.
+
+    The chain got one link longer when the runner was extracted so the app could perform C1 too, and the
+    test follows it rather than pinning the old single line: the runner writes whatever `manifestSource`
+    it was given, and **every** entry point must feed it `SRManifest.manifestSource`. Checking only the
+    runner would let a new entry point pass a placeholder and silently earn coverage credit.
+    """
+    runner = _code(REPO / "ios" / "Shared" / "C1Runner.swift")
+    assert '"manifest_source": manifestSource' in runner
+
+    entry_points = [
+        REPO / "ios" / "C1Harness" / "main.swift",   # the standalone gate
+        REPO / "ios" / "App" / "main.swift",         # the app's SR_C1 mode, which shares the cookie jar
+    ]
+    for path in entry_points:
+        code = _code(path)
+        assert "C1Runner(" in code, f"{path.name} does not construct the runner"
+        assert "manifestSource: SRManifest.manifestSource" in code, (
+            f"{path.name} constructs C1Runner without passing the real manifest provenance — that run "
+            f"could be credited as coverage when it was a wiring proof"
+        )
+
+
+def test_every_c1_entry_point_exits_on_the_runners_verdict_rather_than_the_runner_doing_it():
+    """`exit()` inside the shared runner would terminate the host app in the in-app mode.
+
+    Invisible until it happens, and then it looks like the app crashing rather than a library killing it.
+    """
+    runner = _code(REPO / "ios" / "Shared" / "C1Runner.swift")
+    assert "exit(" not in runner, "the shared runner must not exit the process"
+    for path in (REPO / "ios" / "C1Harness" / "main.swift", REPO / "ios" / "App" / "main.swift"):
+        code = _code(path)
+        assert "exit(runner.allPassed ? 0 : 1)" in code, f"{path.name} must turn the verdict into a status"
 
 
 def test_both_implementations_cover_the_same_phase_keys():

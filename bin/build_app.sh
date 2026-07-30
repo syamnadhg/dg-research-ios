@@ -28,6 +28,26 @@ BUNDLE_ID="com.distributedglobal.superresearch"
 rm -rf "$BUILD"; mkdir -p "$APP"
 SDK="$(xcrun --sdk iphonesimulator --show-sdk-path)"
 
+# The C1 mode in main.swift needs SRManifest/SRRuntime, so they are generated for every build.
+# Defaults to mockplatform: a plain `build_app.sh` must keep working with no arguments, and the platform
+# actually under test is chosen by bin/c1_in_app.sh when it regenerates them.
+echo "==> generating the C1 constants (SR_C1 mode needs them at compile time)"
+C1PLATFORM="${SR_C1_PLATFORM:-mockplatform}"
+"$REPO/.venv/bin/python" "$REPO/bin/c1_gen_manifest.py" "$C1PLATFORM" "$BUILD/SRManifest.swift" \
+  ${SR_C1_MANIFEST:+--manifest "$SR_C1_MANIFEST"} ${SR_C1_URL:+--url "$SR_C1_URL"} >/dev/null
+"$REPO/.venv/bin/python" - "$BUILD/SRRuntime.swift" <<'GENPY'
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path.cwd()))
+from emubackend.substrate.runtime_js import RUNTIME_JS
+Path(sys.argv[1]).write_text(
+    "// GENERATED from emubackend/substrate/runtime_js.py - do not edit.\n"
+    "enum SRRuntime {\n"
+    '    static let source = #"""\n' + RUNTIME_JS + '\n"""#\n'
+    "}\n"
+)
+GENPY
+
 echo "==> compiling"
 # The pure-Swift core is compiled in alongside the app sources. It has no dependencies, so this
 # needs no package graph — which is what keeps the build a single command with nothing to resolve.
@@ -36,7 +56,10 @@ xcrun swiftc \
   -target arm64-apple-ios17.0-simulator \
   -framework UIKit -framework WebKit -framework SwiftUI -framework CoreImage \
   -o "$APP/SuperResearch" \
+  "$BUILD/SRRuntime.swift" \
+  "$BUILD/SRManifest.swift" \
   "$REPO"/ios/Sources/SuperResearchDeviceCore/*.swift \
+  "$REPO"/ios/Shared/*.swift \
   "$REPO"/ios/App/*.swift
 
 echo "==> Info.plist"

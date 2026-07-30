@@ -19,6 +19,8 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
     var model: AppModel?
     let theme = ThemeManager()
+    /// Retained only in C1 mode. Held so the runner and its web view outlive `didFinishLaunching`.
+    var c1: C1Runner?
 
     /// iOS suspends a backgrounded app, which stops the heartbeat. Resuming on foreground is what makes
     /// "open the app and it is online" true rather than aspirational.
@@ -30,6 +32,41 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        // C1 mode: run the gate INSIDE this app, sharing this app's cookie jar.
+        //
+        // The reason this exists at all is a jar, not a convenience. `bin/c1_in_app.sh` used to build a
+        // separate bundle (`com.distributedglobal.src1`), and a separate bundle gets its own
+        // `WKWebsiteDataStore` — so it is signed out of every platform, while the owner's hand-made
+        // sessions live in *this* container. Measured: 168K of HTTPStorages here, none there. The gate
+        // could never see a signed-in page, and the mock hid that for as long as the mock was all it ran
+        // against, because a mock needs no session.
+        //
+        // Running it here also makes the gate exercise the PRODUCTION path: in production the run happens
+        // in this app, against these web views, with this session. A harness beside the app never was.
+        if let platform = ProcessInfo.processInfo.environment["SR_C1"], !platform.isEmpty {
+            let runner = C1Runner(
+                platform: SRManifest.platform,
+                manifest: SRManifest.selectors,
+                runtimeJS: SRRuntime.source,
+                pageURL: SRManifest.pageURL,
+                manifestSource: SRManifest.manifestSource
+            )
+            self.c1 = runner
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let controller = UIViewController()
+            // On screen on purpose: an off-screen WKWebView can have its WebProcess deprioritised, and
+            // phases then time out for reasons that look like a slow page.
+            controller.view.addSubview(runner.web)
+            window.rootViewController = controller
+            window.makeKeyAndVisible()
+            self.window = window
+            Task {
+                await runner.run()
+                exit(runner.allPassed ? 0 : 1)
+            }
+            return true
+        }
+
         // Identity the frontend's Account page will show. Supplied here because the core package is
         // deliberately UIKit-free.
         RESTPairingBackend.deviceNameProvider = { UIDevice.current.name }
