@@ -842,3 +842,36 @@ bash bin/c1_contract_gate.sh <UDID> chatgpt selectors_mobile.json # PASS
 app no way to share its jar), 8 selectors for claude/gemini/notebooklm, and the rest of the agent's failure
 catalogue — human-verification prompts, quota modals, mid-wait logout — of which two entries are built and
 wired.
+
+## The agent's mid-wait failure catalogue
+
+Step 6's list splits by *where* each failure can be caught, and only three of them need a watch inside the
+long wait. The others were already handled and it is worth saying by what, so nobody adds a second mechanism:
+
+| step-6 failure | handled by |
+|---|---|
+| already-on toggles | the ported `deepResearchOn` predicate — placeholder, stateless pill, control state |
+| non-anchor sources | `harvestSources` reads `innerText`, never `href`; the mock's `>=3` proves it |
+| 5–45 minute response waits | the platform-aware timeout (20s mock, 240s real) |
+| **mid-wait logout** | ← the wait watch |
+| **human-verification prompts** | ← the wait watch |
+| **quota / rate-limit modals** | ← the wait watch |
+
+`awaitResponse` now checks `WAIT_INTERRUPTION_JS` periodically and throws `waitInterrupted(platform:reason:)`.
+Three deliberate choices:
+
+* **A distinct error, not a timeout.** `awaitResponse` returning false means "still waiting", which invites a
+  longer timeout — against a sign-in page, forever. `waitInterrupted` means "stop and tell someone", and it
+  carries the reason, because "the wait was interrupted" is not actionable while "the session ended mid-wait"
+  is. In practice the difference is reporting in two minutes rather than at the 45-minute deadline.
+* **Auth is read from CONTROLS, anchored.** Same as the capture tool's signed-out refusal, for the same
+  reason: ChatGPT's signed-in page carries prose like "Log in to get answers based on saved chats", so an
+  unanchored body search would abort every healthy run.
+* **Throttled to every ~20th poll.** Three `querySelectorAll` sweeps at 4Hz for 45 minutes is the wrong trade
+  for an event that takes seconds to matter.
+
+⚠ And a test-quality note, because the mutation harness caught it: the throttle test first asserted that
+throttling *syntax* was present, which passed against `polls % 20 == 1000000` — a throttle whose comparand
+exceeds its modulus never fires, i.e. the watch silently disabled. It now parses both numbers and asserts the
+condition is *reachable*. Fifth instance this session of a test passing for a reason unrelated to what it
+protects.

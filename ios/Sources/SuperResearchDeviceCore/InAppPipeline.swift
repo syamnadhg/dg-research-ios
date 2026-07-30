@@ -37,7 +37,53 @@ public enum InAppPhaseError: Error, Equatable {
     case notLoggedIn(platform: String)
     /// A mutating step ran and its predicate did not confirm the outcome.
     case outcomeUnconfirmed(intent: String)
+    /// The page changed underneath a long wait in a way no further waiting fixes — the session ended, a
+    /// verification prompt appeared, or a quota wall dropped.
+    ///
+    /// Distinct from a timeout on purpose. A timeout says "still waiting", which invites a longer timeout;
+    /// this says "stop and tell someone", and it carries the reason because "the wait was interrupted" is
+    /// not actionable while "the session ended mid-wait" is. The difference in practice is reporting it in
+    /// two minutes instead of at the forty-five-minute deadline.
+    case waitInterrupted(platform: String, reason: String)
 }
+
+/// Things that end a wait early because no amount of waiting will fix them.
+///
+/// Returns a REASON string rather than a bool, because "the wait was interrupted" is not actionable and
+/// "the session ended mid-wait" is. Each of these needs a human, and the difference between reporting it in
+/// two minutes and reporting a timeout in forty-five is the whole value.
+///
+/// Anchored the same way `classify_response`'s auth check is: a CONTROL inviting you to sign in, never prose,
+/// so a signed-in page's own copy about logging in cannot trip it.
+let WAIT_INTERRUPTION_JS = """
+(function () {
+  var vis = function (el) { var r = el.getBoundingClientRect(); return !!(r.width && r.height); };
+  var name = function (el) {
+    return (el.getAttribute('aria-label') || (el.innerText || '')).replace(/\\s+/g, ' ').trim();
+  };
+  var AUTH = /^(log ?in|sign ?in|continue with (google|apple|microsoft))\\b/i;
+  var controls = document.querySelectorAll('button, [role=button], a');
+  for (var i = 0; i < controls.length; i++) {
+    if (vis(controls[i]) && AUTH.test(name(controls[i]))) {
+      return 'the session ended mid-wait — a sign-in control appeared: ' + name(controls[i]).slice(0, 40);
+    }
+  }
+  var body = (document.body ? (document.body.innerText || '') : '').toLowerCase();
+  var WALLS = [
+    ['verify you are human', 'a human-verification prompt appeared'],
+    ['are you a robot', 'a human-verification prompt appeared'],
+    ['unusual activity', 'a human-verification prompt appeared'],
+    ["you've reached your limit", 'a usage limit was hit mid-wait'],
+    ['usage limit', 'a usage limit was hit mid-wait'],
+    ['rate limit', 'a rate limit was hit mid-wait'],
+    ['upgrade to continue', 'a paywall appeared mid-wait']
+  ];
+  for (var j = 0; j < WALLS.length; j++) {
+    if (body.indexOf(WALLS[j][0]) >= 0) { return WALLS[j][1] + ' ("' + WALLS[j][0] + '")'; }
+  }
+  return '';
+})()
+"""
 
 /// One platform's steps, each with an outcome predicate — wrapped as written, per A8/A1.
 public struct InAppPhaseDriver {
@@ -358,7 +404,24 @@ public struct InAppPhaseDriver {
         // "has the answer stopped growing" — rather than about a vendor's private markup. It works on every
         // platform including the fixture, and it needs no per-platform capture. Requiring several
         // consecutive identical reads is what keeps a mid-stream pause from reading as completion.
+        var polls = 0
         while now() < deadline {
+            // Watch for the page changing UNDERNEATH the wait, not just for the answer.
+            //
+            // A 45-minute wait is long enough for the session to end, a verification prompt to appear, or a
+            // quota wall to drop — and the naive behaviour is the worst available: keep polling a page that
+            // will never produce an answer, then report a timeout, which says nothing about why. Each of these
+            // needs a human, so the run should say so in minutes rather than at the deadline.
+            //
+            // Checked every ~5s rather than every poll: it is three `querySelectorAll`s, and paying that at
+            // 4Hz for 45 minutes to catch an event that takes seconds to matter is the wrong trade.
+            polls += 1
+            if polls % 20 == 0 {
+                if let blocked = try await page.evaluateJSON(WAIT_INTERRUPTION_JS) as? String,
+                   !blocked.isEmpty {
+                    throw InAppPhaseError.waitInterrupted(platform: platform, reason: blocked)
+                }
+            }
             if let done = try await page.evaluateJSON(
                 "!!document.querySelector('[data-state=\"complete\"]')"
             ) as? Bool, done {

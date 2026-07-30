@@ -29,6 +29,15 @@ PY = ROOT / ".venv/bin/python"
 
 # (file, old, new, test-node-id-that-MUST-fail, what-real-defect-this-simulates)
 MUTATIONS = [
+    # --- the agent's mid-wait failure catalogue -------------------------------------------------
+    (
+        "ios/Sources/SuperResearchDeviceCore/InAppPipeline.swift",
+        "            if polls % 20 == 0 {",
+        "            if polls % 20 == 1000000 {",
+        "test_inapp_parity.py::test_the_interruption_check_is_throttled_rather_than_run_every_poll",
+        "the mid-wait watch never running, so a session that ends mid-wait reports a 45-minute timeout",
+    ),
+
     # --- the C1-in-app extraction --------------------------------------------------------------
     (
         "ios/App/main.swift",

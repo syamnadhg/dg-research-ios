@@ -249,3 +249,73 @@ def test_both_implementations_cover_the_same_phase_keys():
         "response_container",
     ):
         assert key in swift, f"the Swift orchestrator never references {key}"
+
+
+# ======================================================================================
+# the agent's mid-wait failure catalogue
+# ======================================================================================
+
+
+def test_the_long_wait_watches_for_the_page_changing_underneath_it():
+    """A 45-minute wait is long enough for the session to end or a quota wall to drop.
+
+    The naive behaviour is the worst available: keep polling a page that will never answer, then report a
+    TIMEOUT — which invites a longer timeout and says nothing about why. Each of these needs a human, so the
+    run should say so in minutes.
+    """
+    code = _code(SWIFT_PIPELINE)
+    assert "WAIT_INTERRUPTION_JS" in code
+    body = _body_of(code, "public func awaitResponse(", after="-> Bool {")
+    assert "WAIT_INTERRUPTION_JS" in body, "the wait itself must do the watching"
+    assert "waitInterrupted" in body, "an interruption must throw, not be swallowed into the timeout"
+
+
+def test_an_interruption_is_a_distinct_error_from_a_timeout():
+    """`awaitResponse` returning false means "still waiting"; this means "stop and tell someone".
+
+    Collapsing them would have a caller retry a longer wait against a sign-in page.
+    """
+    code = _code(SWIFT_PIPELINE)
+    enum = _body_of(code, "public enum InAppPhaseError")
+    assert "case waitInterrupted(platform: String, reason: String)" in enum
+    assert "reason" in enum, "the error must carry WHY — 'interrupted' alone is not actionable"
+
+
+def test_the_interruption_check_reads_controls_for_auth_not_prose():
+    """Same anchoring as the capture tool's signed-out refusal, and for the same reason.
+
+    ChatGPT's signed-in page carries prose like "Log in to get answers based on saved chats". An unanchored
+    body search would abort every healthy run.
+    """
+    code = _code(SWIFT_PIPELINE)
+    assert "/^(log ?in|sign ?in|continue with (google|apple|microsoft))" in code, (
+        "the auth check must be ANCHORED and read control names"
+    )
+
+
+def test_the_wait_watches_for_each_catalogued_platform_failure():
+    """The step-6 list, minus the ones handled elsewhere.
+
+    already-on toggles -> the ported predicate; non-anchor sources -> harvestSources reads innerText;
+    5-45 minute waits -> the platform-aware timeout. These three are what only a mid-wait watch can catch.
+    """
+    code = _code(SWIFT_PIPELINE)
+    for phrase in ("verify you are human", "usage limit", "rate limit"):
+        assert phrase in code, f"the mid-wait watch must recognise {phrase!r}"
+
+
+def test_the_interruption_check_is_throttled_rather_than_run_every_poll():
+    """Three querySelectorAll sweeps at 4Hz for 45 minutes is the wrong trade for an event that takes
+    seconds to matter."""
+    body = _body_of(_code(SWIFT_PIPELINE), "public func awaitResponse(", after="-> Bool {")
+    # The property is that the throttle can FIRE, not that throttling syntax is present. Asserting the
+    # latter passed against `polls % 20 == 1000000` — a throttle whose comparand exceeds its modulus never
+    # fires at all, which is the mid-wait watch silently disabled. bin/mutate.py caught it.
+    throttle = re.search(r"polls % (\d+) == (\d+)", body)
+    assert throttle, "the watch must be throttled, not run on every poll"
+    modulus, comparand = int(throttle.group(1)), int(throttle.group(2))
+    assert comparand < modulus, (
+        f"polls % {modulus} == {comparand} can never be true, so the watch never runs — a session that "
+        f"ends mid-wait would report a 45-minute timeout instead"
+    )
+    assert 2 <= modulus <= 100, f"a modulus of {modulus} is either too eager or effectively never"
