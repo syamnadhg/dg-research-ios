@@ -389,3 +389,44 @@ The refactor is therefore:
 Order matters: do (1) and (2) first and re-run the **mock** C1 to prove the extraction changed nothing.
 Only then wire (3) and (4). Doing it the other way round means a failure could be either the extraction or
 the wiring, with no way to tell which.
+
+### Why `tapped=false` on real ChatGPT: the generated Swift manifest is CSS-only
+
+`bin/c1_gen_manifest.py` emits `static let selectors: [String: [String]]` — a map of key to **CSS
+array**. `SelectorEntry` also carries `text_contains`, and that field is **dropped on the way to Swift**.
+
+ChatGPT's `deep_research_toggle` is deliberately text-only: it carries **no css**, because `resolve()`
+tries css before text and a broad `[role=menuitem]` would match "Camera", the first of nineteen. So in the
+generated Swift manifest that key is **absent entirely** — verified: `grep deep_research_toggle` on the
+generated file finds nothing. `optional("deep_research_toggle")` therefore returns nil and
+`enableDeepResearch()` returns `false` without tapping anything.
+
+So `tapped=false, tapped=false, still on=false` on the real-platform in-app run was **not** the two-step
+menu problem and **not** the platform. It is a lossy generator. The Python and Swift sides diverge in a
+way `test_inapp_parity.py` does not currently catch, because parity is asserted on the phase *keys*, not
+on the shape of what crosses the boundary.
+
+The fix is two-sided and neither half works alone:
+
+1. `c1_gen_manifest.py` emits the full entry — `css`, `text_contains`, and eventually `network_hint`.
+2. `InAppPhaseDriver.resolve` gains the same text fallback the Python `resolve()` has, over the same
+   role list (`button, a, [role=button], [role=menuitem], [role=menuitemradio], [role=option]` — menu
+   roles included, which was itself a fix earned on this platform).
+
+Add a parity test that the two manifests carry the same FIELDS, not merely the same keys. The current
+test would pass with `text_contains` silently discarded, which is exactly what happened.
+
+### And the C1 gate no longer hardcodes the mock's own testids
+
+Two checks named fixture-only controls, so they could never pass on a real platform however correct the
+pipeline was — a gate measuring the fixture rather than the code:
+
+* the idempotence check read `[data-testid="deep-research-toggle"]`. It now asks
+  `driver.deepResearchIsOn()`, the *same* predicate the phase uses, so "already on" cannot drift from "is
+  it on now".
+* the isTrusted BOUNDARY probe clicks `[data-testid="trust-gated"]`, a control planted by the mock. Its
+  absence on a real platform is **not applicable**, not a failure — it now records a skip with that
+  stated, keeping the boundary asserted where it can be and silent where it cannot.
+
+Mock C1 still passes 11/11 through both entry points after the change, which is what makes it a
+de-mocking rather than a loosening.

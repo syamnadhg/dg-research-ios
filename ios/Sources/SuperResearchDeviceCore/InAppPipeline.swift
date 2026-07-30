@@ -116,6 +116,17 @@ public struct InAppPhaseDriver {
         return true
     }
 
+    /// Is deep research on, judged by the SAME predicate the phase uses?
+    ///
+    /// Public so the C1 gate can assert idempotence without naming a selector of its own. It used to
+    /// read `[data-testid="deep-research-toggle"]` directly — the MOCK's id — which meant that check
+    /// could never pass on a real platform however correct the pipeline was. A gate that hardcodes the
+    /// fixture is measuring the fixture.
+    public func deepResearchIsOn() async throws -> Bool {
+        guard let toggle = try await optional("deep_research_toggle") else { return false }
+        return try await togglePressed(toggle)
+    }
+
     private func togglePressed(_ handle: Int) async throws -> Bool {
         if let pressed = try await page.attribute(handle, "aria-pressed") { return pressed == "true" }
         return try await page.attribute(handle, "aria-checked") == "true"

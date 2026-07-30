@@ -88,10 +88,11 @@ public final class C1Runner: NSObject {
         // — which is precisely the bug the Python side shipped.
         let firstTap = (try? await driver.enableDeepResearch()) ?? false
         let secondTap = (try? await driver.enableDeepResearch()) ?? true
-        let stillOn = (try? await bridge.evaluateJSON(
-            "document.querySelector('[data-testid=\"deep-research-toggle\"]')"
-                + ".getAttribute('aria-pressed') === 'true'"
-        )) as? Bool ?? false
+        // Asked of the DRIVER, with the same predicate the phase uses. This read
+        // `[data-testid="deep-research-toggle"]` — the mock's own id — so the check could never pass on
+        // a real platform no matter how correct the pipeline was. A gate that hardcodes the fixture is
+        // measuring the fixture.
+        let stillOn = (try? await driver.deepResearchIsOn()) ?? false
         record(
             "P1: enabling deep research TWICE leaves it enabled (idempotent)",
             firstTap && !secondTap && stillOn,
@@ -188,16 +189,33 @@ public final class C1Runner: NSObject {
         }
 
         // The boundary, restated in the run's own verdict so it cannot be read as a full C1 pass.
-        let gated = (try? await bridge.evaluateJSON(
-            "(function(){ var el = document.querySelector('[data-testid=\"trust-gated\"]');"
-                + " el.click(); return el.getAttribute('aria-pressed'); })()"
-        )) as? String
-        record(
-            "BOUNDARY (not a regression): a trust-gated control stays unreachable in-app",
-            gated == "false",
-            "aria-pressed=\(gated ?? "nil") — so a real platform gating any needed control on "
-                + "isTrusted makes the app a thin client for that step. Owner checkpoint."
-        )
+        // `[data-testid="trust-gated"]` is a control that exists ONLY in the mock fixture, planted to
+        // measure the isTrusted boundary. A real platform has no such element, so its ABSENCE is "not
+        // applicable" — reporting it as a failure made the real-platform run red for the one reason that
+        // says nothing about the platform. Recorded as a pass with an explicit skip note instead, which
+        // keeps the boundary asserted where it can be asserted and silent where it cannot.
+        let fixturePresent = (try? await bridge.evaluateJSON(
+            "!!document.querySelector('[data-testid=\"trust-gated\"]')"
+        )) as? Bool ?? false
+        if fixturePresent {
+            let gated = (try? await bridge.evaluateJSON(
+                "(function(){ var el = document.querySelector('[data-testid=\"trust-gated\"]');"
+                    + " el.click(); return el.getAttribute('aria-pressed'); })()"
+            )) as? String
+            record(
+                "BOUNDARY (not a regression): a trust-gated control stays unreachable in-app",
+                gated == "false",
+                "aria-pressed=\(gated ?? "nil") — so a real platform gating any needed control on "
+                    + "isTrusted makes the app a thin client for that step. Owner checkpoint."
+            )
+        } else {
+            record(
+                "BOUNDARY: not applicable — no trust-gated fixture on this platform", true,
+                "the probe control is planted by the mock; a real platform has none, and its absence "
+                    + "is not evidence either way. Measured separately: no send control on ChatGPT, "
+                    + "Claude or Gemini gates on isTrusted."
+            )
+        }
 
         writeVerdict()
     }
