@@ -679,3 +679,29 @@ def test_no_shipped_selector_carries_a_generated_or_indexed_handle():
             for css in entry.get("css", []):
                 assert not generated.search(css), f"{platform}.{key}: generated handle in {css!r}"
                 assert not indexed.search(css), f"{platform}.{key}: positional handle in {css!r}"
+
+
+def test_chatgpts_response_container_prefers_the_state_independent_handle():
+    """`data-message-author-role` is absent during a deep-research run; `data-turn` is not.
+
+    Measured on a live DR run: the only author-role on the page was 'user', while the assistant turn
+    carried `data-turn='assistant'`. So the selector verified on a web-search answer returns ZERO on the
+    response type P2 needs — the P1 shape, reached not by a wrong selector but by one verified against the
+    wrong state.
+    """
+    css = _shipped()["platforms"]["chatgpt"]["response_container"]["css"]
+    assert css[0] == "[data-turn=assistant]", "the state-independent handle must be tried first"
+    assert "data-message-author-role" in css[-1], "keep the web-search shape as a fallback"
+
+
+def test_chatgpts_sources_is_scoped_to_the_same_handle_as_its_container():
+    """If the container's attribute is absent in a state, a scope built on it is empty in that state too.
+
+    Both were scoped to `data-message-author-role`; both went blind during a DR run.
+    """
+    shipped = _shipped()["platforms"]["chatgpt"]
+    container = shipped["response_container"]["css"][0]
+    for css in shipped["sources"]["css"]:
+        assert css.startswith(container), (
+            f"sources selector {css!r} must be scoped to {container!r}, not to a different handle"
+        )

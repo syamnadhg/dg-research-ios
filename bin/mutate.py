@@ -29,6 +29,15 @@ PY = ROOT / ".venv/bin/python"
 
 # (file, old, new, test-node-id-that-MUST-fail, what-real-defect-this-simulates)
 MUTATIONS = [
+    # --- selectors verified against the wrong STATE --------------------------------------------
+    (
+        "selectors_mobile.json",
+        '"css": [\n          "[data-turn=assistant]",',
+        '"css": [\n          "[data-message-author-role=assistant]",',
+        "test_capture_guards.py::test_chatgpts_response_container_prefers_the_state_independent_handle",
+        "response_container blind during a deep-research run, where no author-role attribute exists",
+    ),
+
     # --- regressions the gate re-run caught, after the predicate port -------------------------
     (
         "emubackend/selectors.py",

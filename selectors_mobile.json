@@ -56,9 +56,10 @@
       },
       "response_container": {
         "css": [
+          "[data-turn=assistant]",
           "[data-message-author-role=assistant]"
         ],
-        "provenance": "resolved@ios-app-webview:semantic attribute; NOT conversation-turn-N, which binds to one turn"
+        "provenance": "resolved@ios-app-webview: [data-turn=assistant] on the turn <section>. MEASURED CORRECTION \u2014 [data-message-author-role=assistant] was verified on a web-search answer and returns ZERO during a deep-research run, where the only author-role on the page is 'user'. A selector that resolves on one response type and not on the type P2 needs is the P1 shape. data-turn carries 'user' or 'assistant' on both turns and is not index-bound, unlike conversation-turn-N."
       },
       "deep_research_toggle": {
         "css": [],
@@ -67,10 +68,10 @@
       },
       "sources": {
         "css": [
-          "[data-message-author-role=assistant] [data-testid*=source]",
-          "[data-message-author-role=assistant] a[href^=http]"
+          "[data-turn=assistant] [data-testid*=source]",
+          "[data-turn=assistant] a[href^=http]"
         ],
-        "provenance": "resolved@ios-app-webview: SCOPED to the response container, which is the whole point \u2014 an unscoped a[href^=http] matches ChatGPT's nav chrome (Images / Plugins / See plans and pricing) and would harvest the sidebar as sources. Measured on a web-search answer: 1 match, text 'github.com' -> https://github.com/swiftlang/swift/releases. testid variant listed FIRST and unverified: it is the shape a deep-research answer is expected to use, and the known P1 failure is precisely that DR sources render as NON-anchor nodes, so a link-only harvest returns zero. Re-verify against a real deep-research response before trusting P2."
+        "provenance": "resolved@ios-app-webview: SCOPED to the response turn \u2014 unscoped a[href^=http] matches ChatGPT's nav chrome and would harvest the sidebar as sources. Re-scoped from [data-message-author-role=assistant] for the same reason as response_container: that attribute is absent during a deep-research run. Anchor form measured on a web-search answer ('github.com' -> github.com/swiftlang/swift/releases); the testid form is listed first and is UNVERIFIED, because the known P1 failure is that DR sources render as non-anchor nodes."
       }
     },
     "gemini": {

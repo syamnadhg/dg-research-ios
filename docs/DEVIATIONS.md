@@ -226,3 +226,42 @@ Gemini's, by contrast, IS reachable — but not where the naming suggested. `bar
 **model** picker (3.5 Flash-Lite / 3.6 Flash / 3.1 Pro / Extended thinking) and contains no Deep
 Research. The control is a `<toolbox-drawer-item>` reading "Deep Research — Get detailed reports" inside
 the **"Upload and tools"** drawer: verified unique on the page (6 items, 1 match, visible).
+
+### A selector verified on one response type is not verified
+
+`chatgpt.response_container` was captured and confirmed as `[data-message-author-role=assistant]` on a
+web-search answer. During a **deep-research** run the same page reports:
+
+```
+author-role values anywhere on the page: ['user']
+conversation-turn-1  data-turn='user'       (roleDescendants: ['user'])
+conversation-turn-2  data-turn='assistant'  (roleDescendants: [])
+```
+
+The assistant turn exists and carries **no** `data-message-author-role` at all. So the selector that
+resolved perfectly, and whose value looked entirely reasonable in the manifest, returns **zero** on the
+response type P2 actually needs — the P1 shape, arrived at from a new direction: not a wrong selector, a
+selector verified against the wrong state.
+
+`[data-turn=assistant]` is the durable handle: present on both turns, valued `user`/`assistant`, and not
+index-bound like `conversation-turn-N`. `sources` was scoped to the author-role attribute too and is
+re-scoped for the same reason.
+
+The general lesson, now paid for twice: **"driven" has to name the state it was driven in.** An idle page,
+a web-search answer and a deep-research run are three different DOMs on one platform.
+
+### First real platform failure observed: ChatGPT's deep-research app failing to load
+
+The deep-research run produced, in the assistant turn:
+
+```
+ChatGPT said: Error loading app  Failed to fetch template  Retry
+```
+
+Not a network error and not an automation error — the platform's own feature failed and offered a Retry
+control. This is exactly the class step 6 (the supervisor agent) exists for, and it is worth recording
+that the FIRST real deep-research attempt hit it: a run that treats "the response container appeared" as
+success would report this as a completed P2 and harvest an error message as research.
+
+Note also what the arming produced, useful for the predicate: the composer pill's accessible name is
+`Deep research, click to remove`, and a sibling control reads `Sites, search the web, no sites saved`.
