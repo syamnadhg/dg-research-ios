@@ -87,6 +87,13 @@ fi
 run "coverage (clause 2: every cleared platform runs in-app)" \
   "$PY" "$REPO/bin/coverage_gate.py"
 
+# Needs no Simulator, so it runs unconditionally. Added after the repo's first push tripped GitHub's
+# secret scanner on a Firebase Web API key that had been copied into docs/FIRESTORE_CONTRACT.md while
+# documenting the pairing contract — public-by-design key, genuinely low severity, and still something a
+# gate should have caught before a human's security alert did.
+run "secrets (no credential-shaped literal in a tracked file)" \
+  "$PY" "$REPO/bin/secret_scan.py"
+
 echo ""
 echo "════════════════════════════════════════════════"
 if [ ${#FAILED[@]} -eq 0 ]; then

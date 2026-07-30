@@ -22,7 +22,7 @@ Public config, env-overridable — `dg-research-backend/auth/v2_flow.py · PROJE
 
 ```
 FIREBASE_PROJECT_ID    default "super-research-492814"
-FIREBASE_WEB_API_KEY   default "<FIREBASE_WEB_API_KEY redacted - read from env or the gitignored plist>"
+FIREBASE_WEB_API_KEY   default <redacted — see note below>
 RESEARCH_FE_BASE_URL   default "https://superresearch.io"   (trailing "/" rstripped)
 ```
 These are read into module globals at **import time** — setting the env var after import is a no-op.
@@ -1349,7 +1349,7 @@ them permanently across reloads.
 | Symbol | File | Env var | Default |
 |---|---|---|---|
 | `PROJECT_ID` | `auth/v2_flow.py` | `FIREBASE_PROJECT_ID` | `super-research-492814` |
-| `WEB_API_KEY` | `auth/v2_flow.py` | `FIREBASE_WEB_API_KEY` | `<FIREBASE_WEB_API_KEY redacted - read from env or the gitignored plist>` |
+| `WEB_API_KEY` | `auth/v2_flow.py` | `FIREBASE_WEB_API_KEY` | <redacted — read it from the env var or the plist> |
 | `FE_BASE_URL` | `auth/v2_flow.py` | `RESEARCH_FE_BASE_URL` | `https://superresearch.io` (rstripped) |
 
 Read at **import time** into module globals.
@@ -1675,3 +1675,22 @@ Where earlier analysis contradicted the files, **the file wins**. Corrections ma
    `ls auth/` and reading `auth/__init__.py`.
 10. **`research_tokens`, `pipeline_requests` and `agentLogins` genuinely have no rule.** Verified by
     grep of `firestore.rules` — the only hits are in comments.
+
+
+## ⚠ Why the web API key is not reproduced in this document
+
+It used to be, twice, and GitHub's secret scanner fired on the first push — correctly, whatever the
+key's actual sensitivity. Two things are true and both matter:
+
+* **It is a Firebase *Web* API key, public by design.** It ships in every client that talks to the
+  project and is already served to the open internet from the frontend's own
+  `public/firebase-messaging-sw.js`. Access is gated by Firestore Security Rules and by App Check, not
+  by the key's secrecy — which is why the fix is *restricting* it (Google Cloud → Credentials → API
+  restrictions / HTTP referrers), not rotating it. Rotating a value that is intentionally in a public
+  service worker buys nothing and breaks every deployed client.
+* **That does not make committing it acceptable.** A scanner alert costs someone's attention, a copy in
+  a second repo widens the blast radius of any future misconfiguration, and "it was already public"
+  is a reason it is low-severity, not a reason to have done it.
+
+So: read it from `$FIREBASE_WEB_API_KEY` or from the gitignored `ios/GoogleService-Info.plist`. Neither
+this file nor any other in this repo should contain the literal value.
