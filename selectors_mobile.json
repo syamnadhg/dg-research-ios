@@ -72,6 +72,13 @@
           "[data-turn=assistant] a[href^=http]"
         ],
         "provenance": "resolved@ios-app-webview: SCOPED to the response turn \u2014 unscoped a[href^=http] matches ChatGPT's nav chrome and would harvest the sidebar as sources. Re-scoped from [data-message-author-role=assistant] for the same reason as response_container: that attribute is absent during a deep-research run. Anchor form measured on a web-search answer ('github.com' -> github.com/swiftlang/swift/releases); the testid form is listed first and is UNVERIFIED, because the known P1 failure is that DR sources render as non-anchor nodes."
+      },
+      "activity_panel": {
+        "css": [
+          "[data-turn=assistant] button[aria-expanded]:not([aria-label])"
+        ],
+        "text_contains": "Worked for",
+        "provenance": "DRIVEN@ios-app-webview: clicked it, aria-expanded went false->true and the turn text grew from 'Worked for 23s' to 'Worked for 23s Searched 7 websites' \u2014 the activity content revealed. UNIQUE (1 match): the :not([aria-label]) excludes the three sibling action buttons (Pro feedback / Switch model / More actions), which all carry aria-label. NOT positional \u2014 index 0 happens to be right today, and an nth-child would break the moment a button is added. text_contains covers the label family; measured on a REASONING reply ('Worked for Ns'), and a deep-research run may say 'Researched for\u2026' instead, so re-verify the label there."
       }
     },
     "gemini": {

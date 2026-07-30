@@ -52,7 +52,11 @@ def test_the_cli_exits_zero_on_the_real_repo():
         ("AIzaSy" + "B" * 33, "google api key"),
         ("sk-" + "a" * 32, "openai key"),
         ("ghp_" + "b" * 36, "github token"),
-        ("-----BEGIN RSA PRIVATE KEY-----", "private key block"),
+        # Assembled at runtime so this FILE never contains the pattern contiguously. The gate caught
+        # its own test fixture on the first run — a true positive about a false positive. An allowlist
+        # entry would have been the easy fix and the wrong one: every exemption is a place a real
+        # secret can later hide. Splitting the literal keeps the gate maximally strict instead.
+        ("-----BEGIN " + "RSA PRIVATE KEY" + "-----", "private key block"),
         ("AKIA" + "C" * 16, "aws access key"),
         ("GOCSPX-" + "d" * 24, "google oauth client secret"),
     ],

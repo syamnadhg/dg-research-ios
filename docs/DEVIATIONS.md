@@ -293,3 +293,43 @@ declare the feature unavailable in a WKWebView. What it IS enough for: the first
 agent's real failure catalogue, neither of which was on the imagined list (human-verification prompts,
 quota modals, mid-wait logout). The observed pair is *the feature's own sub-app failing to load*, and
 *a retry that succeeds as a click and produces nothing*.
+
+### `activity_panel` found — and the in-app gate turns out to have a THIRD cookie jar
+
+`chatgpt.activity_panel` is `[data-turn=assistant] button[aria-expanded]:not([aria-label])`, the
+collapsible activity summary inside the assistant turn. **Driven:** clicking it flipped `aria-expanded`
+false→true and the turn text grew from `Worked for 23s` to `Worked for 23s Searched 7 websites`.
+
+The `:not([aria-label])` is what makes it unique (1 match of 4). Its three siblings — Pro feedback,
+Switch model, More actions — all carry `aria-label`; the activity button carries none. Deliberately not
+positional: index 0 is right today and an `nth-child` breaks the moment a button is added.
+
+⚠ Measured on a **reasoning** reply (`Worked for Ns`). A deep-research run may label it `Researched
+for…`, so `text_contains` covers the family and the label needs re-verifying there. Same "verified
+against one state" lesson as `response_container` — applied deliberately this time rather than after.
+
+That took ChatGPT to **7/7**, which unblocked `bin/c1_in_app.sh` — and immediately exposed the actual
+blocker:
+
+```
+com.distributedglobal.superresearch  →  Library/HTTPStorages 168K   (signed in)
+com.distributedglobal.src1           →  no HTTPStorages at all      (signed out)
+```
+
+**The C1 harness is a different app bundle.** It has its own `WKWebsiteDataStore`, so it cannot see the
+session the owner signed in by hand — that lives in the SuperResearch app's container. This is the
+two-cookie-jars finding again, one level deeper: Safari, the app, and now the harness are *three*
+separate jars, and only the middle one is signed in.
+
+So real-platform in-app coverage was never one selector away. It needs one of:
+
+1. **Run the phase bodies inside the SuperResearch app bundle** rather than a separate harness, so the
+   run and the session share a container. Most correct, and it is also what production does — the real
+   run happens in the real app.
+2. **Transplant the session** into the harness container (Simulator-only, and it means the gate no
+   longer proves the app can do it — it proves the harness can).
+3. **Sign in a third time**, inside the harness app, which is a hand login per gate run and will rot.
+
+(1) is the only one that measures the thing the goal actually asks about. Worth stating plainly that the
+gate has been passing against the mock all along precisely because the mock needs no session, so this
+gap could not have surfaced before a real platform was pointed at it.
