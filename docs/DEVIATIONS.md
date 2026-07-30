@@ -490,3 +490,35 @@ candidate matched and to re-read the URL at fill time, since a splash-to-app tra
 
 Not guessing further. Both changes are kept because both are independently correct — the mock C1 still
 passes with zero failures — and the diagnostic is what makes the next round cheap.
+
+#### Solved: the readiness predicate was satisfiable by a pre-hydration shell
+
+The diagnostic settled it in one run:
+
+```json
+{"url":"https://chatgpt.com/","promptTextarea":0,"plusBtn":1,"splash":1,"editables":0,"textareas":1}
+```
+
+`splash: 1` — ChatGPT's `mobile-splash-screen` was still up. That shell renders the plus button and a plain
+`<textarea>`, and **zero** contenteditables, so `#prompt-textarea` did not exist. The hydration poll had
+exited at 0s because it accepted `manifest["logged_in_marker"]` as well as the composer, and the shell
+already satisfies the marker.
+
+Narrowed the poll to the **composer only**, and the composer appears after **1 second**:
+
+```
+[PASS] the composer hydrated: matched #prompt-textarea after 1s
+[PASS] DIAGNOSTIC at fill time: {promptTextarea: 1, plusBtn: 1, splash: 1, editables: 1, textareas: 1}
+[PASS] P1: composer written through the MODEL-updating path: path=execCommand, composer resolved=true
+```
+
+**We were never more than a second away; we were waiting on the wrong thing.** The general lesson, and it
+is the third variation on it in this file: *a readiness predicate must name the thing that depends on it.*
+`waitForReady` once returned true for `about:blank`; `logged_in_marker` passes on a plus button; and a
+chain is exactly the wrong shape for a wait, because any weak member satisfies it. Chains are right for
+*resolution* (try the alternatives) and wrong for *readiness* (require the specific thing).
+
+Real ChatGPT, in the real app, with the owner's session, now passes: P0 logged-in marker, composer
+hydration, the composer fill through the execCommand path, and the de-mocked isTrusted boundary. P2 send
+onward still fails and is not yet diagnosed — the same instrument-then-look approach applies, and the
+runner already reports enough to start.

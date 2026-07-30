@@ -104,11 +104,23 @@ public final class C1Runner: NSObject {
         // later as an unexplained empty path.
         var composerAppeared = false
         var composerWaited = 0
-        let composerCandidates = (manifest["composer"] ?? []) + (manifest["logged_in_marker"] ?? [])
-        while composerWaited < 30 {
+        var matchedCandidate = "none"
+        // ⚠ The COMPOSER only — deliberately NOT the logged_in_marker chain.
+        //
+        // Including the marker made this exit at 0s on ChatGPT's `[data-testid=composer-plus-btn]`, which
+        // the SPLASH SHELL already renders. Measured at fill time:
+        //   {promptTextarea: 0, plusBtn: 1, splash: 1, editables: 0, textareas: 1}
+        // — the splash is still up, it has the plus button and a plain <textarea>, and the hydrated
+        // contenteditable does not exist yet. Waiting on a chain that a pre-hydration shell can satisfy is
+        // not waiting at all.
+        let composerCandidates = manifest["composer"] ?? []
+        while composerWaited < 45 {
             var found = false
             for css in composerCandidates where !found {
-                if (try? await bridge.querySelector(css)) ?? nil != nil { found = true }
+                if (try? await bridge.querySelector(css)) ?? nil != nil {
+                    found = true
+                    matchedCandidate = css
+                }
             }
             if found { composerAppeared = true; break }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
@@ -116,8 +128,10 @@ public final class C1Runner: NSObject {
         }
         record(
             "the composer hydrated before the phases ran", composerAppeared,
-            "waited \(composerWaited)s for one of \(composerCandidates.count) candidates — a "
-                + "single-page app is 'loaded' well before it is usable"
+            "matched \(matchedCandidate) after \(composerWaited)s of "
+                + "\(composerCandidates.count) candidates — WHICH one matters: logged_in_marker is a "
+                + "chain, so a run can report signed-in on the plus button while the composer does not "
+                + "exist"
         )
 
         // Each phase is also asserted individually, because "the run completed" alone cannot
@@ -147,6 +161,18 @@ public final class C1Runner: NSObject {
         // bridge problem and a selector problem.
         let composerResolved = (try? await bridge.querySelector(manifest["composer"]?.first ?? "#none"))
             ?? nil
+        // The page's own account of itself at the moment of the fill. A splash-to-app transition
+        // invalidates a handle resolved a moment earlier, and `mobile-splash-screen` is a real testid on
+        // this page — so the URL and the counts are the evidence, not the inference.
+        let pageState = (try? await bridge.evaluateJSON(
+            "JSON.stringify({url: location.href,"
+                + " promptTextarea: document.querySelectorAll('#prompt-textarea').length,"
+                + " plusBtn: document.querySelectorAll('[data-testid=\"composer-plus-btn\"]').length,"
+                + " splash: document.querySelectorAll('[data-testid=\"mobile-splash-screen\"]').length,"
+                + " editables: document.querySelectorAll('[contenteditable=\"true\"]').length,"
+                + " textareas: document.querySelectorAll('textarea').length})"
+        )) as? String ?? "unreadable"
+        record("DIAGNOSTIC: what the page contained at fill time", true, pageState)
         record(
             "P1: composer written through the MODEL-updating path", path == "execCommand",
             "path=\(path.isEmpty ? "<empty>" : path), composer resolved="
