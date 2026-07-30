@@ -164,7 +164,7 @@ public final class C1Runner: NSObject {
             "first call tapped=\(firstTap), second call tapped=\(secondTap), still on=\(stillOn)"
         )
 
-        let path = (try? await driver.fillComposer("quantum error correction, 2026 review")) ?? ""
+        let path = (try? await driver.fillComposer(Self.probePrompt(platform))) ?? ""
         // The detail now carries the resolution state too. `path=` on its own says the fill produced
         // nothing without saying whether the element was even there, which is the difference between a
         // bridge problem and a selector problem.
@@ -196,16 +196,20 @@ public final class C1Runner: NSObject {
         record("P2: response arrived (late, as on a real platform)", arrived, "")
 
         let sources = (try? await driver.harvestSources()) ?? []
+        // The mock's >=3 exists to prove NON-ANCHOR harvesting and is kept exactly. A real cited answer
+        // may carry a single source, so demanding three there would fail a correct harvest — the mock's
+        // fixture shape is not a specification for the platforms.
+        let sourcesFloor = platform == "mockplatform" ? 3 : 1
         record(
-            "P3: sources harvested by TEXT, not href", sources.count >= 3,
-            "\(sources.count) sources — a link-only harvest finds 0 here"
+            "P3: sources harvested by TEXT, not href", sources.count >= sourcesFloor,
+            "\(sources.count) sources (floor \(sourcesFloor)) — a link-only harvest finds 0 on the mock"
         )
 
         // --- and now the whole thing, through the pipeline ------------------------
         //
         // Re-run from the top so the ordering invariants are exercised by the real loop rather than by
         // this script calling phases in an order it chose itself.
-        var pipeline = InAppPipeline(driver: driver, topic: "quantum error correction, 2026 review")
+        var pipeline = InAppPipeline(driver: driver, topic: Self.probePrompt(platform))
         var outcome: InAppPipeline.Outcome?
         do { outcome = try await pipeline.run(responseTimeout: responseTimeout) } catch { outcome = nil }
         record(
@@ -301,6 +305,20 @@ public final class C1Runner: NSObject {
         }
 
         writeVerdict()
+    }
+
+    /// The prompt the gate sends, which has to be able to PRODUCE what the gate then asserts.
+    ///
+    /// The mock answers anything with a fixed body that includes three non-anchor sources. A real platform
+    /// does not: "quantum error correction, 2026 review" is a plain chat question, so ChatGPT answers from
+    /// its own knowledge with NO citations — and `sources: 0` then reads as a harvest bug when it is
+    /// really a prompt that never asked for sources. Measured: an explicitly search-grounded prompt on the
+    /// same account produced a citation to github.com/swiftlang/swift/releases.
+    static func probePrompt(_ platform: String) -> String {
+        platform == "mockplatform"
+            ? "quantum error correction, 2026 review"
+            : "Search the web and answer in one short sentence, citing your sources: "
+                + "what is the newest released Swift version?"
     }
 
     /// True when every check passed. The caller turns this into an exit status — `exit()` inside the

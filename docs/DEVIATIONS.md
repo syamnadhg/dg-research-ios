@@ -563,3 +563,31 @@ content stability across polls — and picking between those wants one measureme
 
 Still outstanding beyond that: `enable_deep_research` needs to open the composer's plus menu first (the
 two-step `opener` concept), and the tools section arrives in a *second* async pass.
+
+#### P2 solved by content stability; P3 sources is the last one, and it is a TIMING question
+
+`awaitResponse` now accepts either `[data-state="complete"]` (the fixture's own signal, kept) **or content
+stability** — the response container's text unchanged across ~2s of polls, with an explicit guard that an
+EMPTY container never counts (measured: a real turn stayed empty for six minutes after a failed
+deep-research start, and stability alone would have called that complete).
+
+Stability is the general signal because it asks about the thing actually wanted — has the answer stopped
+growing — rather than a vendor's private markup, and it needs no per-platform capture. **`P2: response
+arrived` now passes on real ChatGPT.**
+
+Remaining: `P3 sources: 0`. Two changes were made and neither was sufficient, which is itself informative:
+
+* the gate's prompt is now search-grounded for real platforms, because "quantum error correction, 2026
+  review" is a plain chat question that produces no citations at all — `sources: 0` was reading as a harvest
+  bug when the prompt had never asked for sources;
+* the floor is platform-aware — the mock's `>= 3` proves NON-ANCHOR harvesting and is kept exactly, while a
+  real cited answer may legitimately carry one.
+
+Still 0, so the likely cause is **ordering, not extraction**: citations render *after* the prose, so content
+stability declares completion before they attach. That is a real tension in the design — stability is the
+right general completion signal and is nonetheless too eager for a harvest that depends on a later paint.
+The candidate fix is to make the harvest, not the wait, tolerant: poll `sources` briefly after completion
+before concluding zero. That keeps one honest completion signal instead of tuning it per consumer.
+
+⚠ Do not "fix" this by lowering the floor to 0. A harvest that accepts zero is the P1 incident restated —
+every click landing and extraction returning nothing, with the run reporting success.

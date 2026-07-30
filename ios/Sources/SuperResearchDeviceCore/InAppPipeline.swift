@@ -205,11 +205,40 @@ public struct InAppPhaseDriver {
                                   try? await Task.sleep(nanoseconds: UInt64($0 * 1e9))
                               }) async throws -> Bool {
         let deadline = now().addingTimeInterval(timeout)
+        var lastText: String?
+        var stableFor = 0
+        // Two accepted signals, and the ORDER is the point.
+        //
+        // ⚠ This used to poll ONLY `[data-state="complete"]` — an attribute the MOCK FIXTURE sets and no
+        // real platform does. So the wait could never succeed off the fixture: 240s made no difference
+        // because it was never a timeout problem, and the failure cascaded into `sources: 0`, which then
+        // reads as a harvest bug. Third mock-only signal found in this pipeline; the pattern is that
+        // anything the mock alone can satisfy is a check that cannot fail on the fixture and cannot pass on
+        // a platform.
+        //
+        // CONTENT STABILITY is the general signal, because it asks about the thing we actually want —
+        // "has the answer stopped growing" — rather than about a vendor's private markup. It works on every
+        // platform including the fixture, and it needs no per-platform capture. Requiring several
+        // consecutive identical reads is what keeps a mid-stream pause from reading as completion.
         while now() < deadline {
             if let done = try await page.evaluateJSON(
                 "!!document.querySelector('[data-state=\"complete\"]')"
             ) as? Bool, done {
                 return true
+            }
+            if let handle = try await optional("response_container"),
+               let text = try await page.innerText(handle) {
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                // An EMPTY container is not a finished answer. Measured on real ChatGPT: the turn
+                // resolves, visibly, and stays empty for six minutes after a failed deep-research start —
+                // stability alone would have called that complete.
+                if !trimmed.isEmpty, trimmed == lastText {
+                    stableFor += 1
+                    if stableFor >= 8 { return true }   // ~2s of no change at the 0.25s poll
+                } else {
+                    stableFor = 0
+                }
+                lastText = trimmed
             }
             await sleep(0.25)
         }
