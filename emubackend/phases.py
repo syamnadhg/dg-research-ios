@@ -22,11 +22,71 @@ page nothing touched, which is the failure mode this whole layer is built to mak
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
 from emubackend import harvest, intents
 from emubackend.selectors import ManifestError, SelectorEntry, SelectorManifest
+
+#: Reads the deep-research toggle's real state. Ported from the backend's ``_GEMINI_DR_STATE_JS`` and
+#: ``_cgpt_state_js`` rather than reinvented, because both carry fixes for failures already observed on
+#: real platforms — see :meth:`PlatformDriver._toggle_state` for what they were.
+#:
+#: Takes the control's accessible name because it differs per platform: "research" on Claude, "deep
+#: research" on ChatGPT and Gemini. Getting that wrong is not a near miss — searching Claude for "deep
+#: research" finds nothing at all.
+_TOGGLE_STATE_JS = """((name) => {
+    const norm = s => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+    const target = norm(name);
+
+    // The composer, lowest-on-screen first. Anchored deliberately: reading any old placeholder picks
+    // up a stale modal's, and the backend records that exact misread.
+    let ce = document.querySelector('rich-textarea div[contenteditable="true"]')
+          || document.querySelector('#prompt-textarea')
+          || document.querySelector('[data-testid="chat-input"]')
+          || null;
+    if (!ce) {
+        const cands = [...document.querySelectorAll(
+            'div[contenteditable="true"][data-placeholder], textarea[placeholder],'
+            + ' div[contenteditable="true"][aria-label]')].filter(e => e.offsetParent);
+        if (cands.length) {
+            cands.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+            ce = cands[0];
+        }
+    }
+    let placeholder = '';
+    if (ce) {
+        placeholder = norm(ce.getAttribute('data-placeholder')
+            || ce.getAttribute('placeholder') || ce.getAttribute('aria-label'));
+    }
+    const placeholderResearch = placeholder.includes('research')
+        || placeholder.includes('what do you want to');
+    // "ask gemini" / "write a message" / "ask chatgpt" — the platform asserting ordinary chat mode.
+    const placeholderChat = placeholder.includes('ask gemini') || placeholder.includes('ask chatgpt')
+        || placeholder.includes('write a message') || placeholder.includes('message ');
+
+    // Scoped to the form: an unscoped text search matches tooltips and help copy, which the backend
+    // notes false-positived this check once already.
+    const scope = (ce && ce.closest('form')) || document.querySelector('form') || document.body;
+    let pill = null;
+    for (const p of scope.querySelectorAll('button, [role="button"], span, div')) {
+        if (!p.offsetParent) continue;
+        if (norm(p.textContent) === target) { pill = p; break; }
+    }
+    let pressed = false, pillCls = '';
+    if (pill) {
+        pillCls = (pill.className || '').toString().toLowerCase();
+        pressed = pill.getAttribute('aria-pressed') === 'true'
+            || pill.getAttribute('aria-selected') === 'true'
+            || pill.getAttribute('aria-checked') === 'true'
+            || pill.getAttribute('data-active') === 'true'
+            || pillCls.includes('--selected') || pillCls.includes('selected')
+            || pillCls.includes('active') || pillCls.includes('--filled');
+    }
+    return { pillVisible: !!pill, pressed, placeholderResearch, placeholderChat,
+             placeholder: placeholder.slice(0, 60), pillCls: pillCls.slice(0, 100) };
+})(%s)"""
 
 __all__ = [
     "PhaseDeps",
@@ -163,18 +223,72 @@ class PlatformDriver:
                     reversible=True,
                 )
 
+    async def _toggle_state(self, key: str) -> dict:
+        """Read the deep-research toggle's REAL state — placeholder, pill, and pressed-ish markers.
+
+        Ported from the backend's own predicates, which are richer than the ARIA attributes this used
+        to read and richer for a reason it paid for. From
+        ``dg-research-backend/research.py::_GEMINI_DR_STATE_JS``, verbatim:
+
+            the DR pill's class (mat-tonal-button…) carries NO reliable pressed marker, so a
+            pressed-class-only check false-negatived an ACTIVE pill last E2E and the CUA fallback then
+            toggled the working DR OFF
+
+        That is precisely what this method used to do. ``aria-pressed`` is absent on all three
+        platforms' research controls, so the old reader returned False on a page where deep research
+        was *on*; the run then either tapped it off, or shadowed the failure and produced a shallow
+        answer under a deep-research label. Neither is visible in the output.
+
+        The signals the backend actually uses (``selfheal_intents.json`` outcome predicates
+        ``cgpt_state:active``, ``gemini_dr_state:placeholderResearch||pressed``,
+        ``claude_research_tool:on``):
+
+        * **the composer placeholder** — the most reliable of the three, because it is the platform
+          telling you which mode it is in. Gemini swaps "Ask Gemini" for "What do you want to
+          research", and that flip is both an on-signal and, in the other direction, a *positive*
+          off-signal.
+        * **a visible pill whose text is exactly the control's name** — scoped to the form, because an
+          unscoped ``innerText.includes('deep research')`` false-positives on tooltips and help copy
+          (a bug the backend also records fixing).
+        * **pressed-ish attributes and classes** — ``aria-pressed``/``aria-selected``/``data-active``
+          plus ``--selected``/``selected``/``active``/``--filled`` in the class list. Kept last and
+          treated as corroboration, never as the sole signal.
+        """
+        if self.page is None:
+            return {"on": False, "off": False, "reason": "no page"}
+        # Interpolated rather than passed as an argument: `PageShim.evaluate` takes a single
+        # expression, so a two-arg call type-errors against the real page and only shows up at runtime.
+        name = "research" if self.platform == "claude" else "deep research"
+        raw = await self.page.evaluate(_TOGGLE_STATE_JS % json.dumps(name))
+        if not isinstance(raw, dict):
+            return {"on": False, "off": False, "reason": "state probe returned nothing"}
+        placeholder_research = bool(raw.get("placeholderResearch"))
+        placeholder_chat = bool(raw.get("placeholderChat"))
+        pill_visible = bool(raw.get("pillVisible"))
+        pressed = bool(raw.get("pressed"))
+        if self.platform == "chatgpt":
+            on = pill_visible or placeholder_research
+        else:
+            on = placeholder_research or pressed or (pill_visible and pressed)
+        return {
+            "on": on,
+            # A positive off-signal, never `not on`. The composer saying "ask gemini" is the platform
+            # asserting chat mode; a pill that exists and reports itself unpressed is the same claim.
+            "off": (placeholder_chat and not on) or (pill_visible and not pressed and not on),
+            "placeholder": raw.get("placeholder"),
+            "pillVisible": pill_visible,
+            "pressed": pressed,
+        }
+
     def _toggle_on_predicate(self, key: str):
         async def _p() -> bool:
-            if self.page is None:
-                return False
+            # The manifest entry still has to resolve — a key with no captured selector must not
+            # report "on" off the back of a placeholder alone, or an uncaptured platform would look
+            # configured.
             entry = self.deps.manifest.entry(self.platform, key)
-            handle = await resolve(self.page, entry) if entry.resolvable else None
-            if handle is None:
+            if not entry.resolvable:
                 return False
-            state = await handle.get_attribute("aria-pressed")
-            if state is None:
-                state = await handle.get_attribute("aria-checked")
-            return state == "true"
+            return bool((await self._toggle_state(key)).get("on"))
 
         return _p
 
@@ -192,10 +306,7 @@ class PlatformDriver:
             handle = await resolve(self.page, entry) if entry.resolvable else None
             if handle is None:
                 return False
-            state = await handle.get_attribute("aria-pressed")
-            if state is None:
-                state = await handle.get_attribute("aria-checked")
-            return state == "false"
+            return bool((await self._toggle_state(key)).get("off"))
 
         return _p
 

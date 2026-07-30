@@ -188,6 +188,13 @@ class FakePage:
         self.clicks: list[str] = []
         self.typed: list[str] = []
         self.focused: str | None = None
+        #: Override the deep-research state probe *independently* of ``toggles``.
+        #:
+        #: Needed to test the not-found invariant at all. While the probe's answer was derived from
+        #: ``toggles``, emptying ``toggles`` also made the state say "cannot tell" — so a mutation
+        #: deleting the not-found guard still passed, because the second signal had gone quiet for the
+        #: same reason. bin/mutate.py caught it: the test was passing, for the wrong reason.
+        self.dr_state = None
 
     async def query_selector(self, css):
         if css in self.toggles:
@@ -201,6 +208,20 @@ class FakePage:
         return []
 
     async def evaluate(self, _js):
+        if "placeholderResearch" in _js:
+            if self.dr_state is not None:
+                return self.dr_state
+            # Mirrors whatever aria-pressed the fake toggles carry, so these tests keep asserting the
+            # same behaviour through the richer probe.
+            on = any(v == "true" for v in self.toggles.values())
+            return {
+                # Tracks the state, not mere presence — see the note in test_toggle_idempotence.
+                "pillVisible": on,
+                "pressed": on,
+                "placeholderResearch": on,
+                "placeholderChat": bool(self.toggles) and not on,
+                "placeholder": "what do you want to research" if on else "ask chatgpt",
+            }
         return "DIV" if self.focused else None
 
 
@@ -344,10 +365,23 @@ def test_the_off_signal_is_positive_not_the_inverse_of_the_predicate(tmp_path):
     phases.build_phase_bodies(deps, ("chatgpt",))
     intent = deps.registry.get("chatgpt.deep_research_toggle")
 
-    assert asyncio.run(intent.confirmed_off()) is True, "aria-pressed=false is a positive off"
-    page.toggles = {}  # the control can no longer be found at all
+    assert asyncio.run(intent.confirmed_off()) is True, "a chat placeholder is a positive off"
+
+    # The control can no longer be found, WHILE the page still reports a confidently-off state. That
+    # pairing is the whole test: the two signals are read independently and resolution failing has to
+    # win. Clearing `toggles` alone silenced the state too, so the mutation that deletes the not-found
+    # guard passed anyway.
+    #
+    # No pill and a chat placeholder — coherent for ChatGPT, whose on-signal is the pill being visible
+    # at all. A first attempt set pillVisible=True, which reads as ON, so `off` was False for that
+    # reason instead. A fixture has to be coherent with the platform it stands in for.
+    page.toggles = {}
+    page.dr_state = {
+        "pillVisible": False, "pressed": False, "placeholderResearch": False,
+        "placeholderChat": True, "placeholder": "ask chatgpt",
+    }
     assert asyncio.run(intent.confirmed_off()) is False, (
-        "not-found must never be treated as confirmed-off"
+        "not-found must never be treated as confirmed-off, however off the page looks"
     )
     assert asyncio.run(intent.outcome_predicate()) is False
 

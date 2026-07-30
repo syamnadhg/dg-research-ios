@@ -46,6 +46,23 @@ class FakePage:
         return [self.handle]
 
     async def evaluate(self, script: str, *args):
+        """Answer the deep-research state probe from the fake's own pressed flag.
+
+        The probe replaced a bare `aria-pressed` read, so a fake returning None made every toggle
+        look OFF — including the already-on case these tests exist to pin.
+        """
+        if "placeholderResearch" in script:
+            return {
+                # The pill tracks the state rather than being always-present: on ChatGPT a VISIBLE
+                # "deep research" pill in the composer IS the active signal (the backend's
+                # `_cgpt_state_js` treats it as sufficient), so a fake that shows it while off would
+                # report every toggle as already-on and this suite would never click anything.
+                "pillVisible": self.handle.pressed,
+                "pressed": self.handle.pressed,
+                "placeholderResearch": self.handle.pressed,
+                "placeholderChat": not self.handle.pressed,
+                "placeholder": "what do you want to research" if self.handle.pressed else "ask chatgpt",
+            }
         return None
 
 
@@ -147,3 +164,181 @@ def test_a_platform_without_a_toggle_reports_nothing_to_do():
         assert await driver.enable_deep_research() is None
 
     asyncio.run(body())
+
+
+# ======================================================================================
+# the predicate port — signals aria-pressed could never see
+# ======================================================================================
+
+
+class StatePage:
+    """A page whose deep-research state is whatever the probe is told to report.
+
+    Exists to pin the cases that motivated porting the backend's predicates: a control that is
+    genuinely ON while carrying no ARIA state at all. The old reader returned False on exactly this
+    page, and the backend records what that cost — from ``research.py::_GEMINI_DR_STATE_JS``:
+
+        the DR pill's class (mat-tonal-button…) carries NO reliable pressed marker, so a
+        pressed-class-only check false-negatived an ACTIVE pill last E2E and the CUA fallback then
+        toggled the working DR OFF
+    """
+
+    def __init__(self, state: dict):
+        self.state = state
+        self.clicks = 0
+
+    async def query_selector(self, css: str):
+        return self
+
+    async def query_selector_all(self, css: str):
+        return [self]
+
+    async def inner_text(self):
+        return "Deep research"
+
+    async def get_attribute(self, name: str):
+        return None
+
+    async def click(self):
+        self.clicks += 1
+
+    async def evaluate(self, script: str, *args):
+        if "placeholderResearch" in script:
+            return self.state
+        return None
+
+
+def _driver_with(state: dict, platform: str = "gemini"):
+    keys = {
+        "logged_in_marker": "#marker",
+        "composer": "#composer",
+        "send": "#send",
+        "deep_research_toggle": "#dr",
+        "sources": ".src",
+        "response_container": "#resp",
+    }
+    if platform == "claude":
+        keys["research_toggle"] = keys.pop("deep_research_toggle")
+        keys["artifact_panel"] = "#art"
+    if platform == "gemini":
+        keys["start_research"] = "#start"
+    page = StatePage(state)
+    manifest = SelectorManifest(
+        platforms={
+            platform: {
+                key: SelectorEntry(css=(css,), provenance="test") for key, css in keys.items()
+            }
+        }
+    )
+    deps = phases.PhaseDeps(
+        manifest=manifest,
+        registry=intents.IntentRegistry(),
+        history=harvest.HarvestHistory(),
+        pages={platform: page},
+        topic="t",
+    )
+    return phases.PlatformDriver(platform, deps), page
+
+
+OFF_STATE = {
+    "pillVisible": True, "pressed": False, "placeholderResearch": False,
+    "placeholderChat": True, "placeholder": "ask gemini",
+}
+#: The state that broke the old reader: on, with no ARIA anywhere.
+PLACEHOLDER_ONLY_ON = {
+    "pillVisible": True, "pressed": False, "placeholderResearch": True,
+    "placeholderChat": False, "placeholder": "what do you want to research",
+}
+
+
+def test_a_research_placeholder_reads_as_ON_without_any_aria_state():
+    driver, _ = _driver_with(PLACEHOLDER_ONLY_ON)
+    assert asyncio.run(driver._toggle_on_predicate("deep_research_toggle")()) is True
+
+
+def test_that_state_is_NOT_also_confirmed_off():
+    """The two predicates must not both fire — `off` authorises a click on a live control."""
+    driver, _ = _driver_with(PLACEHOLDER_ONLY_ON)
+    assert asyncio.run(driver._toggle_off_predicate("deep_research_toggle")()) is False
+
+
+def test_an_already_on_toggle_is_left_alone_on_the_placeholder_signal_alone():
+    """The whole point. Before the port this tapped the control and switched deep research OFF."""
+    driver, page = _driver_with(PLACEHOLDER_ONLY_ON)
+    outcome = asyncio.run(driver.enable_deep_research())
+    assert page.clicks == 0, "an ON control must not be tapped"
+    assert outcome.predicate_passed
+    assert "already enabled" in (outcome.reason or "")
+
+
+def test_a_chat_placeholder_is_a_positive_off_signal():
+    driver, _ = _driver_with(OFF_STATE)
+    assert asyncio.run(driver._toggle_off_predicate("deep_research_toggle")()) is True
+    assert asyncio.run(driver._toggle_on_predicate("deep_research_toggle")()) is False
+
+
+def test_an_ambiguous_state_is_neither_on_nor_confirmed_off():
+    """Neither placeholder recognised and no pressed marker: the honest answer is "I cannot tell".
+
+    Reporting confirmed-off here is the dangerous direction — it authorises a click on a control whose
+    state is unknown, which is how a working toggle gets switched off.
+    """
+    driver, _ = _driver_with(
+        {"pillVisible": False, "pressed": False, "placeholderResearch": False,
+         "placeholderChat": False, "placeholder": "something new"}
+    )
+    assert asyncio.run(driver._toggle_on_predicate("deep_research_toggle")()) is False
+    assert asyncio.run(driver._toggle_off_predicate("deep_research_toggle")()) is False
+
+
+def test_chatgpts_visible_pill_alone_reads_as_on():
+    """ChatGPT's signal differs from Gemini's: the pill being VISIBLE in the composer is active.
+
+    Per the backend's `_cgpt_state_js`, `active = pillVisible || placeholder.includes('research')`.
+    """
+    driver, _ = _driver_with(
+        {"pillVisible": True, "pressed": False, "placeholderResearch": False,
+         "placeholderChat": False, "placeholder": ""},
+        platform="chatgpt",
+    )
+    assert asyncio.run(driver._toggle_on_predicate("deep_research_toggle")()) is True
+
+
+def test_an_uncaptured_toggle_never_reads_as_on_however_good_the_placeholder():
+    """A platform with no captured selector must not look configured off a page-level signal."""
+    page = StatePage(PLACEHOLDER_ONLY_ON)
+    manifest = SelectorManifest(
+        platforms={"gemini": {"deep_research_toggle": SelectorEntry(provenance="uncaptured")}}
+    )
+    deps = phases.PhaseDeps(
+        manifest=manifest, registry=intents.IntentRegistry(),
+        history=harvest.HarvestHistory(), pages={"gemini": page}, topic="t",
+    )
+    driver = phases.PlatformDriver("gemini", deps)
+    assert asyncio.run(driver._toggle_on_predicate("deep_research_toggle")()) is False
+
+
+def test_the_control_name_differs_per_platform():
+    """Claude's control is "research"; ChatGPT's and Gemini's are "deep research".
+
+    Searching Claude for "deep research" finds nothing at all — not a near miss. The backend's
+    selfheal_intents.json records the accessible names, which is where this came from.
+    """
+    captured = {}
+
+    class Recorder(StatePage):
+        async def evaluate(self, script: str, *args):
+            if "placeholderResearch" in script:
+                captured["script"] = script
+            return self.state
+
+    for platform, key, expected in (
+        ("claude", "research_toggle", '"research"'),
+        ("gemini", "deep_research_toggle", '"deep research"'),
+    ):
+        driver, _ = _driver_with(OFF_STATE, platform=platform)
+        driver.page = Recorder(OFF_STATE)
+        asyncio.run(driver._toggle_on_predicate(key)())
+        assert captured["script"].rstrip().endswith(expected + ")"), (
+            f"{platform} must probe for {expected}, got …{captured['script'][-40:]!r}"
+        )

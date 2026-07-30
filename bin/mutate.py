@@ -29,6 +29,43 @@ PY = ROOT / ".venv/bin/python"
 
 # (file, old, new, test-node-id-that-MUST-fail, what-real-defect-this-simulates)
 MUTATIONS = [
+    # --- the deep-research predicate ported from the backend ---------------------------------
+    (
+        "emubackend/phases.py",
+        "            on = pill_visible or placeholder_research",
+        "            on = pill_visible and placeholder_research",
+        "test_toggle_idempotence.py::test_chatgpts_visible_pill_alone_reads_as_on",
+        "ChatGPT's visible DR pill no longer reading as active, so an ON toggle gets tapped OFF",
+    ),
+    (
+        "emubackend/phases.py",
+        "            on = placeholder_research or pressed or (pill_visible and pressed)",
+        "            on = pressed or (pill_visible and pressed)",
+        "test_toggle_idempotence.py::test_a_research_placeholder_reads_as_ON_without_any_aria_state",
+        "dropping the placeholder signal — the exact aria-only read that toggled a working DR off",
+    ),
+    (
+        "emubackend/phases.py",
+        '            "off": (placeholder_chat and not on) or (pill_visible and not pressed and not on),',
+        '            "off": not on,',
+        "test_toggle_idempotence.py::test_an_ambiguous_state_is_neither_on_nor_confirmed_off",
+        "confirmed-off degrading to `not on`, authorising a click on a control of unknown state",
+    ),
+    (
+        "emubackend/phases.py",
+        '        name = "research" if self.platform == "claude" else "deep research"',
+        '        name = "deep research"',
+        "test_toggle_idempotence.py::test_the_control_name_differs_per_platform",
+        "probing Claude for 'deep research', which matches nothing on that platform at all",
+    ),
+    (
+        "emubackend/phases.py",
+        "            if not entry.resolvable:\n                return False",
+        "            if not entry.resolvable:\n                return True",
+        "test_toggle_idempotence.py::test_an_uncaptured_toggle_never_reads_as_on_however_good_the_placeholder",
+        "an uncaptured platform reading as configured off a page-level placeholder",
+    ),
+
     # --- the guards added after the first real signed-in capture -----------------------------
     (
         "emubackend/selectors.py",
@@ -664,8 +701,12 @@ MUTATIONS = [
     ),
     (
         "emubackend/phases.py",
-        "            if handle is None:\n                return False\n            state = await handle.get_attribute(\"aria-pressed\")\n            if state is None:\n                state = await handle.get_attribute(\"aria-checked\")\n            return state == \"false\"",
-        "            state = await handle.get_attribute(\"aria-pressed\")\n            if state is None:\n                state = await handle.get_attribute(\"aria-checked\")\n            return state == \"false\"",
+        # Retargeted when the predicate was ported from the backend: the off-signal no longer reads
+        # aria-pressed, but the invariant it guards is unchanged — a control that cannot be FOUND must
+        # never read as confirmed-off, or a rotted selector authorises a click that switches a live
+        # control off (#709). Dropping the not-found guard is still the way to break it.
+        "            handle = await resolve(self.page, entry) if entry.resolvable else None\n            if handle is None:\n                return False\n            return bool((await self._toggle_state(key)).get(\"off\"))",
+        "            return bool((await self._toggle_state(key)).get(\"off\"))",
         "test_selectors_and_phases.py::test_the_off_signal_is_positive_not_the_inverse_of_the_predicate",
         "an unfindable toggle reading as confirmed-off, authorising a click that switches a live control OFF (#709)",
     ),
