@@ -772,3 +772,41 @@ Remaining: `sources: 0`. Deep research is now genuinely ON, so the answer is a D
 and the 240s timeout is short for that. That is a *budget* question, and it is also the point at which the gate
 stops being a gate: a check that waits 45 minutes is not one. The honest options are a separate long-running
 P3 check, or asserting sources against a web-search answer while asserting the DR *toggle* separately.
+
+## ✅ THE REAL-PLATFORM IN-APP RUN IS GREEN, TWICE
+
+```
+run 1: 0 failures     run 2: 0 failures     (run 2 inherits run 1's state — deep research already ON)
+verdict: platform=chatgpt  pass=True  manifest_source=selectors_mobile.json   ← not a --url wiring proof
+coverage gate: PASS — cleared=['chatgpt','mockplatform'] all covered by C1
+```
+
+The second run is the one that matters, and it is the reason this initiative existed: the first run leaves
+deep research ON, and the original bug was an unconditional tap turning it OFF on every subsequent run while
+reporting success. Run 2 reports `tapped=false` and `still on=true` — the property holds against a real
+platform, not just a mock whose toggle is a well-behaved `aria-pressed` control.
+
+The last check needed a scoping decision rather than a fix, and it is worth stating how it was drawn.
+`sources: 0` can mean two different things and collapsing them is wrong in both directions: failing when the
+answer genuinely has no citations makes the gate red for a reason that says nothing about the code, while
+accepting zero unconditionally is the P1 incident restated. So the page is asked independently whether the
+answer contains any citation node, and only a **disagreement** is a failure — harvested zero *and* citations
+present is the P1 shape and fails; harvested zero with none present is recorded as not-applicable, explicitly
+noting it is **not** a pass for the harvester (the mock's `>=3` non-anchor assertion is what proves that).
+
+Three coverage-gate tests then failed, and all three were snapshots of a world that had just changed:
+
+* one asserted all four platforms were still awaiting selectors — its own message said failing was the
+  intended signal once C1 had been run. It had been. Expectation moved once, deliberately, and it now asserts
+  the invariant instead: a platform reporting CLEARED must have a real in-app verdict.
+* one required the on-disk chatgpt verdict to *be* a wiring proof and refused it. That run has been replaced
+  by a real one, so asserting the old direction would demand the repo hold a worse artifact than it has. The
+  refusal is still tested — by the sibling that PLANTS a proof verdict in a temp dir, which is where a
+  provenance test belongs.
+* one proved the gate BLOCKS, by overriding the manifest and then reading the **live** artifacts dir. The
+  moment a real verdict landed, the gate correctly passed and the test failed for a reason unrelated to the
+  gate. `coverage_gate.py` gained `--c1-dir` so it can isolate. A test that reads shared mutable state proves
+  only what that state happened to be.
+
+Remaining, and neither is a mystery: claude / gemini / notebooklm selectors (8 keys, the method is proven),
+and the contract writes, which need the Firestore emulator alongside a real run.

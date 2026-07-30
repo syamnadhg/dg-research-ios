@@ -111,7 +111,7 @@ def test_the_gate_fails_when_a_cleared_platform_was_never_run_in_app(monkeypatch
     gate = _gate()
     manifest = FakeManifest({"chatgpt": {key: FakeEntry(True) for key in gate.REQUIRED}})
     monkeypatch.setattr(gate.selectors_mod, "load_manifest", lambda _path: manifest)
-    monkeypatch.setattr(gate, "c1_covered", lambda: {"mockplatform"})
+    monkeypatch.setattr(gate, "c1_covered", lambda *_: {"mockplatform"})
     monkeypatch.setattr(sys, "argv", ["coverage_gate.py"])
 
     assert gate.main() == 1, "a cleared-but-unrun platform must fail the gate"
@@ -122,21 +122,31 @@ def test_the_gate_passes_once_that_platform_has_been_run(monkeypatch):
     gate = _gate()
     manifest = FakeManifest({"chatgpt": {key: FakeEntry(True) for key in gate.REQUIRED}})
     monkeypatch.setattr(gate.selectors_mod, "load_manifest", lambda _path: manifest)
-    monkeypatch.setattr(gate, "c1_covered", lambda: {"mockplatform", "chatgpt"})
+    monkeypatch.setattr(gate, "c1_covered", lambda *_: {"mockplatform", "chatgpt"})
     monkeypatch.setattr(sys, "argv", ["coverage_gate.py"])
 
     assert gate.main() == 0
 
 
 def test_the_real_repo_state_is_what_the_report_claims():
-    """Guards against the summary drifting from the repo — the reason this gate exists."""
+    """Guards against the summary drifting from the repo — the reason this gate exists.
+
+    ⚠ This test used to assert that ALL FOUR platforms were still awaiting selectors, with the message "if
+    selectors have genuinely landed, run C1 against it; this test failing is the intended signal". They
+    landed and C1 was run: chatgpt is captured 7/7 and has a passing in-app verdict from the real manifest.
+    So the expectation moved — deliberately and once, rather than the test being relaxed. The invariant it
+    protects is unchanged: a platform that reports CLEARED must have a real in-app run behind it, which is
+    exactly what the next assertion checks.
+    """
     gate = _gate()
     manifest = gate.selectors_mod.load_manifest(None)
     gaps = gate.cleared_platforms(manifest)
     assert set(gaps) == {"chatgpt", "gemini", "claude", "notebooklm"}
-    assert all(missing for missing in gaps.values()), (
-        "a real platform reports as cleared — if selectors have genuinely landed, run C1 against it; "
-        "this test failing is the intended signal, not a nuisance"
+    assert not gaps["chatgpt"], "chatgpt is captured 7/7 — it should report no missing selectors"
+    for platform in ("gemini", "claude", "notebooklm"):
+        assert gaps[platform], f"{platform} still has uncaptured selectors and must report them"
+    assert "chatgpt" in gate.c1_covered(), (
+        "chatgpt clears C0 and MUST therefore have a real in-app verdict — clause 2 of the goal"
     )
 
 
@@ -167,6 +177,12 @@ def test_the_real_cli_exits_nonzero_when_a_cleared_platform_has_no_in_app_run(tm
             sys.executable,
             str(REPO / "bin" / "coverage_gate.py"),
             "--manifest", str(fixture),
+            # ⚠ ISOLATED from the repo's live artifacts. Without this the test read
+            # artifacts/c1/verdict-chatgpt.json, so once a REAL chatgpt run landed the gate correctly
+            # passed and this test — whose whole purpose is to prove the gate BLOCKS — failed for a reason
+            # unrelated to the gate. A test that reads shared mutable state proves only what that state
+            # happened to be.
+            "--c1-dir", str(tmp_path / "no-c1-verdicts"),
             "--out", str(out),
         ],
         capture_output=True,
@@ -295,13 +311,25 @@ def test_the_mock_platforms_own_fixture_is_still_credited(tmp_path, monkeypatch)
     assert gate.c1_covered() == {"mockplatform"}
 
 
-def test_the_real_repo_refuses_to_credit_the_chatgpt_wiring_proof():
-    """Against the ACTUAL artifacts on disk, which include a passing verdict-chatgpt.json."""
+def test_the_on_disk_chatgpt_verdict_is_real_coverage_not_a_wiring_proof():
+    """The same guard, now asserted in the direction the repo is actually in.
+
+    ⚠ This test previously required the on-disk `verdict-chatgpt.json` to be a WIRING PROOF and refused —
+    correct while the only chatgpt run had been `--url`-overridden against the fixture. That run has been
+    replaced by a real one: passing, from `selectors_mobile.json`, with no url override. Asserting the old
+    direction would now demand the repo hold a worse artifact than it has.
+
+    The refusal itself is still tested — by `test_a_wiring_proof_verdict_is_not_credited`, which PLANTS a
+    proof verdict in a temp dir rather than depending on what the repo last produced. That is where a
+    provenance test belongs; reading live artifacts made this one a snapshot of a moment.
+    """
     gate = _gate()
-    proof = REPO / "artifacts" / "c1" / "verdict-chatgpt.json"
-    if not proof.exists():
-        pytest.skip("no wiring-proof verdict present; run bin/c1_in_app.sh's proof invocation")
-    assert json.loads(proof.read_text())["pass"] is True, "the proof run should have passed"
-    assert "chatgpt" not in gate.c1_covered(), (
-        "a passing wiring-proof verdict must not be credited as real coverage"
+    verdict_path = REPO / "artifacts" / "c1" / "verdict-chatgpt.json"
+    if not verdict_path.exists():
+        pytest.skip("no chatgpt verdict on disk; run bin/c1_in_app.sh against chatgpt")
+    verdict = json.loads(verdict_path.read_text())
+    assert verdict["pass"] is True
+    assert "url overridden" not in verdict.get("manifest_source", ""), (
+        "a --url run is a wiring proof and must not be the artifact the repo ships"
     )
+    assert "chatgpt" in gate.c1_covered(), "a real passing verdict must be credited"

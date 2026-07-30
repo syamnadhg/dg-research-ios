@@ -52,7 +52,7 @@ def cleared_platforms(manifest) -> dict[str, list[str]]:
     return out
 
 
-def c1_covered() -> set[str]:
+def c1_covered(c1_dir: Path | None = None) -> set[str]:
     """Which platforms a C1 run has genuinely covered.
 
     Reads every `artifacts/c1/verdict-*.json`, so coverage accumulates across platforms instead of
@@ -66,7 +66,11 @@ def c1_covered() -> set[str]:
     `fixtures/manifests/`.
     """
     covered: set[str] = set()
-    directory = C1_VERDICT.parent
+    # Overridable so a TEST can isolate itself. The enforcement test used to override only the manifest and
+    # then read the LIVE artifacts dir, so the moment a real chatgpt verdict landed the test stopped
+    # exercising the block it exists to prove — it passed for a while and then failed for a reason that had
+    # nothing to do with the gate. A test that reads shared mutable state is a snapshot of a moment.
+    directory = c1_dir if c1_dir is not None else C1_VERDICT.parent
     if not directory.exists():
         return covered
     for path in sorted(directory.glob("verdict*.json")):
@@ -90,6 +94,13 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, default=None)
     parser.add_argument(
+        "--c1-dir",
+        type=Path,
+        default=None,
+        help="where to read verdict-*.json from; defaults to artifacts/c1. For tests that must not see "
+        "the repo's live artifacts.",
+    )
+    parser.add_argument(
         "--out",
         type=Path,
         default=None,
@@ -101,7 +112,7 @@ def main() -> int:
     gaps = cleared_platforms(manifest)
     cleared = {platform for platform, missing in gaps.items() if not missing}
     blocked = {platform: missing for platform, missing in gaps.items() if missing}
-    covered = c1_covered()
+    covered = c1_covered(args.c1_dir)
 
     # The mock is a platform in its own right and it is what C1 has cleared. It never appears in the
     # selector manifest (it is a fixture), so it is credited explicitly rather than inferred.

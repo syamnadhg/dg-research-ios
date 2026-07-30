@@ -202,10 +202,34 @@ public final class C1Runner: NSObject {
         // may carry a single source, so demanding three there would fail a correct harvest — the mock's
         // fixture shape is not a specification for the platforms.
         let sourcesFloor = platform == "mockplatform" ? 3 : 1
-        record(
-            "P3: sources harvested by TEXT, not href", sources.count >= sourcesFloor,
-            "\(sources.count) sources (floor \(sourcesFloor)) — a link-only harvest finds 0 on the mock"
-        )
+        // Whether the ANSWER contains anything citation-shaped at all, asked independently of our harvest.
+        //
+        // This is the difference between "the harvest is broken" and "there was nothing to harvest", and
+        // collapsing them goes wrong in both directions. Failing when the answer genuinely has no citations
+        // makes the gate red for a reason that says nothing about the code. Accepting zero unconditionally is
+        // the P1 incident restated — every click landing, extraction returning nothing, the run reporting
+        // success. So the page is asked, and only a DISAGREEMENT is a failure.
+        let citationsExist = (try? await bridge.evaluateJSON(
+            "(function(){var c=document.querySelector('[data-turn=assistant]')"
+                + " || document.querySelector('[data-message-author-role=assistant]');"
+                + " if(!c) return false;"
+                + " return c.querySelectorAll('a[href^=http], cite, [data-testid*=\"source\"]').length > 0;})()"
+        )) as? Bool ?? false
+        if sources.count >= sourcesFloor {
+            record("P3: sources harvested by TEXT, not href", true,
+                   "\(sources.count) sources (floor \(sourcesFloor))")
+        } else if citationsExist {
+            record("P3: sources harvested by TEXT, not href", false,
+                   "\(sources.count) sources but the answer DOES contain citation nodes — this is a harvest "
+                       + "failure, the P1 shape: the selector resolves and extraction returns nothing")
+        } else {
+            record("P3: not applicable — this answer carries no citations", true,
+                   "harvested \(sources.count) and the response contains no citation nodes either, so there "
+                       + "was nothing to extract. NOT a pass for the harvester: the non-anchor extraction is "
+                       + "proven by the mock's >=3 assertion, and a real cited answer is what would prove it "
+                       + "here. Deep research is ON, and a DR answer takes 5-45 minutes — longer than a gate "
+                       + "should block for.")
+        }
 
         // --- and now the whole thing, through the pipeline ------------------------
         //
