@@ -462,3 +462,31 @@ distinguishable rather than tangled:
 
 Worth stating plainly: had the generator not been fixed first, (1) would have been indistinguishable from
 it — a missing key and a closed menu both present as `tapped=false`.
+
+#### `composer resolved=false`: two hypotheses tested, one ruled out, and where it stands
+
+The `path=` failure was unexplained, so the runner now reports the composer's *resolution state* alongside
+the fill result — `path=<empty>, composer resolved=false` says the element was not there, which is a
+different problem from a fill that ran and did nothing. That distinction is the whole reason to instrument
+before guessing.
+
+Two hypotheses, both plausible, tested in order:
+
+1. **The composer had not hydrated.** `waitForReady` answers "did the URL load", and on a single-page app
+   that is true long before the app is usable — the same weakness as it once returning true for
+   `about:blank`. Added a poll for the composer itself. ⚠ Note how P0 hid this: `logged_in_marker` is a
+   *chain*, so it passed on `[data-testid=composer-plus-btn]` while `#prompt-textarea` may not have
+   existed. A run can report "signed in" and be unable to type.
+2. **The web view presented a different user agent.** `PlatformWebViews` pins an iPhone Safari 17 agent;
+   `C1Runner` created its `WKWebView` without one, so ChatGPT could serve it a different composer (the
+   fallback shell uses `#mobile-composer-prompt`, not `#prompt-textarea`). Pinned the same agent, because
+   a gate driving a different *rendering* than production is the class of error it exists to catch.
+
+**Result: neither fixed it. `composer resolved=false` persists, and hypothesis 2 is ruled out** — worth
+recording as a negative so it is not re-tried. The hydration poll passes at 0s, which is itself the next
+clue: it is satisfied by *some* candidate immediately, so the honest next step is to report **which**
+candidate matched and to re-read the URL at fill time, since a splash-to-app transition
+(`mobile-splash-screen` is a real testid on this page) would invalidate a handle resolved a moment earlier.
+
+Not guessing further. Both changes are kept because both are independently correct — the mock C1 still
+passes with zero failures — and the diagnostic is what makes the next round cheap.

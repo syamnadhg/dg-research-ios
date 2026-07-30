@@ -59,6 +59,17 @@ public final class C1Runner: NSObject {
         web = WKWebView(
             frame: CGRect(x: 0, y: 0, width: 402, height: 714), configuration: config
         )
+        // The SAME user agent the app's platform web views pin. Without it the gate drives a DIFFERENT
+        // RENDERING than production does, which is the exact class of error this gate exists to catch.
+        //
+        // Measured: with the default WKWebView agent, `#prompt-textarea` did not resolve at all
+        // (`composer resolved=false`) on a page that was demonstrably signed in — P0 passed. ChatGPT
+        // serves a different composer to an unrecognised agent; the anonymous/fallback shell uses
+        // `#mobile-composer-prompt` instead. So a manifest captured through the app's web views cannot be
+        // exercised by a web view that does not present as the app.
+        web.customUserAgent =
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
+            + "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
         super.init()
     }
 
@@ -79,6 +90,35 @@ public final class C1Runner: NSObject {
         record("runtime injected", injected == "installed" || injected == "already", injected)
 
         let driver = InAppPhaseDriver(platform: platform, manifest: manifest, texts: texts, page: bridge)
+
+        // Wait for the COMPOSER, not merely for the document.
+        //
+        // `waitForReady` answers "did the URL load", and on a single-page app that is true long before the
+        // app has hydrated. The failure it produced is instructive rather than obvious: `logged_in_marker`
+        // is a chain, so P0 passed on ChatGPT's `[data-testid=composer-plus-btn]` while `#prompt-textarea`
+        // did not exist yet — a run that reports "signed in" and then cannot type. Same family as
+        // `waitForReady` once returning true for `about:blank`: the readiness signal was weaker than the
+        // thing that depended on it.
+        //
+        // Polled rather than slept, and reported either way, so a timeout is legible instead of arriving
+        // later as an unexplained empty path.
+        var composerAppeared = false
+        var composerWaited = 0
+        let composerCandidates = (manifest["composer"] ?? []) + (manifest["logged_in_marker"] ?? [])
+        while composerWaited < 30 {
+            var found = false
+            for css in composerCandidates where !found {
+                if (try? await bridge.querySelector(css)) ?? nil != nil { found = true }
+            }
+            if found { composerAppeared = true; break }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            composerWaited += 1
+        }
+        record(
+            "the composer hydrated before the phases ran", composerAppeared,
+            "waited \(composerWaited)s for one of \(composerCandidates.count) candidates — a "
+                + "single-page app is 'loaded' well before it is usable"
+        )
 
         // Each phase is also asserted individually, because "the run completed" alone cannot
         // distinguish a real pass from a pipeline that skipped everything.
@@ -102,9 +142,15 @@ public final class C1Runner: NSObject {
         )
 
         let path = (try? await driver.fillComposer("quantum error correction, 2026 review")) ?? ""
+        // The detail now carries the resolution state too. `path=` on its own says the fill produced
+        // nothing without saying whether the element was even there, which is the difference between a
+        // bridge problem and a selector problem.
+        let composerResolved = (try? await bridge.querySelector(manifest["composer"]?.first ?? "#none"))
+            ?? nil
         record(
             "P1: composer written through the MODEL-updating path", path == "execCommand",
-            "path=\(path) — a textContent assignment would leave send disabled"
+            "path=\(path.isEmpty ? "<empty>" : path), composer resolved="
+                + "\(composerResolved != nil) — a textContent assignment would leave send disabled"
         )
 
         var sendOK = true
