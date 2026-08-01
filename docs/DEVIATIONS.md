@@ -875,3 +875,113 @@ throttling *syntax* was present, which passed against `polls % 20 == 1000000` �
 exceeds its modulus never fires, i.e. the watch silently disabled. It now parses both numbers and asserts the
 condition is *reachable*. Fifth instance this session of a test passing for a reason unrelated to what it
 protects.
+
+---
+
+## The Python substrate meets a real platform (Safari's cookie jar)
+
+Until the owner signed in **in Safari**, `bin/e2e_simulator.py` had only ever run against the mock. The
+Swift in-app path had run against real ChatGPT; the Python stack — `IOSSimulatorBackend`, `PageShim`,
+`phases`, `intents`, `pipeline`, the contract writes — had not. That gap is where these live.
+`backend.new_tab` goes through `simctl openurl`, so the page lands in Safari's jar; the app's jar is a
+separate one and cannot be shared.
+
+Six defects, each found by the real page and invisible against the mock. The pattern across all six is
+one sentence: **the mock is synchronous and stable, and a real platform is neither.**
+
+### 1. `opener` was parsed and then dropped on the floor
+
+`selectors.py` read the field onto `SelectorEntry`; `_tap` never consulted it. So the manifest correctly
+said "this control is behind a closed menu" and the driver looked for it in the closed state and raised
+`did not match anything` — for a selector that was right. Not a missing feature, a dropped one.
+
+Ported from the Swift path with all four mechanisms: tap the opener, **poll** for the target (ChatGPT's
+plus menu paints 3 items then 19, with `Deep research` at index 7), verify dismissal, re-establish
+composer readiness afterwards.
+
+### 2. Dismissal asked the wrong object — and the run's success signal read as failure
+
+The first version tested "is the target still findable" as a proxy for "is the menu still open". On real
+ChatGPT that proxy is permanently true: activating `Deep research` leaves a **"Deep research" pill in
+the composer**, and that control's manifest entry is a text match with no css. Measured — after
+activation there are two matches inside the form where there were none before. So P2 aborted having
+correctly done everything asked of it, and the thing it read as evidence of failure was the pill that
+proves it worked.
+
+The opener has a real answer. Measured on `composer-plus-btn`: `aria-expanded` false→true, `data-state`
+closed/open, `aria-controls` naming the popup. `_POPUP_STATE_JS` asks those, negative-first, and falls
+back to `aria-controls` before ever guessing from visible popup containers.
+
+### 3. `window.__sr` was injected into a document ChatGPT was about to throw away
+
+Measured: at **t+1.0s** after first paint, `document.readyState` goes `complete` → `interactive` **on the
+same URL**. ChatGPT replaces its own document. Anything injected before that goes with it.
+
+It did not surface as "the runtime is missing". It surfaced as `TypeError: undefined is not an object
+(evaluating 'window.__sr.events')` from a worker thread inside `geometry.calibrate`, pointing at the
+probe rather than at the wiped runtime. And the obvious fix fails: re-inject and immediately check, and
+the sentinel is present — because the doomed document is still the current one. Only **duration**
+distinguishes them, hence `ensure_runtime_stable`. Calibration is the one caller where a wipe is
+unrecoverable rather than retryable: it taps and then reads back the event that tap produced.
+
+### 4. Every wrapped intent was verified with no render tick
+
+`guarded_intent` evaluated `outcome_predicate` **once**, the instant the action returned. Correct for the
+mock, whose DOM updates synchronously on click. On live ChatGPT, in one run:
+
+* deep research genuinely turned **on** — menu self-closed, pill appeared — and the predicate asked
+  immediately said `false`. Asked four seconds later: `true`.
+* `send` was accepted and the answer arrived, and the predicate found no assistant turn yet.
+
+Both reported `predicate_passed=False` for actions that had plainly worked. A false negative on a
+**healthy** page is worse than a crash: with acting enabled it escalates an agent onto the one page that
+needed no help — and the backend has already paid for that once (a pressed-class-only check
+false-negativing an ACTIVE pill, after which the CUA fallback toggled the working DR back off).
+
+`acceptance_window` (default 5s, polled) fixes the whole intent layer at once. It is an upper bound, not
+a delay: it returns the moment the predicate passes, so the mock pays nothing.
+
+### 5. Content stability accepted a page that had not started answering
+
+`await_response` was written with two accept signals — `[data-state=complete]` (mock-only among these
+platforms) and content stability. Both were satisfied by this: the assistant turn read **`Pro
+thinking`**, 27 characters, held for more than six seconds, while **`Stop answering`** was on screen. Not
+empty, and perfectly stable. The harvest then found nothing and `harvest.judge` reported read drift —
+about selectors that were correct.
+
+The fix is the platform's own in-flight control as a **veto**, ported from the backend's
+`is_agent_generating` with its selector sets, including the Gemini caveat (#897b: its collapsed composer
+often shows no stop button mid-run, so a stop-button-only check reads a live DR run as finished).
+Stability is a necessary condition for completion and never a sufficient one — the text can lie about
+being finished, the stop button cannot.
+
+⚠ And the veto exposed a bug in my own new code: the stability clock was settable **only by a text
+change**, so once generation reset it, an unchanging placeholder could never restart it and the wait
+could never complete. Found only because the test asserts *when* completion happens rather than that it
+does.
+
+### 6. The composer went stale between resolving it and filling it
+
+`fill` is three round trips (tap to focus, select-all, insert). Right after deep research went off→on,
+the re-mount was still churning and `type_brief` died with `StaleHandleError: the node was removed or the
+page navigated ... re-query the selector`. Two changes: readiness now requires the composer to **survive
+a settle window** (the third place in this codebase where presence turned out not to be enough —
+`ensure_runtime_stable` and `await_response` are the others), and `type_brief` does what the error
+message says, re-querying up to a bounded number of attempts.
+
+### What the harness caught in my own tests, again
+
+Six of the tests written for the above passed for reasons unrelated to what they protect, and
+`bin/mutate.py` found every one:
+
+* `test_p3_waits_before_harvesting` asserted a **log line** that the mutation still writes.
+* two mutations named a test that *expects* a failure, so breaking the guard kept it green.
+* two readiness tests used `timeout=0.5` against a default `settle=1.0`, so they returned False whatever
+  the predicate said — vacuous assertions.
+* the runtime-stability test's `reads > 4` was squeaked past by an accept-on-first-presence mutation that
+  needed exactly 5 reads.
+* two fixtures never reached the mutated branch at all, because a *second* guard blocked the path first.
+
+The general lesson, stated once: **when two guards protect the same outcome, a test that asserts only
+the outcome cannot tell you which guard is load-bearing.** Assert the mechanism — timing, call counts,
+which object was asked — not just the verdict.

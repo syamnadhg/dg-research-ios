@@ -117,12 +117,60 @@ final class PairingController: ObservableObject {
     ///
     /// Also clears any local identity: an interrupted flow can leave one for a device that was never
     /// confirmed, and heartbeating a document that does not exist gets nobody anywhere.
+    ///
+    /// ⚠ This mints a NEW device document, and that has a measured cost. Sitting under a QR that could
+    /// not work (the frontend's sign-in redirect discards `?repair=`), it was tapped once per failed
+    /// attempt — and seven `devices/*` documents accumulated in one evening, five of them never
+    /// claimed. Every one is a real Firestore write against the owner's project. So "start over" is no
+    /// longer the only exit: :meth:`cancel` leaves without minting anything, and it is the one offered
+    /// at every stage.
     func restart() async {
         backend.resetPairing()
         pairCode = ""
         deviceID = ""
         stage = .pair
         await beginPairing()
+    }
+
+    /// Abandon pairing entirely — the terminal's Ctrl-C.
+    ///
+    /// The distinction from :meth:`restart` is the whole point: restart asks for another code (another
+    /// document), cancel asks for nothing. Before this existed the only way out of a stuck flow was to
+    /// start over, which is why abandoned documents accumulated instead of ending.
+    ///
+    /// ⚠ **What "cleans up the device" can honestly mean here.** During pairing the app holds a
+    /// `deviceId` and a `pollSecret`, and *no* Firebase credential — the custom token only arrives once
+    /// the owner claims the code. So the device cannot delete its own document: that is
+    /// `unpair-self` Branch 1, which authenticates as the synthetic device user. What makes the
+    /// document go away is the TTL `initiate-pair` stamps on it (`expireAt`, 24h). Cancel therefore:
+    ///
+    /// * stops the heartbeat and clears the Keychain identity, so nothing beats against a document
+    ///   that is about to be reaped, and
+    /// * **does not mint a replacement**, which is the actual leak.
+    ///
+    /// A cancel that deleted the document immediately would need an unauthenticated endpoint keyed on
+    /// the `pollSecret`. That is a frontend change and cannot be made from here (A8), so this is
+    /// deliberately the honest subset rather than a claim the app cannot keep.
+    func cancel() async {
+        busy = true
+        let abandoned = deviceID
+        backend.resetPairing()
+        pairCode = ""
+        deviceID = ""
+        confirmWindow = nil
+        anthropicSaved = false
+        geminiSaved = false
+        loginTarget = nil
+        loginState = [:]
+        onStartup = true
+        // Back to the landing screen, not to stage 1 — `started` is what the landing screen keys on,
+        // and leaving it true would drop the user straight back into a flow they just cancelled.
+        started = false
+        stage = .pair
+        busy = false
+        status = abandoned.isEmpty
+            ? "Cancelled. Nothing was created."
+            : "Cancelled. The unclaimed code expires by itself within 24 hours."
     }
 
     // MARK: Stage 2
@@ -278,6 +326,24 @@ struct PairingFlowView: View {
                 Text(controller.stage.title.uppercased())
                     .font(DS.F.mono(11, .semibold)).foregroundStyle(DS.C.textSecondary)
                 Spacer()
+                // ⚠ In the HEADER, deliberately, because the header is the one thing every stage
+                // renders. Putting cancel inside the stage bodies means five buttons, and the stage
+                // that gets forgotten is the stage someone is stuck on — stage 5 shipped with no exit
+                // at all for exactly that reason. One button, one place, always reachable.
+                //
+                // Not styled as destructive: cancelling an unfinished pair destroys nothing the user
+                // has (the document self-expires, the logins are untouched), and dressing it in red
+                // would make the safe exit look like the dangerous one.
+                if controller.started && controller.stage != .ready {
+                    Button { Task { await controller.cancel() } } label: {
+                        Text("Cancel")
+                            .font(DS.F.mono(11, .semibold))
+                            .foregroundStyle(DS.C.textTertiary)
+                    }
+                    .frame(minHeight: DS.S.touch)
+                    .accessibilityLabel("Cancel pairing")
+                    .accessibilityHint("Abandons this pair attempt and returns to the start")
+                }
             }
             // A rule per stage rather than a percentage: five discrete steps are what the user is
             // actually counting.

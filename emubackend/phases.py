@@ -22,7 +22,9 @@ page nothing touched, which is the failure mode this whole layer is built to mak
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -114,6 +116,68 @@ __all__ = [
     "classify_response",
     "resolve",
 ]
+
+#: Is the popup this opener controls currently open?
+#:
+#: Asked of the OPENER rather than of the thing inside the popup, because the thing inside can outlive
+#: the popup: activating ChatGPT's "Deep research" menu item leaves a "Deep research" pill in the
+#: composer, so a text-matched target stays findable and a target-based check can never see the menu
+#: close. Measured attributes on chatgpt.com's ``composer-plus-btn``: ``aria-expanded`` false/true,
+#: ``data-state`` closed/open, and ``aria-controls`` naming the popup element.
+#:
+#: The ordering is deliberate: a NEGATIVE state attribute is decisive and checked first, because the
+#: generic fallback ("is any popup container on screen") is the weakest signal and would otherwise
+#: report a *different* component's open dialog as this opener's menu.
+_POPUP_STATE_JS = """((openerCss) => {
+    const op = document.querySelector(openerCss);
+    if (!op) return {open: false, why: 'the opener itself is gone'};
+    const expanded = op.getAttribute('aria-expanded');
+    const state = op.getAttribute('data-state');
+    if (expanded === 'false' || state === 'closed') {
+        return {open: false, why: expanded === 'false' ? 'aria-expanded=false' : 'data-state=closed'};
+    }
+    if (expanded === 'true' || state === 'open') {
+        return {open: true, why: expanded === 'true' ? 'aria-expanded=true' : 'data-state=open'};
+    }
+    // No state of its own. Prefer the element it explicitly names over guessing.
+    const id = op.getAttribute('aria-controls');
+    const popup = id ? document.getElementById(id) : null;
+    if (popup) return {open: !!popup.offsetParent, why: 'aria-controls target visibility'};
+    const containers = [...document.querySelectorAll('[role=menu],[role=listbox],[role=dialog]')]
+        .filter(m => !!m.offsetParent);
+    return {open: containers.length > 0, why: containers.length + ' visible popup container(s)'};
+})(%s)"""
+
+
+#: Is the platform still working on the answer?
+#:
+#: Ported from the backend's ``is_agent_generating`` rather than invented, selector sets included. It is
+#: the POSITIVE in-flight signal, and it is what distinguishes "the text stopped changing because the
+#: answer is finished" from "the text stopped changing because the placeholder has not changed yet".
+#:
+#: ⚠ Measured on live ChatGPT with deep research on: the assistant turn read ``Pro thinking`` — 27
+#: characters — and held that for well over six seconds while ``Stop answering`` was on screen. Content
+#: stability accepted it as complete, the harvest found nothing, and the run reported read drift about
+#: selectors that were correct. Stability is a necessary condition for completion, never a sufficient
+#: one; only the platform can say it has stopped.
+#:
+#: ⚠ Gemini's entry is broader on purpose, carrying the backend's own caveat (#897b): its collapsed
+#: composer often shows NO stop button mid-run, so a stop-button-only check reads a live deep-research
+#: run as finished.
+_GENERATING_SELECTORS = {
+    "chatgpt": (
+        'button[data-testid="stop-button"], button[aria-label*="Stop"], [data-testid*="loading"]'
+    ),
+    "gemini": (
+        'button[aria-label*="Stop"], [role="button"][aria-label*="stop" i], '
+        '[jsname] [role="progressbar"], [data-is-streaming="true"], '
+        ".loading-indicator, .streaming"
+    ),
+    "claude": 'button[aria-label*="Stop"], [data-testid*="stop"]',
+    "notebooklm": 'button[aria-label*="Stop"], [role="progressbar"]',
+}
+_GENERATING_FALLBACK = 'button[aria-label*="Stop"]'
+
 
 class PlatformStateError(RuntimeError):
     """The PAGE is in a failed state — distinct from our selectors being wrong.
@@ -460,31 +524,181 @@ class PlatformDriver:
 
     # -- actions -----------------------------------------------------------------
 
+    async def _open_then_find(self, entry: SelectorEntry, timeout: float = 8.0):
+        """Tap the target's ``opener`` and then POLL for the target.
+
+        ⚠ Polled, not read once, and the reason is measured rather than defensive: ChatGPT's plus menu
+        renders in **two passes** — a first paint with 3 items, then the tools/connectors section
+        arriving asynchronously to make 19, with ``Deep research`` at index 7. A single read after the
+        opener tap sees the 3-item menu and concludes the control does not exist on mobile. I drew that
+        exact wrong conclusion twice from script-driven samples before a real HID tap showed all 19.
+        """
+        if not entry.opener:
+            return None
+        opener = await self.page.query_selector(entry.opener)
+        if opener is None:
+            raise ManifestError(
+                f"{self.platform}: the opener {entry.opener!r} did not match anything, so the "
+                f"control it guards can never be reached. An opener that has gone missing is a "
+                f"read-drift signal about the opener, not about the target."
+            )
+        await opener.click()
+        deadline = time.monotonic() + timeout
+        while True:
+            handle = await resolve(self.page, entry)
+            if handle is not None:
+                return handle
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(0.3)
+
+    async def _popup_open(self, opener_css: str) -> dict:
+        """Ask the OPENER whether its popup is open."""
+        return await self.page.evaluate(_POPUP_STATE_JS % json.dumps(opener_css)) or {}
+
+    async def _dismiss_opener(self, entry: SelectorEntry, timeout: float = 6.0) -> bool:
+        """Close the opener's popup and VERIFY it closed.
+
+        Needed because an open menu is not merely untidy — it **covers the send button**, so the very
+        next phase taps the overlay instead and fails for a reason that points at send. Measured: the
+        first time the opener mechanism landed it regressed the run twice this way.
+
+        ⚠ The question is asked of the **opener**, not of the target, and the first version got that
+        wrong in a way real ChatGPT exposed immediately. It tested "is the target still findable" as a
+        proxy for "is the menu still open" — but enabling deep research CREATES a "Deep research" pill
+        in the composer, and the manifest entry for that control is a text match with no css. So the
+        proxy stayed true forever: the run's own **success signal** was being read as evidence of
+        failure, and P2 aborted after correctly doing everything it was asked to do.
+
+        The opener has a real answer. Measured on chatgpt.com: ``composer-plus-btn`` carries
+        ``aria-expanded`` (``false`` -> ``true``) and ``data-state`` (``closed`` -> ``open``), plus
+        ``aria-controls`` naming the popup. Those describe the popup itself rather than standing in for
+        it.
+        """
+        if not entry.opener:
+            return True
+        deadline = time.monotonic() + timeout
+        while True:
+            state = await self._popup_open(entry.opener)
+            if not state.get("open"):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await self.page.keyboard.press("Escape")
+            await asyncio.sleep(0.4)
+
+    async def await_composer_ready(
+        self, timeout: float = 20.0, settle: float = 1.0
+    ) -> bool:
+        """Wait until the composer is present, interactable, and STILL THERE a moment later.
+
+        ⚠ **Readiness is not a one-time fact.** Enabling deep research on ChatGPT changes the URL, and
+        the composer re-mounts — so a run that established readiness once, at the top, then types into
+        a handle from before the navigation, types into nothing.
+
+        The predicate names the composer specifically and nothing else. An earlier version asked a
+        *chain* (marker or composer or …), which is right for resolution and wrong for readiness: any
+        weak member satisfies it, so a splash shell with a logged-in marker and no composer reported
+        ready.
+
+        ⚠ ``settle`` is the third time this codebase has learned that presence is not enough —
+        ``ensure_runtime_stable`` and ``await_response`` are the other two. Measured: on the run where
+        deep research went off -> on, readiness passed, and ``type_brief`` then died with
+        ``StaleHandleError: the node was removed or the page navigated``. The composer was there when
+        asked and gone a moment later, because the activation's re-mount had not finished churning. A
+        composer that survives a settle window is one the next step can actually use.
+        """
+        entry = self.deps.manifest.entry(self.platform, "composer")
+        if not entry.resolvable or self.page is None:
+            return False
+        deadline = time.monotonic() + timeout
+        present_since: float | None = None
+        while True:
+            ready = False
+            handle = await resolve(self.page, entry)
+            if handle is not None:
+                try:
+                    ready = bool(await handle.is_visible())
+                # ⚠ RuntimeError, not Exception. A handle going stale between resolve and read is an
+                # ordinary race during a re-mount — that is what this tolerates (StaleHandleError is a
+                # RuntimeError). A bare `except Exception` also swallowed AttributeError, which turned
+                # "this page object is missing is_visible" into "the composer never became ready" —
+                # a wiring bug reported as a platform symptom, and it cost four test failures to see.
+                except RuntimeError:
+                    ready = False
+            if not ready:
+                present_since = None
+            elif present_since is None:
+                present_since = time.monotonic()
+            elif time.monotonic() - present_since >= settle:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.4)
+
     async def _tap(self, key: str) -> None:
         entry = self.deps.manifest.require(self.platform, key)
         handle = await resolve(self.page, entry)
+        opened = False
+        if handle is None and entry.opener:
+            # The manifest declares a two-step path for a reason: the control is inside a CLOSED menu,
+            # so "did not match anything" is the expected first reading, not a failure.
+            handle = await self._open_then_find(entry)
+            opened = handle is not None
         if handle is None:
             raise ManifestError(
                 f"{self.platform}.{key} did not match anything on the page. Selectors tried: "
                 f"{list(entry.css)}"
                 + (f", text~={entry.text_contains!r}" if entry.text_contains else "")
+                + (
+                    f" — including after tapping its opener {entry.opener!r}"
+                    if entry.opener
+                    else ""
+                )
             )
         await handle.click()
+        if opened and not await self._dismiss_opener(entry):
+            raise ManifestError(
+                f"{self.platform}.{key}: tapped it, but its opener's popup would not close. Leaving "
+                f"it open breaks the NEXT phase — an open menu covers the send button, so send taps "
+                f"the overlay and the failure reads as a send problem."
+            )
 
     async def focus_composer(self) -> intents.IntentOutcome:
         return await intents.guarded_intent(
             self.deps.registry, f"{self.platform}.focus_composer", lambda: self._tap("composer")
         )
 
-    async def type_brief(self, text: str) -> None:
+    async def type_brief(self, text: str, attempts: int = 3) -> None:
+        """Fill the composer, re-querying it if it is replaced mid-fill.
+
+        ⚠ The retry is the error message's own instruction, not a shrug. ``fill`` is three round trips
+        (tap to focus, select-all, insert), and a composer re-mounting between any two of them fails
+        with ``StaleHandleError: the node was removed or the page navigated and the runtime was
+        re-injected; re-query the selector``. Measured on real ChatGPT immediately after deep research
+        went off -> on. Re-querying is exactly the prescribed response, and doing it here is what makes
+        the churn a non-event instead of a failed run.
+
+        Bounded, because an unbounded retry against a composer that keeps vanishing is an infinite loop
+        wearing a fix. Three attempts, then the stale error propagates with its own diagnosis intact.
+        """
         entry = self.deps.manifest.require(self.platform, "composer")
-        handle = await resolve(self.page, entry)
-        if handle is None:
-            raise ManifestError(f"{self.platform}.composer vanished before typing")
-        # fill() focuses by a real trusted tap and then uses the editor-aware path, which is what
-        # ProseMirror-style composers require — a plain value assignment leaves their model empty
-        # and the send control disabled.
-        await handle.fill(text)
+        for attempt in range(attempts):
+            handle = await resolve(self.page, entry)
+            if handle is None:
+                raise ManifestError(f"{self.platform}.composer vanished before typing")
+            try:
+                # fill() focuses by a real trusted tap and then uses the editor-aware path, which is
+                # what ProseMirror-style composers require — a plain value assignment leaves their
+                # model empty and the send control disabled.
+                await handle.fill(text)
+                return
+            except RuntimeError:
+                # StaleHandleError is a RuntimeError; ManifestError is a ValueError, so this cannot
+                # swallow a manifest problem.
+                if attempt == attempts - 1:
+                    raise
+                await self.await_composer_ready()
 
     async def send(self) -> intents.IntentOutcome:
         return await intents.guarded_intent(
@@ -523,6 +737,121 @@ class PlatformDriver:
                 lambda k=key: self._tap(k),
             )
         return None
+
+    async def is_generating(self) -> bool:
+        """Is the platform still producing the answer? Its own controls decide, not our text reading."""
+        if self.page is None:
+            return False
+        css = _GENERATING_SELECTORS.get(self.platform, _GENERATING_FALLBACK)
+        return bool(await self.page.evaluate(f"!!document.querySelector({json.dumps(css)})"))
+
+    async def await_response(
+        self,
+        timeout: float = 240.0,
+        stable_for: float = 6.0,
+        poll: float = 1.0,
+    ) -> dict:
+        """Wait for the response to be **complete**, and say why the wait ended.
+
+        ⚠ This did not exist, and its absence was invisible for exactly as long as the only platform was
+        the mock. ``p3_harvest`` ran immediately after ``p2``'s send; the mock answers in under a second,
+        so sources were always there. A real deep-research run takes minutes — the same code harvests an
+        empty container, and ``harvest.judge`` then reports read drift, sending the agent to repair
+        selectors that were never wrong.
+
+        Two accept signals and one veto, and every one of the three was earned by a measured failure:
+
+        * ``[data-state=complete]`` — decisive where it exists, but **mock-only** among the platforms
+          measured here. Trusting it exclusively means waiting the full timeout on every real run.
+        * **content stability** — the text stops changing. Which is why the empty guard below is not
+          belt-and-braces: an empty container is *perfectly stable*, and live ChatGPT produced a turn
+          that stayed empty for six minutes after a Retry click that "succeeded". Stability without
+          content is the signature of that failure, not evidence of completion.
+        * ⚠ **the platform's own in-flight control vetoes both** (:meth:`is_generating`). Stability is a
+          necessary condition for completion and never a sufficient one. Measured on live ChatGPT with
+          deep research on: the assistant turn read ``Pro thinking`` — 27 characters — and held it for
+          more than six seconds while ``Stop answering`` was on screen. Both guards above were satisfied
+          by a page that had not started answering: non-empty, and stable. The harvest then found
+          nothing and the run reported read drift about selectors that were correct. The text can lie
+          about being finished; the stop button cannot.
+
+        Errors are raised early rather than waited out: the platform saying "Failed to fetch template"
+        will not become an answer in another four minutes, and burning the timeout hides the reason.
+        """
+        entry = self.deps.manifest.entry(self.platform, "response_container")
+        if not entry.resolvable or self.page is None:
+            return {"done": False, "reason": "response_container not captured"}
+        deadline = time.monotonic() + timeout
+        last_text: str | None = None
+        stable_since: float | None = None
+        polls = 0
+        while True:
+            polls += 1
+            # ⚠ Asked BEFORE any accept signal is considered, because it overrides all of them. A
+            # platform that says it is still working is still working, whatever the DOM text looks like.
+            generating = await self.is_generating()
+            if generating:
+                # The clock restarts: time spent generating is not time spent stable.
+                stable_since = None
+            handle = await resolve(self.page, entry)
+            if handle is not None and not generating:
+                state = await handle.get_attribute("data-state")
+                if state == "complete":
+                    return {"done": True, "reason": "data-state=complete", "polls": polls}
+                text = (await handle.inner_text()) or ""
+                # Asked periodically rather than every poll: it is a whole-container text read, and a
+                # 240s wait at 1s polls would run it 240 times to catch a condition that does not
+                # arrive mid-second.
+                if polls % 10 == 0:
+                    health = classify_response(text)
+                    if health["state"] == "error":
+                        raise PlatformStateError(
+                            f"{self.platform}: the platform reported an error while we waited "
+                            f"(matched {health['matched']!r}"
+                            + (
+                                f", recovery offered: {health['recovery_offered']}"
+                                if health.get("recovery_offered")
+                                else ", no recovery control offered"
+                            )
+                            + f"). Waiting out the remaining timeout would hide the reason."
+                        )
+                # ⚠ `or stable_since is None` is load-bearing, not defensive. The clock is reset every
+                # time generation resumes — and it used to be settable ONLY by a text CHANGE, so after a
+                # reset on an unchanging placeholder there was nothing left to restart it and the wait
+                # could never complete. Found by the test that asserts WHEN completion happens: whenever
+                # there is no clock, start one.
+                if text != last_text or stable_since is None:
+                    last_text, stable_since = text, time.monotonic()
+                elif (
+                    stable_since is not None
+                    and text.strip()  # ⚠ the empty guard — see the docstring
+                    and time.monotonic() - stable_since >= stable_for
+                ):
+                    return {
+                        "done": True,
+                        "reason": f"content stable for {stable_for}s",
+                        "polls": polls,
+                        "chars": len(text),
+                    }
+            if time.monotonic() >= deadline:
+                return {
+                    "done": False,
+                    "reason": (
+                        f"still not complete after {timeout}s"
+                        + (
+                            " — the platform is STILL GENERATING, so this is a timeout that wants a"
+                            " longer budget, not a broken page"
+                            if generating
+                            else " — the container is present but EMPTY, which is the shape of a"
+                            " platform-side stall rather than a slow answer"
+                            if last_text is not None and not last_text.strip()
+                            else ""
+                        )
+                    ),
+                    "polls": polls,
+                    "generating": generating,
+                }
+            await asyncio.sleep(poll)
 
     async def harvest_sources(self) -> harvest.HarvestVerdict:
         # Check the response's HEALTH before extracting anything from it.
@@ -574,8 +903,19 @@ class PlatformDriver:
 # --------------------------------------------------------------------------------------
 
 
-def build_phase_bodies(deps: PhaseDeps, platforms: tuple[str, ...]):
-    """Return P0–P3 bodies bound to *deps*, suitable for :func:`emubackend.pipeline.run_pipeline`."""
+def build_phase_bodies(
+    deps: PhaseDeps,
+    platforms: tuple[str, ...],
+    *,
+    response_timeout: float = 240.0,
+):
+    """Return P0–P3 bodies bound to *deps*, suitable for :func:`emubackend.pipeline.run_pipeline`.
+
+    ``response_timeout`` is a parameter rather than a constant because the two platforms these bodies
+    run against differ by an order of magnitude — the mock answers in under a second, a real
+    deep-research run takes minutes. Hardcoding the real value makes every mock gate wait minutes to
+    fail; hardcoding the mock value makes every real run fail at 20 seconds.
+    """
 
     drivers = {p: PlatformDriver(p, deps) for p in platforms}
 
@@ -598,27 +938,51 @@ def build_phase_bodies(deps: PhaseDeps, platforms: tuple[str, ...]):
     async def p1_brief(_ctx) -> None:
         """P1 — put the topic into one platform and capture the brief."""
         driver = drivers[platforms[0]]
+        if not await driver.await_composer_ready():
+            raise ManifestError(
+                f"{driver.platform}: the composer never became ready, so there is nothing to type "
+                f"into. A page that renders is not a page that is interactable."
+            )
         await driver.focus_composer()
         await driver.type_brief(deps.topic)
         await driver.send()
         deps.log.append(f"p1:{driver.platform}:brief_sent")
 
     async def p2_deep_research(_ctx) -> None:
-        """P2 — enable deep research per platform and dispatch."""
+        """P2 — enable deep research per platform and dispatch.
+
+        ⚠ Composer readiness is re-established **after** enabling deep research, not once at the top.
+        On ChatGPT that step navigates and the composer re-mounts, so the pre-navigation composer is a
+        dead handle — typing into it succeeds silently and sends nothing.
+        """
         for name, driver in drivers.items():
             await driver.enable_deep_research()
+            if not await driver.await_composer_ready():
+                raise ManifestError(
+                    f"{name}: the composer did not come back after enabling deep research. That step "
+                    f"navigates, so readiness has to be re-established rather than assumed."
+                )
             await driver.focus_composer()
             await driver.type_brief(deps.topic)
             await driver.send()
             deps.log.append(f"p2:{name}:dispatched")
 
     async def p3_harvest(_ctx) -> None:
-        """P3 — harvest, and judge each harvest rather than merely collecting it.
+        """P3 — wait for the answer, then harvest, and judge the harvest rather than collect it.
 
         A harvest that fails its predicate raises, so a run cannot report success having collected
         nothing — the exact P1 outcome this exists to prevent.
+
+        ⚠ The wait belongs here, before extraction. Without it this body ran the instant P2's send
+        returned, which the mock survives (it answers in under a second) and a real deep-research run
+        does not. The resulting empty harvest is reported by ``harvest.judge`` as read drift — pointing
+        the agent at selectors that were never wrong.
         """
         for name, driver in drivers.items():
+            waited = await driver.await_response(timeout=response_timeout)
+            deps.log.append(f"p3:{name}:wait:{'done' if waited['done'] else 'TIMEOUT'}")
+            if not waited["done"]:
+                raise ManifestError(f"{name}: no complete response to harvest — {waited['reason']}")
             verdict = await driver.harvest_sources()
             deps.log.append(f"p3:{name}:{'ok' if verdict.ok else 'SUSPECT'}:{verdict.count}")
             if not verdict.ok:

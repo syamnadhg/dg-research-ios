@@ -29,8 +29,10 @@ Flags default OFF and the wrapper is then a provable no-op:
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -247,15 +249,40 @@ async def guarded_intent(
     action: Callable[..., Awaitable[Any] | Any],
     *args,
     escalate: Callable[..., Awaitable[Any] | Any] | None = None,
+    acceptance_window: float = 5.0,
+    poll: float = 0.25,
 ) -> IntentOutcome:
     """Perform a mutating *action*, verify it, and escalate only if permitted.
+
+    ⚠ ``acceptance_window`` exists because verification used to be a SINGLE evaluation taken the
+    instant the action returned, and that was wrong for every real platform while being invisible on
+    the mock — whose DOM updates synchronously on click, so its predicate is true before the call
+    stack unwinds. A real page needs a render tick. Measured on live ChatGPT, both in one run:
+
+    * the deep-research toggle genuinely turned ON — the menu closed itself and the composer grew its
+      "Deep research" pill — and the predicate, asked immediately, said ``false``. Asked four seconds
+      later it said ``true``.
+    * ``send`` was accepted and the answer arrived, and the predicate, asked immediately, found no
+      assistant turn yet.
+
+    Both reported ``predicate_passed=False`` on actions that had plainly worked, which is worse than a
+    crash: it is a *false negative on a healthy page*, and with acting enabled it escalates an agent
+    onto exactly the page that needed no help. The recipe calls that outcome worse than the failure it
+    replaces, and the backend has already paid for it once — its own comment records a
+    pressed-class-only check false-negativing an ACTIVE pill, after which the CUA fallback toggled the
+    working deep research back OFF.
+
+    The window is an upper bound, not a delay: the loop returns the moment the predicate passes, so the
+    mock pays nothing. It is only spent in full when the predicate really does keep failing — and
+    spending it there is the point, because that is the case where the alternative is escalating onto a
+    page that was merely slow.
 
     Sequence, and each step is here for a reason:
 
     1. **Run the action.** Its own exception is not swallowed — a genuine failure to interact is
        the caller's business.
-    2. **Verify with the real predicate.** Predicate errors are captured, never raised: a broken
-       predicate must not turn a successful interaction into a failed one.
+    2. **Verify with the real predicate, over the acceptance window.** Predicate errors are captured,
+       never raised: a broken predicate must not turn a successful interaction into a failed one.
     3. **Count the execution** for the bake ledger, because the intent did run.
     4. **On a pass, stop.** No escalation path is even consulted on the happy path.
     5. **On a fail, decide** via :meth:`IntentRegistry.may_escalate`. Not permitted ⇒ record to
@@ -271,7 +298,16 @@ async def guarded_intent(
     result = action(*args)
     await _maybe_await(result)
 
-    passed, pred_error = await _safe_call(intent.outcome_predicate, *args)
+    deadline = time.monotonic() + acceptance_window
+    while True:
+        passed, pred_error = await _safe_call(intent.outcome_predicate, *args)
+        # A raising predicate is a broken predicate — retrying it just raises again, and the handling
+        # below deliberately treats it as a pass. Break out rather than burn the window on it.
+        if passed or pred_error is not None or time.monotonic() >= deadline:
+            break
+        await asyncio.sleep(poll)
+    # Counted ONCE, after the verdict. The ledger records that the intent ran, not how many times its
+    # predicate was consulted — inflating it would make an intent look baked by a single slow action.
     registry.record_execution(intent_id)
 
     outcome = IntentOutcome(

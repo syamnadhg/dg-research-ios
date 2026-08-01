@@ -456,3 +456,106 @@ def test_sync_predicates_and_actions_are_accepted(monkeypatch):
     out = asyncio.run(intents.guarded_intent(reg, "s", action))
     assert state["ran"] == 1
     assert out.predicate_passed is True
+
+
+# ======================================================================================
+# the acceptance window
+#
+# ⚠ Verification used to be a SINGLE evaluation taken the instant the action returned. That is right
+# for the mock, whose DOM updates synchronously on click, and wrong for every real platform — which is
+# exactly why it survived every gate until a real page ran. Measured on live ChatGPT in ONE run: the
+# deep-research toggle turned on (menu self-closed, composer grew its "Deep research" pill) and the
+# predicate asked immediately said false; and send was accepted, the answer arrived, and the predicate
+# asked immediately found no assistant turn yet. Both reported predicate_passed=False for actions that
+# had plainly worked.
+#
+# A false negative on a HEALTHY page is worse than a crash: with acting enabled it escalates an agent
+# onto the one page that needed no help. The backend has paid for this once already — its own comment
+# records a pressed-class-only check false-negativing an ACTIVE pill, after which the CUA fallback
+# toggled the working deep research back OFF.
+# ======================================================================================
+
+
+class LateSpy(Spy):
+    """A toggle whose predicate only reports true after N consultations — a render tick."""
+
+    def __init__(self, becomes_true_on=3, **kw):
+        super().__init__(**kw)
+        self.becomes_true_on = becomes_true_on
+        self.predicate_calls = 0
+
+    async def predicate(self):
+        self.predicate_calls += 1
+        return self.predicate_calls >= self.becomes_true_on
+
+
+def test_a_predicate_that_needs_a_render_tick_still_passes(monkeypatch):
+    _arm(monkeypatch)
+    spy = LateSpy(becomes_true_on=3)
+    reg = _registry(spy)
+    outcome = _run(reg, spy, acceptance_window=5.0, poll=0.05)
+    assert outcome.predicate_passed is True
+    assert spy.predicate_calls >= 3, "the window must have re-asked, not accepted the first answer"
+    assert spy.heals == 0, "and it must NOT have escalated onto a page that was merely slow"
+
+
+def test_the_window_returns_EARLY_and_is_not_a_fixed_delay(monkeypatch):
+    """Otherwise every mock gate pays five seconds per intent for nothing."""
+    import time as _t
+
+    _arm(monkeypatch)
+    spy = Spy(on=True)  # passes on the first ask, as the mock does
+    reg = _registry(spy)
+    started = _t.monotonic()
+    outcome = _run(reg, spy, acceptance_window=5.0, poll=0.25)
+    assert outcome.predicate_passed is True
+    assert _t.monotonic() - started < 1.0, "a passing predicate must not wait out the window"
+
+
+def test_a_predicate_that_never_passes_still_fails_after_the_window(monkeypatch):
+    """The window is an upper bound on patience, not an escape from the verdict."""
+    _arm(monkeypatch)
+    spy = Spy(on=False, heal_works=False)
+    reg = _registry(spy)
+    _bake(reg)
+    outcome = _run(reg, spy, acceptance_window=0.4, poll=0.05)
+    assert outcome.predicate_passed is False
+    assert spy.heals == 1, "a genuinely failed intent must still reach its escalation decision"
+
+
+def test_the_execution_LEDGER_counts_the_action_once_however_many_polls_it_took(monkeypatch):
+    """The ledger records that the intent RAN. Counting polls would let one slow action look baked."""
+    _arm(monkeypatch)
+    spy = LateSpy(becomes_true_on=4)
+    reg = _registry(spy)
+    _run(reg, spy, acceptance_window=5.0, poll=0.05)
+    assert reg.bake("gemini.enable_deep_research").executions == 1
+    assert spy.predicate_calls >= 4
+
+
+def test_a_RAISING_predicate_breaks_out_instead_of_burning_the_window(monkeypatch):
+    """A broken predicate raises again on every retry, and it is already treated as a pass.
+
+    Spending the full window on it would add latency to every intent whose predicate has a bug, for no
+    change in outcome.
+    """
+    import time as _t
+
+    _arm(monkeypatch)
+
+    class Boom(Spy):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        async def predicate(self):
+            self.calls += 1
+            raise RuntimeError("selector syntax error")
+
+    spy = Boom()
+    reg = _registry(spy)
+    started = _t.monotonic()
+    outcome = _run(reg, spy, acceptance_window=5.0, poll=0.05)
+    assert outcome.predicate_passed is True and outcome.shadow_only is True
+    assert _t.monotonic() - started < 1.0
+    assert spy.calls == 1, "asked once, not repeatedly"

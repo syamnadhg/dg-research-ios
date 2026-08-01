@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
@@ -261,6 +262,49 @@ class IOSSimulatorBackend(BrowserBackend):
             await self._attach(tab)
             tab.calibration = None
 
+    async def ensure_runtime_stable(
+        self, tab: Tab, settle: float = 2.0, timeout: float = 60.0
+    ) -> bool:
+        """Inject the runtime and wait until it SURVIVES — not merely until it lands.
+
+        ⚠ Measured on real ChatGPT, and it is invisible against a static page. One second after the
+        first paint, ``document.readyState`` goes ``complete`` -> ``interactive`` **on the same URL**:
+        the site replaces its own document. Anything injected before that moment is thrown away with
+        the old document, so the mock's model — inject once after the page is listed, then use it —
+        cannot hold. It failed as ``TypeError: undefined is not an object (evaluating
+        'window.__sr.events')`` from inside a worker thread during calibration, with a traceback
+        pointing at geometry rather than at a wiped runtime.
+
+        Re-injection alone is not enough either: injecting into the doomed document and immediately
+        checking finds the sentinel present, so a check-then-use passes and the very next read fails.
+        The only sound test is duration — the sentinel has to still be there after a settle window, and
+        every disappearance restarts that window.
+        """
+        deadline = time.monotonic() + timeout
+        stable_since: float | None = None
+        while True:
+            try:
+                present = await self.evaluate(
+                    tab, f"typeof window.{runtime_js.NS} === 'object'"
+                )
+            except iwdp.InspectorError:
+                present = False
+            if not present:
+                stable_since = None
+                tab.runtime_ready = False
+                tab.calibration = None
+                try:
+                    await self._attach(tab)
+                except iwdp.InspectorError:
+                    pass
+            elif stable_since is None:
+                stable_since = time.monotonic()
+            elif time.monotonic() - stable_since >= settle:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.25)
+
     # -- input -------------------------------------------------------------------
 
     async def read_viewport(self, tab: Tab) -> dict:
@@ -297,7 +341,15 @@ class IOSSimulatorBackend(BrowserBackend):
 
     async def _calibration(self, tab: Tab) -> geometry.Calibration:
         """Return a calibration valid for the tab's *current* layout, measuring if needed."""
-        await self._ensure_runtime(tab)
+        # Stability, not presence. Calibration is the one place where a wiped runtime is unrecoverable
+        # rather than merely retryable: it taps and then reads back the event the tap produced, so a
+        # wipe between those two steps destroys the measurement instead of failing it cleanly.
+        if not await self.ensure_runtime_stable(tab):
+            raise geometry.CalibrationError(
+                f"window.{runtime_js.NS} would not stay injected, so no tap can be measured. The page "
+                f"is replacing its own document — real ChatGPT does exactly this ~1s after first "
+                f"paint, on the same URL."
+            )
         assert self._screen is not None, "start() must run before input"
         viewport = await self.read_viewport(tab)
         if tab.calibration is not None and tab.calibration.is_valid_for(viewport):

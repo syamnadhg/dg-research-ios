@@ -50,8 +50,10 @@ MUTATIONS = [
     # --- the agent's first real failure catalogue ----------------------------------------------
     (
         "emubackend/phases.py",
-        '        if health["state"] == "error":',
-        '        if health["state"] == "never":',
+        # Anchored with the following line too: `await_response` now runs the same check mid-wait, so
+        # the bare `if` appears twice and the harness correctly refused an ambiguous anchor.
+        '        if health["state"] == "error":\n            raise PlatformStateError(\n                f"{self.platform}: the platform reported an error instead of a response "',
+        '        if health["state"] == "never":\n            raise PlatformStateError(\n                f"{self.platform}: the platform reported an error instead of a response "',
         "test_response_health.py::test_harvest_refuses_to_extract_from_a_platform_error",
         "harvesting a platform error banner as research — a run reporting success with a plausible body",
     ),
@@ -803,6 +805,225 @@ MUTATIONS = [
         "    for css in reversed(entry.css):\n        found = await page.query_selector(css)",
         "test_selectors_and_phases.py::test_resolve_tries_the_css_chain_in_order",
         "the fallback chain evaluated backwards, so the least specific selector wins",
+    ),
+    # --- cancelling a pair must not create anything ---------------------------------------------
+    (
+        "ios/App/PairingFlow.swift",
+        "        status = abandoned.isEmpty\n            ? \"Cancelled. Nothing was created.\"",
+        "        await beginPairing()\n        status = abandoned.isEmpty\n            ? \"Cancelled. Nothing was created.\"",
+        "test_capture_guards.py::test_cancel_does_NOT_mint_another_device_document",
+        "cancel requesting a fresh pair code like restart does — the exact behaviour that accumulated "
+        "SEVEN devices/* documents in one evening on the owner's project, five of them never claimed",
+    ),
+    (
+        "ios/App/PairingFlow.swift",
+        "                if controller.started && controller.stage != .ready {",
+        "                if false && controller.started && controller.stage != .ready {",
+        "test_capture_guards.py::test_cancel_is_reachable_from_EVERY_stage_via_the_header",
+        "no reachable cancel, leaving 'start over with a new code' as the only exit — which is how a "
+        "stuck flow turns into another abandoned document instead of ending",
+    ),
+    (
+        "ios/App/PairingFlow.swift",
+        "        started = false\n        stage = .pair\n        busy = false",
+        "        stage = .pair\n        busy = false",
+        "test_capture_guards.py::test_cancel_returns_to_the_LANDING_screen_not_to_stage_one",
+        "cancel leaving `started` true, so the user is dropped straight back into the flow they just "
+        "cancelled and the button reads as broken",
+    ),
+    (
+        "ios/App/PairingFlow.swift",
+        "        backend.resetPairing()\n        pairCode = \"\"\n        deviceID = \"\"\n        confirmWindow = nil",
+        "        pairCode = \"\"\n        deviceID = \"\"\n        confirmWindow = nil",
+        "test_capture_guards.py::test_cancel_clears_the_local_identity_and_stops_the_heartbeat",
+        "cancel leaving the heartbeat running against a document that is about to be TTL-reaped, so "
+        "every beat 404s while the UI claims the device is not paired",
+    ),
+    # --- verification needs a render tick -------------------------------------------------------
+    (
+        "emubackend/intents.py",
+        "        if passed or pred_error is not None or time.monotonic() >= deadline:\n            break",
+        "        if True:\n            break",
+        "test_intents.py::test_a_predicate_that_needs_a_render_tick_still_passes",
+        "every wrapped intent verified by a SINGLE evaluation taken before the page had rendered — "
+        "measured on live ChatGPT, the deep-research toggle turned on and send was accepted, and both "
+        "reported predicate_passed=False. A false negative on a healthy page escalates an agent onto "
+        "the one page that needed no help",
+    ),
+    (
+        "emubackend/intents.py",
+        "        if passed or pred_error is not None or time.monotonic() >= deadline:",
+        "        if passed or time.monotonic() >= deadline:",
+        "test_intents.py::test_a_RAISING_predicate_breaks_out_instead_of_burning_the_window",
+        "a predicate with a syntax error retried for the whole window on every intent, adding latency "
+        "for an outcome that was already decided",
+    ),
+    (
+        "emubackend/intents.py",
+        "    registry.record_execution(intent_id)",
+        "    [registry.record_execution(intent_id) for _ in range(2)]",
+        "test_intents.py::test_the_execution_LEDGER_counts_the_action_once_however_many_polls_it_took",
+        "the bake ledger inflated by verification polls, so one slow action could look like a baked "
+        "predicate and unlock escalation it never earned",
+    ),
+    # --- the platform's own in-flight control vetoes completion ---------------------------------
+    (
+        "emubackend/phases.py",
+        "            if handle is not None and not generating:",
+        "            if handle is not None:",
+        "test_selectors_and_phases.py::test_the_veto_also_overrides_the_decisive_state_attribute",
+        "content stability accepted while the platform is STILL GENERATING — live ChatGPT held 'Pro "
+        "thinking' (27 chars) for over six seconds with 'Stop answering' on screen, so both accept "
+        "signals passed on a page that had not started answering, and the empty harvest was then "
+        "reported as read drift about correct selectors",
+    ),
+    (
+        "emubackend/phases.py",
+        "            if generating:\n                # The clock restarts: time spent generating is not time spent stable.\n                stable_since = None",
+        "            if generating:\n                pass",
+        "test_selectors_and_phases.py::test_the_stability_clock_RESTARTS_when_generation_resumes",
+        "stable time banked across a generation that interrupted it, so a long run whose placeholder "
+        "happens not to change accumulates a stable window while the platform is visibly working",
+    ),
+    (
+        "emubackend/phases.py",
+        '    "gemini": (\n        \'button[aria-label*="Stop"], [role="button"][aria-label*="stop" i], \'\n        \'[jsname] [role="progressbar"], [data-is-streaming="true"], \'\n        ".loading-indicator, .streaming"\n    ),',
+        '    "gemini": \'button[aria-label*="Stop"]\',',
+        "test_selectors_and_phases.py::test_the_in_flight_selectors_are_the_backends_own_per_platform_sets",
+        "Gemini's in-flight check narrowed to the stop button alone — its collapsed composer often shows "
+        "NO stop button mid-run (#897b), so a live deep-research run reads as finished and the user's "
+        "mid-run chat is silently dropped",
+    ),
+    (
+        "emubackend/phases.py",
+        "                if text != last_text or stable_since is None:",
+        "                if text != last_text:",
+        "test_selectors_and_phases.py::test_the_stability_clock_RESTARTS_when_generation_resumes",
+        "the stability clock unable to RESTART after generation reset it — settable only by a text "
+        "change, so on an unchanging placeholder the wait can never complete and every real run times "
+        "out. My own bug, found by asserting WHEN completion happens rather than that it does",
+    ),
+    (
+        "emubackend/phases.py",
+        "            elif time.monotonic() - present_since >= settle:\n                return True",
+        "            elif True:\n                return True",
+        "test_selectors_and_phases.py::test_readiness_requires_the_composer_to_SURVIVE_a_settle_window",
+        "readiness satisfied by a single sighting of a composer that is mid-re-mount — measured on real "
+        "ChatGPT right after deep research turned on, where type_brief then died with StaleHandleError",
+    ),
+    (
+        "emubackend/phases.py",
+        "            except RuntimeError:\n                # StaleHandleError is a RuntimeError; ManifestError is a ValueError, so this cannot\n                # swallow a manifest problem.\n                if attempt == attempts - 1:\n                    raise\n                await self.await_composer_ready()",
+        "            except RuntimeError:\n                raise",
+        "test_selectors_and_phases.py::test_a_stale_composer_is_RE_QUERIED_rather_than_failing_the_run",
+        "a composer replaced between fill's three round trips failing the whole run, when the stale "
+        "error's own message says to re-query the selector",
+    ),
+    (
+        "emubackend/phases.py",
+        "                if attempt == attempts - 1:\n                    raise",
+        "                if False:\n                    raise",
+        "test_selectors_and_phases.py::test_the_re_query_is_BOUNDED_not_an_infinite_loop",
+        "an unbounded re-query against a composer that keeps vanishing — an infinite loop wearing a fix",
+    ),
+    # --- the four mechanisms a real platform needs and the mock never did -----------------------
+    (
+        "emubackend/phases.py",
+        "        if handle is None and entry.opener:",
+        "        if handle is None and entry.opener and False:",
+        "test_selectors_and_phases.py::test_a_control_behind_an_opener_is_reached_by_tapping_the_opener_first",
+        "the manifest's `opener` parsed and then DROPPED — the control sits in a closed menu, so P2 on "
+        "real ChatGPT raises 'did not match anything' for a selector that is correct",
+    ),
+    (
+        "emubackend/phases.py",
+        "            if time.monotonic() >= deadline:\n                return None\n            await asyncio.sleep(0.3)",
+        "            return None\n            await asyncio.sleep(0.3)",
+        "test_selectors_and_phases.py::test_the_opener_is_POLLED_because_the_menu_renders_in_two_passes",
+        "the opened menu read ONCE — ChatGPT paints 3 items then 19, so `Deep research` at index 7 "
+        "looks absent and a present control is reported as unsupported on mobile",
+    ),
+    (
+        "emubackend/phases.py",
+        "        if opened and not await self._dismiss_opener(entry):",
+        "        if False and opened and not await self._dismiss_opener(entry):",
+        "test_selectors_and_phases.py::test_a_menu_that_refuses_to_close_FAILS_rather_than_being_assumed_shut",
+        "an open menu left covering the send button, so the NEXT phase taps the overlay and the failure "
+        "reads as a send problem",
+    ),
+    (
+        "emubackend/phases.py",
+        "            state = await self._popup_open(entry.opener)\n            if not state.get(\"open\"):",
+        "            state = await self._popup_open(entry.opener)\n            if False:",
+        "test_selectors_and_phases.py::test_an_opened_menu_is_closed_and_the_close_is_VERIFIED",
+        "the dismissal check never able to observe a CLOSED popup, so every opener-reached control "
+        "aborts its phase after correctly doing what it was asked",
+    ),
+    (
+        "emubackend/phases.py",
+        "            state = await self._popup_open(entry.opener)\n            if not state.get(\"open\"):\n                return True",
+        "            state = {\"open\": await resolve(self.page, entry) is not None}\n            if not state.get(\"open\"):\n                return True",
+        "test_selectors_and_phases.py::test_dismissal_asks_the_OPENER_not_whether_the_TARGET_is_still_findable",
+        "dismissal asking whether the TARGET is still findable instead of asking the OPENER about its "
+        "popup — activating ChatGPT's Deep research leaves a 'Deep research' PILL in the composer, so "
+        "the run's own success signal reads as evidence the menu never closed and P2 aborts having done "
+        "everything correctly",
+    ),
+    (
+        "emubackend/substrate/backend.py",
+        "            elif time.monotonic() - stable_since >= settle:\n                return True",
+        "            elif True:\n                return True",
+        "test_substrate_runtime_stability.py::test_a_runtime_that_lands_and_is_then_wiped_is_not_stable",
+        "the injected runtime accepted as soon as it LANDS — real ChatGPT replaces its own document ~1s "
+        "after first paint, so the sentinel is present, the check passes, and the very next read fails "
+        "with 'undefined is not an object' from inside calibration",
+    ),
+    (
+        "emubackend/phases.py",
+        "                except RuntimeError:\n                    ready = False",
+        "                except Exception:\n                    ready = False",
+        "test_selectors_and_phases.py::test_a_missing_is_visible_is_a_wiring_bug_not_an_unready_composer",
+        "a too-wide catch turning 'this page object is missing a contract method' into 'the composer "
+        "never became ready' — a wiring bug wearing a platform symptom",
+    ),
+    (
+        "emubackend/phases.py",
+        "                    ready = bool(await handle.is_visible())",
+        "                    ready = True",
+        "test_selectors_and_phases.py::test_an_invisible_composer_is_not_ready",
+        "readiness satisfied by mere DOM presence, so a composer that is still mounting is typed into",
+    ),
+    (
+        "emubackend/phases.py",
+        "                    and text.strip()  # ⚠ the empty guard — see the docstring",
+        "                    and True",
+        "test_selectors_and_phases.py::test_an_EMPTY_container_is_never_accepted_however_stable_it_is",
+        "an EMPTY container accepted as complete because emptiness is perfectly stable — live ChatGPT "
+        "stayed empty for six minutes after a Retry that succeeded as a click",
+    ),
+    (
+        "emubackend/phases.py",
+        "                if polls % 10 == 0:",
+        "                if polls % 10 == 1000000:",
+        "test_selectors_and_phases.py::test_the_wait_raises_on_a_platform_error_instead_of_waiting_it_out",
+        "the mid-wait error check never running, so 'Failed to fetch template' is waited out for the "
+        "full timeout and the reason is lost",
+    ),
+    (
+        "emubackend/phases.py",
+        "            waited = await driver.await_response(timeout=response_timeout)",
+        "            waited = {\"done\": True, \"reason\": \"skipped\"}",
+        "test_selectors_and_phases.py::test_p3_waits_before_harvesting",
+        "P3 harvesting the instant P2's send returns — fine on a mock that answers in under a second, "
+        "and on a real deep-research run it harvests nothing and reports it as read drift",
+    ),
+    (
+        "emubackend/phases.py",
+        "            await driver.enable_deep_research()\n            if not await driver.await_composer_ready():",
+        "            await driver.enable_deep_research()\n            if False:",
+        "test_selectors_and_phases.py::test_p2_re_establishes_composer_readiness_after_enabling_deep_research",
+        "readiness treated as a one-time fact — enabling deep research NAVIGATES on ChatGPT, so the "
+        "pre-navigation composer is dead and typing into it succeeds silently and sends nothing",
     ),
 ]
 

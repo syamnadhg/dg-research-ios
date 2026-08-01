@@ -705,3 +705,158 @@ def test_chatgpts_sources_is_scoped_to_the_same_handle_as_its_container():
         assert css.startswith(container), (
             f"sources selector {css!r} must be scoped to {container!r}, not to a different handle"
         )
+
+
+# ======================================================================================
+# cancelling a pair — the Ctrl-C the flow did not have
+#
+# ⚠ The absence of this was not cosmetic, it LEAKED. The only exit under a QR that could not work
+# (the frontend's sign-in redirect discards `?repair=`) was "Start over with a new code", which calls
+# initiate-pair and mints ANOTHER devices/* document. Seven accumulated in one evening on the owner's
+# project — five never claimed. So the invariant under test is not "a cancel button exists", it is
+# "cancel does not create anything".
+# ======================================================================================
+
+
+def _swift_code_only(source: str) -> str:
+    """Strip // comments so an assertion cannot be satisfied by prose.
+
+    The trap this avoids is one this repo has already been bitten by: a test asserting a call is
+    ABSENT passed because the only occurrence was inside a comment describing it.
+    """
+    out = []
+    for line in source.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("//"):
+            continue
+        out.append(line.split("//", 1)[0] if "//" in line else line)
+    return "\n".join(out)
+
+
+def _pairing_flow() -> str:
+    return (REPO / "ios" / "App" / "PairingFlow.swift").read_text()
+
+
+def _func_body(source: str, signature: str) -> str:
+    """The body of one Swift function, brace-matched.
+
+    ⚠ Brace-matched rather than "text between this signature and the next `func`", because that
+    cheaper version silently includes the following function whenever a nested closure contains the
+    word `func` — and an assertion scoped to the wrong body is an assertion about nothing.
+    """
+    start = source.index(signature)
+    open_brace = source.index("{", start)
+    depth = 0
+    for i in range(open_brace, len(source)):
+        if source[i] == "{":
+            depth += 1
+        elif source[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[open_brace : i + 1]
+    raise AssertionError(f"unbalanced braces after {signature!r}")
+
+
+def test_cancel_exists_and_is_distinct_from_restart():
+    code = _swift_code_only(_pairing_flow())
+    assert "func cancel() async" in code, "the flow needs an exit that is not 'start over'"
+    assert "func restart() async" in code, "start-over is still a legitimate, separate action"
+
+
+def test_cancel_does_NOT_mint_another_device_document():
+    """The whole point. `restart` calls beginPairing (→ initiate-pair → a new doc); `cancel` must not.
+
+    This is the assertion that would have prevented the seven-document evening.
+    """
+    body = _func_body(_swift_code_only(_pairing_flow()), "func cancel() async")
+    assert "beginPairing" not in body, (
+        "cancel must not request a new pair code — that is what created the abandoned documents"
+    )
+    assert "startPairing" not in body
+
+
+def test_restart_by_contrast_DOES_mint_one_and_that_is_deliberate():
+    """Pins the contrast, so the previous test cannot pass by cancel and restart both doing nothing."""
+    body = _func_body(_swift_code_only(_pairing_flow()), "func restart() async")
+    assert "beginPairing" in body
+
+
+def test_cancel_clears_the_local_identity_and_stops_the_heartbeat():
+    """Otherwise the app keeps beating against a document that is about to be TTL-reaped."""
+    body = _func_body(_swift_code_only(_pairing_flow()), "func cancel() async")
+    assert "resetPairing" in body, (
+        "resetPairing is what stops the heartbeat and clears the Keychain identity"
+    )
+    assert 'deviceID = ""' in body
+
+
+def test_cancel_returns_to_the_LANDING_screen_not_to_stage_one():
+    """`started` is what the landing screen keys on.
+
+    Leaving it true drops the user straight back into the flow they just cancelled — which reads as
+    the cancel having done nothing.
+    """
+    body = _func_body(_swift_code_only(_pairing_flow()), "func cancel() async")
+    assert "started = false" in body
+
+
+def test_cancel_discards_the_partial_stage_state():
+    """A cancelled pair must not leave stage 3/4 answers behind for the next attempt to inherit."""
+    body = _func_body(_swift_code_only(_pairing_flow()), "func cancel() async")
+    for field in ("anthropicSaved", "geminiSaved", "loginState", "confirmWindow"):
+        assert field in body, f"cancel must reset {field}"
+
+
+def test_cancel_is_reachable_from_EVERY_stage_via_the_header():
+    """⚠ Placed in the header because the header is the one thing all five stages render.
+
+    Per-stage buttons mean five chances to forget one, and the stage that gets forgotten is the stage
+    someone is stuck on — stage 5 shipped with no exit at all for precisely that reason.
+    """
+    code = _swift_code_only(_pairing_flow())
+    header = _func_body(code, "private var stageHeader")
+    assert "controller.cancel()" in header, (
+        "cancel belongs in stageHeader, which every stage renders — not in an individual stage body"
+    )
+    # ⚠ Presence is not reachability, and bin/mutate.py proved it: gating the button behind
+    # `if false && …` left it in the source, so an assertion that only looked for the call still
+    # passed against a cancel nobody could tap. Same shape as the throttle whose comparand exceeded
+    # its modulus. So assert the CONDITION, not the button.
+    at = header.index("controller.cancel()")
+    condition = header[header.rindex("if ", 0, at) : header.index("{", header.rindex("if ", 0, at))]
+    assert "false" not in condition, (
+        f"the cancel button is statically unreachable — its guard reads {condition.strip()!r}"
+    )
+    assert "controller.started" in condition and "!= .ready" in condition, (
+        f"expected the guard to be started-and-not-finished; got {condition.strip()!r}"
+    )
+
+
+def test_cancel_is_hidden_once_pairing_is_COMPLETE():
+    """At stage 5 the pair has happened. Offering 'cancel' there would imply it can be undone by this
+    button, which is retire/unpair's job and a different, destructive operation.
+    """
+    header = _swift_code_only(_func_body(_swift_code_only(_pairing_flow()), "private var stageHeader"))
+    assert "controller.stage != .ready" in header
+    assert "controller.started" in header, "and it is pointless before the flow has begun"
+
+
+def test_cancel_states_what_happened_to_the_unclaimed_code():
+    """"Cancelled" alone invites the question the owner actually asked — does the device get cleaned up.
+
+    The honest answer is the TTL, and saying so is what stops someone hunting for a stale device that
+    is already scheduled for deletion.
+    """
+    body = _func_body(_pairing_flow(), "func cancel() async")   # comments kept: this asserts on prose
+    assert "24 hours" in body, "the message must name the TTL rather than implying instant deletion"
+
+
+def test_the_restart_button_documents_the_cost_it_carries():
+    """It is still the right escape hatch, but its docstring has to say that it creates a document —
+    otherwise the next person adds another caller and the leak returns.
+    """
+    source = _pairing_flow()
+    doc = source[: source.index("func restart() async")]
+    assert "seven" in doc.lower() or "7 " in doc, (
+        "the measured cost (seven documents in one evening) belongs next to the call that caused it"
+    )
