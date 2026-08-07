@@ -20,8 +20,15 @@ import WebKit
 ///   without explanation. The strip says which phase and which intent, so what you are watching is
 ///   legible rather than mysterious.
 struct LiveRunView: View {
-    let run: RunState
+    /// ⚠ Optional, and that is the whole point of Browser watch. This screen used to be reachable
+    /// only from the run card, which renders only `if let run` — so the one surface that can show
+    /// whether a platform is still signed in was unreachable *except* during a run, which is the
+    /// worst possible time to discover a login has expired.
+    let run: RunState?
     let platforms: [PlatformState]
+    /// Which worker's browser this is. Each worker has its own cookie jar, so "is ChatGPT signed in"
+    /// is a question with a different answer per worker.
+    let workerID: Int
     @Binding var selected: String
     let onClose: () -> Void
     @State private var interactive = false
@@ -34,7 +41,7 @@ struct LiveRunView: View {
             // Simulator showed it landing squarely on the platform's own controls, and the bar below
             // already says the same thing permanently. Covering the page you came to watch to tell
             // you that you are watching it is the wrong trade.
-            LivePlatformWebView(platform: selected)
+            LivePlatformWebView(platform: selected, workerID: workerID)
                 .allowsHitTesting(interactive)
             takeoverBar
         }
@@ -45,12 +52,22 @@ struct LiveRunView: View {
 
     private var phaseStrip: some View {
         HStack(spacing: DS.S.lg) {
-            Text("P\(run.phase)")
-                .font(DS.F.mono(11, .semibold)).foregroundStyle(DS.C.accent)
-            Text(run.phaseName).font(DS.F.label).foregroundStyle(DS.C.textSecondary)
+            if let run {
+                Text("P\(run.phase)")
+                    .font(DS.F.mono(11, .semibold)).foregroundStyle(DS.C.accent)
+                Text(run.phaseName).font(DS.F.label).foregroundStyle(DS.C.textSecondary)
+            } else {
+                Text(WorkerPicker.name(workerID))
+                    .font(DS.F.mono(11, .semibold)).foregroundStyle(DS.C.accent)
+                // Said plainly rather than left blank. An empty strip reads as a screen that failed
+                // to load; "No runs live" reads as the true and unremarkable state it is.
+                Text("No runs live").font(DS.F.label).foregroundStyle(DS.C.textSecondary)
+            }
             Spacer()
-            Text(String(format: "%02d:%02d", run.elapsedSeconds / 60, run.elapsedSeconds % 60))
-                .font(DS.F.mono(11)).foregroundStyle(DS.C.textTertiary)
+            if let run {
+                Text(String(format: "%02d:%02d", run.elapsedSeconds / 60, run.elapsedSeconds % 60))
+                    .font(DS.F.mono(11)).foregroundStyle(DS.C.textTertiary)
+            }
             // "Done" rather than "Stop": leaving the live view must not read as stopping the run, and
             // the web views outlive this screen precisely so it doesn't.
             Button(action: onClose) {
@@ -68,7 +85,9 @@ struct LiveRunView: View {
     private var tabs: some View {
         HStack(spacing: 0) {
             ForEach(platforms) { p in
-                let state = run.agents[p.id] ?? "pending"
+                // With no run there is no per-agent state, so nothing is greyed out — every
+                // platform is equally available to look at.
+                let state = run?.agents[p.id] ?? (run == nil ? "idle" : "pending")
                 Button { selected = p.id } label: {
                     VStack(spacing: DS.S.sm) {
                         HStack(spacing: DS.S.sm) {
@@ -98,6 +117,20 @@ struct LiveRunView: View {
         .overlay(alignment: .bottom) { Rectangle().fill(DS.C.border).frame(height: 1) }
     }
 
+    /// Three states, not two. With no run there is nothing to interfere with, so "read-only" would be
+    /// protecting against a collision that cannot happen — and would make checking a login feel like
+    /// a risk. The bar says what is actually true.
+    private var takeoverCaption: String {
+        guard run != nil else {
+            return interactive
+                ? "Yours to drive. Nothing is running on this worker."
+                : "Nothing is running here. Take over to sign in or check a session."
+        }
+        return interactive
+            ? "You are driving. The run is paused on this platform."
+            : "Read-only while the run drives this page."
+    }
+
     private func short(_ id: String) -> String {
         ["chatgpt": "GPT", "gemini": "GEM", "claude": "CLD", "notebooklm": "NLM"][id] ?? id
     }
@@ -106,11 +139,9 @@ struct LiveRunView: View {
 
     private var takeoverBar: some View {
         HStack(spacing: DS.S.lg) {
-            Text(interactive
-                 ? "You are driving. The run is paused on this platform."
-                 : "Read-only while the run drives this page.")
+            Text(takeoverCaption)
                 .font(DS.F.label)
-                .foregroundStyle(interactive ? DS.C.warn : DS.C.textTertiary)
+                .foregroundStyle(interactive && run != nil ? DS.C.warn : DS.C.textTertiary)
             Spacer()
             // Taking over is explicit and reversible. A tap arriving mid-automation is trusted
             // input competing with the run for the same composer, so it must be a decision rather
@@ -135,12 +166,16 @@ struct LiveRunView: View {
 /// any particular screen — navigating away from the live view must not stop the work.
 final class PlatformWebViews {
     static let shared = PlatformWebViews()
+    /// Keyed by worker AND platform. Keying by platform alone — as this did — meant every worker
+    /// shared one web view per platform, so two concurrent runs would drive the same page.
     private var views: [String: WKWebView] = [:]
 
-    func view(for platform: String) -> WKWebView {
-        if let existing = views[platform] { return existing }
+    func view(for platform: String, worker: Int = 1) -> WKWebView {
+        let key = "\(worker)/\(platform)"
+        if let existing = views[key] { return existing }
         let config = WKWebViewConfiguration()
-        config.websiteDataStore = .default()   // the signed-in session lives here
+        // This worker's own jar, so its signed-in session is the one the run drives.
+        config.websiteDataStore = WorkerDataStores.store(forWorkerID: worker)
         // Ask for the desktop surface when told to.
         //
         // Not cosmetic — it decides whether P2 is possible at all. The backend's own intents say the
@@ -164,7 +199,7 @@ final class PlatformWebViews {
                 + "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
         }
         web.load(URLRequest(url: LoginFlowView.url(for: platform)))
-        views[platform] = web
+        views[key] = web
         return web
     }
 }
@@ -183,6 +218,7 @@ final class PlatformWebViews {
 /// screen.
 private struct LivePlatformWebView: UIViewRepresentable {
     let platform: String
+    let workerID: Int
 
     func makeUIView(context: Context) -> UIView {
         let container = UIView()
@@ -191,7 +227,7 @@ private struct LivePlatformWebView: UIViewRepresentable {
     }
 
     func updateUIView(_ container: UIView, context: Context) {
-        let web = PlatformWebViews.shared.view(for: platform)
+        let web = PlatformWebViews.shared.view(for: platform, worker: workerID)
         guard web.superview !== container else { return }
         container.subviews.forEach { $0.removeFromSuperview() }
         web.translatesAutoresizingMaskIntoConstraints = false

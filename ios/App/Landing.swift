@@ -408,10 +408,41 @@ struct Pill: View {
 /// holding — what is missing is the account it serves.
 struct NotPairedView: View {
     let onPair: () -> Void
+    /// Why a previous pairing ended, when it ended on its own. Nil after a deliberate unpair.
+    var lostReason: String? = nil
+    /// The device this app used to be paired to, for the same case.
+    var lastPairedDeviceID: String? = nil
 
     var body: some View {
         VStack(spacing: DS.S.lg * 2) {
             Spacer()
+            // ⚠ Say it out loud when a pairing was LOST rather than never made. Twice now a pairing
+            // has evaporated from two unrelated causes, and both times the only symptom was this
+            // screen looking completely normal — so the device was re-paired, producing a SECOND
+            // device document with no workers and no logins. That is the "it came back as a new
+            // backend" report. An unexplained blank screen is what made it invisible.
+            if let lostReason {
+                VStack(alignment: .leading, spacing: DS.S.sm) {
+                    Text("The previous pairing was lost")
+                        .font(DS.F.label.weight(.medium))
+                        .foregroundStyle(DS.C.warn)
+                    Text(lostReason)
+                        .font(DS.F.label)
+                        .foregroundStyle(DS.C.textSecondary)
+                    if let lastPairedDeviceID {
+                        Text("Was device \(lastPairedDeviceID.prefix(8))…")
+                            .font(DS.F.mono(9))
+                            .foregroundStyle(DS.C.textTertiary)
+                    }
+                    Text("Pairing again creates a NEW device. Remove the old one from the web app's Account page so it does not sit there offline.")
+                        .font(DS.F.label)
+                        .foregroundStyle(DS.C.textTertiary)
+                }
+                .padding(DS.S.lg)
+                .frame(maxWidth: 320, alignment: .leading)
+                .background(DS.C.warn.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
             VStack(spacing: DS.S.lg) {
                 Text("No user paired")
                     .font(DS.F.body.weight(.medium))

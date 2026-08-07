@@ -1,26 +1,26 @@
 import Foundation
 
-/// The backend's terminal surface, as a fixed catalogue.
+/// The device's operation catalogue.
 ///
-/// The owner's ask was full parity with what they manage via the BE terminal, so this enumerates it
-/// from the real CLI (37 flags in `research.py`). Two properties make that safe to expose over a
-/// network channel, and both are structural rather than advisory:
+/// ⚠ **This used to be a remote control for a Mac.** Nearly every entry was `scope: .daemon`,
+/// meaning "relay to a Mac-side bridge which invokes the real CLI" — and that bridge was never
+/// built. The executor existed, the transport did not. So Runtime and Maintenance rendered a
+/// fifteen-item list in which almost nothing did anything, the footer read *bridge offline*, and
+/// tapping an action reported it "queued" for a channel that could not deliver it.
 ///
-/// 1. **A closed enum mapped to literal argv.** No string is ever interpolated into a command line.
-///    A remote channel that executed arbitrary text would be remote code execution on the owner's
-///    Mac dressed up as a feature — so the wire format carries an *operation id*, and the argv it
-///    maps to is a compile-time constant.
-/// 2. **`scope` is explicit.** An iOS app can genuinely do the `.device` operations itself. The
-///    `.daemon` ones act on the Mac's process and filesystem and are impossible from the phone
-///    alone — they are relayed to a bridge that runs on the Mac and invokes the CLI. Marking that
-///    in the type means the UI can never present a daemon action as if the phone were doing it.
-enum OpScope: String, Codable {
-    /// The phone can perform this against Firestore on its own.
-    case device
-    /// Must be relayed to the Mac-side bridge, which invokes the real CLI.
-    case daemon
-}
-
+/// The phone **is** the backend now. Every operation below acts on this device, `OpScope` is gone
+/// along with the bridge, and an entry that cannot be performed here is not listed. Three
+/// consequences worth stating, because each removed something the UI used to show:
+///
+/// * **No Pairing group.** By the time Settings is reachable the device is paired, so "Pair this
+///   device" was dead copy. `unpair` moved to Maintenance, where the rest of the device-lifecycle
+///   actions already were.
+/// * **No `retire`, `resurrect` or `resume`.** Retire/resurrect are the On Startup toggle — the
+///   terminal's `--retire` means *disable autostart*, not *unpair*, and the old entry's summary
+///   ("Unpair and mark the device retired") was the inverted-retire bug written into the copy. A
+///   resumable run belongs on the main screen, not behind an operation row.
+/// * **No `uninstall`, no `upgrade`.** iOS uninstalls apps itself, and `upgrade` was a straight
+///   duplicate of `update`.
 enum OpRisk: String, Codable {
     case safe
     /// Interrupts work in progress but nothing is lost permanently.
@@ -33,95 +33,83 @@ struct Operation: Identifiable, Hashable {
     let id: String
     let title: String
     let summary: String
-    let scope: OpScope
     let risk: OpRisk
-    /// The literal argv the bridge runs. **Never** built from user input.
-    let argv: [String]
     let group: String
+    /// When set, the operation is only usable while the On Startup toggle matches this value.
+    ///
+    /// Encodes the owner's rule — Start serving and Restart exist for a device that is NOT
+    /// supervised, and Daemon loop only means anything for one that is — in the catalogue rather
+    /// than in whichever view happens to render it. A rule living in a view is a rule the next view
+    /// forgets.
+    var requiresSupervised: Bool? = nil
 
     var requiresConfirmation: Bool { risk != .safe }
+
+    /// Nil when available. Otherwise the reason it is not, phrased for the person reading it.
+    func unavailableReason(supervised: Bool) -> String? {
+        guard let requiresSupervised, requiresSupervised != supervised else { return nil }
+        return requiresSupervised
+            ? "Turn On Startup on to use this."
+            : "On Startup is on, so this device already serves automatically."
+    }
 }
 
 enum Operations {
 
-    /// Everything the terminal exposes, grouped as the owner thinks about it rather than as the
-    /// flags happen to be ordered.
+    /// Everything the device can actually do, grouped as the owner thinks about it.
     static let all: [Operation] = [
 
-        // ── Pairing — the phone owns these outright ──────────────────────────────
-        Operation(
-            id: "pair", title: "Pair this device",
-            summary: "Get a pair code and claim it from the web app.",
-            scope: .device, risk: .safe, argv: ["--pair"], group: "Pairing"),
-        Operation(
-            id: "unpair", title: "Unpair",
-            summary: "Drop this device's credentials. It disappears from the web app.",
-            scope: .device, risk: .destructive, argv: ["--unpair"], group: "Pairing"),
-        Operation(
-            id: "retire", title: "Retire",
-            summary: "Unpair and mark the device retired so it is not offered again.",
-            scope: .device, risk: .destructive, argv: ["--retire"], group: "Pairing"),
-
-        // ── Runtime — the Mac's own process ──────────────────────────────────────
+        // ── Runtime — this device's own serving loop ─────────────────────────────
         Operation(
             id: "serve", title: "Start serving",
-            summary: "Run the backend worker loop.",
-            scope: .daemon, risk: .safe, argv: ["--serve"], group: "Runtime"),
+            summary: "Come online now and start accepting runs.",
+            risk: .safe, group: "Runtime",
+            // Pointless while supervised: the app already comes online by itself on open.
+            requiresSupervised: false),
         Operation(
             id: "restart", title: "Restart",
-            summary: "Stop and re-launch the backend. In-flight work is interrupted.",
-            scope: .daemon, risk: .disruptive, argv: ["--restart"], group: "Runtime"),
-        Operation(
-            id: "resurrect", title: "Resurrect",
-            summary: "Re-register autostart and bring the supervisor back up.",
-            scope: .daemon, risk: .disruptive, argv: ["--resurrect"], group: "Runtime"),
-        Operation(
-            id: "resume", title: "Resume run",
-            summary: "Pick up an interrupted run where it stopped.",
-            scope: .daemon, risk: .safe, argv: ["--resume"], group: "Runtime"),
+            summary: "Stop the worker loop and bring it back up. In-flight work is interrupted.",
+            // ⚠ NOT gated, unlike Start serving — owner correction 2026-08-07. A wedged worker loop
+            // is exactly as likely on a device that starts automatically as on one that does not,
+            // and on the supervised device it is *more* likely to be the only way out, because
+            // nothing else there is manual.
+            risk: .disruptive, group: "Runtime"),
         Operation(
             id: "daemon-loop", title: "Daemon loop",
-            summary: "Run the supervisor loop in the foreground.",
-            scope: .daemon, risk: .safe, argv: ["--daemon-loop"], group: "Runtime"),
+            summary: "Keep this device awake and serving for as long as the app is open.",
+            risk: .safe, group: "Runtime",
+            // The supervisor IS the On Startup intent. Offering it while autostart is off would be
+            // offering to supervise a device that has not agreed to be supervised.
+            requiresSupervised: true),
 
         // ── Maintenance ──────────────────────────────────────────────────────────
         Operation(
             id: "doctor", title: "Doctor",
-            summary: "Run diagnostics and report what is wrong.",
-            scope: .daemon, risk: .safe, argv: ["--doctor"], group: "Maintenance"),
+            summary: "Check this device and report what is wrong.",
+            risk: .safe, group: "Maintenance"),
         Operation(
             id: "version", title: "Version",
-            summary: "Report the installed backend version.",
-            scope: .daemon, risk: .safe, argv: ["--version"], group: "Maintenance"),
+            summary: "Show the backend version running on this device.",
+            risk: .safe, group: "Maintenance"),
         Operation(
             id: "update", title: "Update",
-            summary: "Fetch and install a newer backend.",
-            scope: .daemon, risk: .disruptive, argv: ["--update"], group: "Maintenance"),
-        Operation(
-            id: "upgrade", title: "Upgrade",
-            summary: "Upgrade the backend in place.",
-            scope: .daemon, risk: .disruptive, argv: ["--upgrade"], group: "Maintenance"),
+            summary: "Check whether a newer backend is available.",
+            risk: .safe, group: "Maintenance"),
         Operation(
             id: "collect", title: "Collect diagnostics",
-            summary: "Bundle logs and state for support.",
-            scope: .daemon, risk: .safe, argv: ["--collect"], group: "Maintenance"),
+            summary: "Bundle this device's state into a report you can share.",
+            risk: .safe, group: "Maintenance"),
         Operation(
             id: "clear", title: "Clear state",
-            summary: "Wipe queued work and cached state.",
-            scope: .daemon, risk: .destructive, argv: ["--clear"], group: "Maintenance"),
+            summary: "Drop queued work and cached run state. Logins and pairing are kept.",
+            risk: .destructive, group: "Maintenance"),
         Operation(
-            id: "uninstall", title: "Uninstall",
-            summary: "Remove the backend and its autostart entry from this machine.",
-            scope: .daemon, risk: .destructive, argv: ["--uninstall"], group: "Maintenance"),
-
-        // ── Platform logins — the emulator setup the owner wants to drive ────────
-        Operation(
-            id: "login", title: "Seed platform logins",
-            summary: "Open each platform so you can sign in once. Sessions persist afterwards.",
-            scope: .daemon, risk: .safe, argv: ["--login"], group: "Platforms"),
+            id: "unpair", title: "Unpair",
+            summary: "Release this device from the account. It disappears from the web app.",
+            risk: .destructive, group: "Maintenance"),
     ]
 
-    static let groups = ["Pairing", "Runtime", "Maintenance", "Platforms"]
+    static let groups = ["Runtime", "Maintenance"]
 
     static func inGroup(_ group: String) -> [Operation] {
         all.filter { $0.group == group }
@@ -129,13 +117,5 @@ enum Operations {
 
     static func byID(_ id: String) -> Operation? {
         all.first { $0.id == id }
-    }
-
-    /// Resolve a wire-format operation id to its argv.
-    ///
-    /// The bridge calls **only** this. An unknown id yields `nil` rather than anything executable,
-    /// which is what keeps a malformed or hostile command document inert instead of dangerous.
-    static func argv(forID id: String) -> [String]? {
-        byID(id)?.argv
     }
 }

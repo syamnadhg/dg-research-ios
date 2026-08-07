@@ -83,9 +83,11 @@ def test_the_live_web_view_representable_does_not_return_the_web_view_itself():
 def test_the_live_web_view_actually_reparents_on_update():
     """An empty ``updateUIView`` is the other half of the same bug."""
     body = _body_of(LIVE.read_text(encoding="utf-8"), "func updateUIView(_ container:")
-    assert "PlatformWebViews.shared.view(for: platform)" in body, (
-        "updateUIView must resolve the web view for the *current* platform — that call is what makes "
-        "a tab switch change what is on screen."
+    assert "PlatformWebViews.shared.view(for: platform, worker: workerID)" in body, (
+        "updateUIView must resolve the web view for the *current* platform AND worker — that call is "
+        "what makes a tab switch change what is on screen. The worker half matters just as much now "
+        "that each worker is its own browser profile: resolving without it would show worker 1's "
+        "session while claiming to show worker 2's."
     )
     assert "addSubview" in body, "the resolved view must be attached to the container"
 
@@ -126,16 +128,50 @@ def test_no_ephemeral_data_store_anywhere(path):
     """
     code = _code_only(path.read_text(encoding="utf-8"))
     assert "nonPersistent" not in code, f"{path.name} uses an ephemeral data store"
-    assert "websiteDataStore = .default()" in code, (
-        f"{path.name} must opt into the persistent store explicitly"
+    # ⚠ The anchor moved when workers became browser profiles. Each surface used to write
+    # `websiteDataStore = .default()` inline; both now route through `WorkerDataStores`, which is
+    # where the persistence decision lives — including the rule that worker 1 KEEPS `.default()` so
+    # the owner's existing hand-made logins survive. Asserting the old literal here would have made
+    # this test demand the very duplication the refactor removed.
+    assert "websiteDataStore = WorkerDataStores.store(" in code, (
+        f"{path.name} must resolve its data store through WorkerDataStores, which is the only place "
+        "that decides persistence and per-worker isolation"
+    )
+
+
+def test_the_store_resolver_itself_is_persistent_and_isolates_workers():
+    """The file the two surfaces now delegate to — so the rule is checked where it is decided.
+
+    Moving the decision into one place is only an improvement if that place is also guarded;
+    otherwise the refactor just moved an unchecked line somewhere the old test could not see it.
+    """
+    stores = APP / "WorkerDataStores.swift"
+    assert stores.exists(), "WorkerDataStores.swift is where persistence is decided"
+    code = _code_only(stores.read_text(encoding="utf-8"))
+    assert "nonPersistent" not in code, "an ephemeral store loses every platform login on teardown"
+    assert ".default()" in code, (
+        "worker 1 MUST keep the default store. Giving it an identified store like the others would "
+        "be tidier and would sign the device out of every platform on the first launch after the "
+        "update, with no error and nothing in any log — the cookies are still on disk, WebKit is "
+        "simply looking somewhere else."
+    )
+    assert "WKWebsiteDataStore(forIdentifier:" in code, (
+        "workers 2+ need their own identified stores, or 'worker' is a label rather than a profile"
     )
 
 
 def test_the_web_view_cache_is_a_cache_and_not_a_factory():
     """If ``view(for:)`` built a new web view per call, every tab switch would abort a phase."""
-    body = _body_of(LIVE.read_text(encoding="utf-8"), "func view(for platform: String)")
-    assert "if let existing = views[platform] { return existing }" in body, (
-        "view(for:) must return the retained instance rather than constructing a new one"
+    body = _body_of(
+        LIVE.read_text(encoding="utf-8"), "func view(for platform: String, worker: Int = 1)"
+    )
+    assert "if let existing = views[key] { return existing }" in body, (
+        "view(for:worker:) must return the retained instance rather than constructing a new one"
+    )
+    assert 'let key = "\\(worker)/\\(platform)"' in body, (
+        "the cache key must include the WORKER. Keyed by platform alone — as it was — every worker "
+        "shares one web view per platform, so two concurrent runs drive the same page and the whole "
+        "point of separate browser profiles is lost."
     )
 
 

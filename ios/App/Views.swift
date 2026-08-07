@@ -12,6 +12,9 @@ struct RootView: View {
     /// Whether the live browser view is up, and which platform it is showing.
     @State private var watching = false
     @State private var watchSelection = "chatgpt"
+    /// Which worker's browser the live view is showing. Each worker is its own profile, so this is
+    /// as much a part of "what am I looking at" as the platform is.
+    @State private var watchWorker = 1
     @State private var settingsOpen = false
     @State private var peopleOpen = false
 
@@ -25,7 +28,11 @@ struct RootView: View {
             } else if !model.snapshot.paired, model.screen == .notPaired, model.pairing != nil {
                 VStack(spacing: 0) {
                     Header(snapshot: model.snapshot, onSettings: nil).padding(DS.S.screen)
-                    NotPairedView { model.screen = .pairing }
+                    NotPairedView(
+                        onPair: { model.screen = .pairing },
+                        lostReason: DeviceIdentityStore.lostPairingReason,
+                        lastPairedDeviceID: DeviceIdentityStore.lastPairedDeviceID
+                    )
                 }
             } else {
                 ScrollView {
@@ -35,13 +42,25 @@ struct RootView: View {
                             onSettings: model.snapshot.paired ? { settingsOpen = true } : nil
                         )
                         if model.snapshot.paired {
-                            // ⚠ Three cards, and only three. Controls and platform logins moved into
-                            // Settings: a backend is something you GLANCE at — is it up, what is it
-                            // doing, who for — and a fifteen-item operations list on the same screen
-                            // buries all three of those answers under things you touch once a month.
+                            // ⚠ Four cards. It was three, and Browser watch was the casualty: the
+                            // live view existed but hung off the run card, so it only existed WHILE a
+                            // run did. Checking whether a platform is still signed in is a
+                            // between-runs job, so the one screen that can answer it has to be
+                            // standing. Operations still live in Settings.
                             StatusCard(snapshot: model.snapshot)
                             if let run = model.snapshot.run {
-                                RunCard(run: run, onWatch: { watching = true })
+                                RunCard(run: run, onWatch: {
+                                    watchWorker = model.snapshot.busyWorkerIDs.min() ?? 1
+                                    watching = true
+                                })
+                            }
+                            BrowserWatchCard(
+                                snapshot: model.snapshot,
+                                workers: model.workers,
+                                selectedWorker: $watchWorker
+                            ) { platform in
+                                watchSelection = platform
+                                watching = true
                             }
                             PeopleButton(snapshot: model.snapshot) { peopleOpen = true }
                         } else if let pairing = model.pairing {
@@ -56,15 +75,32 @@ struct RootView: View {
                 }
             }
         }
-        // Driven by the user's choice; nil means follow the system, which is what makes "System" real.
+        // Always a concrete scheme — the System option was removed, so this never defers to the OS.
         .preferredColorScheme(theme.choice.colorScheme)
         // One transition for the whole pre-pairing journey, so landing → not-paired → flow reads as
         // moving forward through a single thing rather than three unrelated screens swapping out.
         .animation(.spring(response: 0.4, dampingFraction: 0.88), value: model.screen)
         .animation(.easeInOut(duration: 0.3), value: model.snapshot.paired)
         .task { await model.refresh() }
+        // ⚠ Close every modal the moment the device stops being paired. `settingsOpen` is local
+        // @State that `AppModel` cannot reach, so unpairing from inside Settings used to leave the
+        // sheet sitting on top of the "No user paired" screen underneath it. This also covers the
+        // device being deleted from the web app while the app is open.
+        .onChange(of: model.snapshot.paired) { _, paired in
+            guard !paired else { return }
+            settingsOpen = false
+            peopleOpen = false
+            watching = false
+            loginTarget = nil
+        }
         .overlay(alignment: .bottom) { Toast(text: model.toast) }
         .overlay { ConfirmSheet(model: model) }
+        .sheet(item: Binding(
+            get: { model.opDetail },
+            set: { if $0 == nil { model.opDetail = nil } }
+        )) { detail in
+            OpDetailSheet(title: detail.title, body_: detail.body) { model.opDetail = nil }
+        }
         .sheet(isPresented: $settingsOpen) {
             SettingsSheet(theme: theme, model: model, onClose: { settingsOpen = false })
         }
@@ -72,7 +108,11 @@ struct RootView: View {
         // and the frontend's equivalent is a bottom-anchored card floating over a blurred backdrop.
         .overlay {
             if peopleOpen {
-                PeoplePopup(snapshot: model.snapshot, onClose: { peopleOpen = false })
+                PeoplePopup(
+                    snapshot: model.snapshot,
+                    onToggleRest: { id, resting in model.setWorkerResting(id, resting: resting) },
+                    onClose: { peopleOpen = false }
+                )
             }
         }
         .animation(.spring(response: 0.34, dampingFraction: 0.84), value: peopleOpen)
@@ -84,15 +124,17 @@ struct RootView: View {
         }
         // Full screen rather than a sheet: this is the page being automated, and a sheet's inset
         // would crop exactly the part of it worth watching.
+        // ⚠ No `if let run` guard. It used to be there, and it meant tapping Watch with no run
+        // presented an EMPTY full-screen cover — a black screen with no way back that reads as a
+        // crash. The screen itself now handles the no-run case.
         .fullScreenCover(isPresented: $watching) {
-            if let run = model.snapshot.run {
-                LiveRunView(
-                    run: run,
-                    platforms: model.snapshot.platforms,
-                    selected: $watchSelection,
-                    onClose: { watching = false }
-                )
-            }
+            LiveRunView(
+                run: model.snapshot.run,
+                platforms: model.snapshot.platforms,
+                workerID: watchWorker,
+                selected: $watchSelection,
+                onClose: { watching = false }
+            )
         }
     }
 }
@@ -456,6 +498,121 @@ private struct WorkersCard: View {
     }
 }
 
+// MARK: - Browser watch
+
+/// Every platform, for every worker, openable at any time.
+///
+/// ⚠ The card that was missing. `LiveRunView` was built and worked, but its only entry point was the
+/// run card's Watch button — so the browsers were visible only while a run was in flight. The
+/// question this card exists to answer ("is worker 2 still signed in to Claude?") is one you ask
+/// *between* runs, and the answer was unreachable exactly then.
+struct BrowserWatchCard: View {
+    let snapshot: DeviceSnapshot
+    let workers: [WorkerProfile]
+    @Binding var selectedWorker: Int
+    let onOpen: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DS.S.lg) {
+            HStack {
+                SectionLabel(text: "Browser watch")
+                Spacer()
+                Text(activity).font(DS.F.label).foregroundStyle(
+                    snapshot.run == nil ? DS.C.textTertiary : DS.C.accent
+                )
+            }
+
+            // Only when there is a choice to make. One worker plus a picker offering one option is
+            // furniture that asks a question with a single answer. Adding workers belongs in
+            // Settings and in the pair flow, not here — this card is for looking, not configuring.
+            if workers.count > 1 {
+                WorkerPicker(
+                    workers: workers,
+                    selected: $selectedWorker,
+                    busyWorkerIDs: snapshot.busyWorkerIDs,
+                    onAdd: {}
+                )
+            }
+
+            // A grid rather than a list: four platforms read as a set of equals, and the whole point
+            // is to compare them at a glance.
+            LazyVGrid(
+                columns: [GridItem(.flexible(), spacing: DS.S.md),
+                          GridItem(.flexible(), spacing: DS.S.md)],
+                spacing: DS.S.md
+            ) {
+                ForEach(snapshot.platforms) { platform in
+                    Button { onOpen(platform.id) } label: {
+                        HStack(spacing: DS.S.md) {
+                            AgentIcon(id: platform.id, size: 18)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(platform.name)
+                                    .font(DS.F.label.weight(.medium))
+                                    .foregroundStyle(DS.C.textPrimary)
+                                Text(caption(for: platform))
+                                    .font(DS.F.mono(9))
+                                    .foregroundStyle(tone(for: platform))
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .padding(DS.S.md)
+                        .frame(maxWidth: .infinity, minHeight: DS.S.touch, alignment: .leading)
+                        .background(DS.C.bg)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10).stroke(DS.C.border, lineWidth: 1)
+                        )
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Text(snapshot.run == nil
+                 ? "Nothing is running. Open any platform to check its session or sign in again."
+                 : "Open a platform to watch the run drive it. Watching never interrupts it.")
+                .font(DS.F.label).foregroundStyle(DS.C.textTertiary)
+        }
+        .srCard()
+    }
+
+    /// Says "No runs live" rather than rendering nothing, so an idle device reads as idle instead of
+    /// as a card that failed to load.
+    private var activity: String {
+        guard let run = snapshot.run else { return "No runs live" }
+        return "P\(run.phase) · \(run.phaseName)"
+    }
+
+    /// This worker's jar, not the device-wide figure.
+    ///
+    /// ⚠ `snapshot.platforms` is the INTERSECTION across every worker, which is the right thing to
+    /// publish to the frontend and the wrong thing to show here: the card names one worker, so
+    /// showing a combined verdict under that name would say worker 2 is signed out when it is
+    /// worker 3 that is. Falls back to the device figure only for a worker the registry has not
+    /// loaded, where a combined answer beats no answer.
+    private func loginState(for platform: PlatformState) -> Bool? {
+        guard let worker = workers.first(where: { $0.id == selectedWorker }) else {
+            return platform.signedIn
+        }
+        return worker.logins[platform.id]
+    }
+
+    private func caption(for platform: PlatformState) -> String {
+        // Mid-run, what the run is doing on this platform is the more useful fact; between runs, the
+        // login state is the only fact that matters.
+        if let state = snapshot.run?.agents[platform.id] { return state }
+        return loginState(for: platform).map { $0 ? "signed in" : "signed out" } ?? "not checked"
+    }
+
+    private func tone(for platform: PlatformState) -> Color {
+        if let state = snapshot.run?.agents[platform.id] {
+            return state == "done" ? DS.C.ok
+                : state == "active" ? DS.C.accent : DS.C.textTertiary
+        }
+        return loginState(for: platform).map { $0 ? DS.C.ok : DS.C.warn } ?? DS.C.textTertiary
+    }
+}
+
 // MARK: - People
 
 /// Who can use this device, and what each of them is doing on it right now.
@@ -539,52 +696,32 @@ private struct PersonRow: View {
 
 // MARK: - Operation rows (used by SettingsSheet)
 
-struct BridgeNotice: View {
-    /// Passed in so the notice reflects the real probe rather than assuming.
-    var reachable: Bool = false
-
-    var body: some View {
-        HStack(alignment: .top, spacing: DS.S.lg) {
-            Text("!")
-                .font(DS.F.mono(11, .semibold)).foregroundStyle(DS.C.warn)
-                .frame(width: 16, height: 16)
-                .overlay(Circle().stroke(DS.C.warn, lineWidth: 1))
-            // ⚠ "not sent", not "queued". There is no transport, so nothing is waiting anywhere —
-            // saying queued would have the user waiting for an effect that cannot arrive.
-            Text(reachable
-                 ? "Actions marked **mac** run on the Mac bridge."
-                 : "The Mac bridge is not running. Actions marked **mac** cannot be sent yet.")
-                .font(DS.F.label).foregroundStyle(DS.C.textSecondary)
-        }
-        .padding(DS.S.lg)
-        .background(DS.C.warn.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: DS.R.sm))
-    }
-}
-
 struct OperationRow: View {
     let op: Operation
     let busy: Bool
+    /// Nil when the operation is usable. Otherwise why it is not — see `Operation.requiresSupervised`.
+    var unavailable: String? = nil
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: DS.S.lg) {
                 VStack(alignment: .leading, spacing: DS.S.xs) {
-                    HStack(spacing: DS.S.md) {
-                        Text(op.title)
-                            .font(DS.F.body)
-                            .foregroundStyle(op.risk == .destructive ? DS.C.danger : DS.C.textPrimary)
-                        if op.scope == .daemon { ScopeTag() }
-                    }
-                    Text(op.summary)
-                        .font(DS.F.label).foregroundStyle(DS.C.textTertiary)
+                    Text(op.title)
+                        .font(DS.F.body)
+                        .foregroundStyle(op.risk == .destructive ? DS.C.danger : DS.C.textPrimary)
+                    // The REASON, not just a greyed-out row. "Daemon loop" dimmed with no
+                    // explanation is a control that looks broken; naming the toggle that governs it
+                    // turns a dead end into an instruction.
+                    Text(unavailable ?? op.summary)
+                        .font(DS.F.label)
+                        .foregroundStyle(unavailable == nil ? DS.C.textTertiary : DS.C.warn)
                         .multilineTextAlignment(.leading)
                 }
                 Spacer()
                 if busy {
                     ProgressView().scaleEffect(0.6).tint(DS.C.accent)
-                } else {
+                } else if unavailable == nil {
                     Text("›").font(DS.F.body).foregroundStyle(DS.C.textTertiary)
                 }
             }
@@ -592,21 +729,11 @@ struct OperationRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(unavailable != nil || busy)
+        .opacity(unavailable == nil ? 1 : 0.55)
     }
 }
 
-/// Marks an action that runs on the Mac rather than the phone. Present because the distinction is
-/// invisible otherwise, and a user who taps "Restart" deserves to know what is being restarted.
-struct ScopeTag: View {
-    var body: some View {
-        Text("mac")
-            .font(DS.F.mono(9, .semibold))
-            .foregroundStyle(DS.C.textTertiary)
-            .padding(.horizontal, DS.S.sm)
-            .padding(.vertical, 1)
-            .overlay(RoundedRectangle(cornerRadius: 3).stroke(DS.C.border, lineWidth: 1))
-    }
-}
 
 // MARK: - Confirmation, toast, footer
 
@@ -663,9 +790,13 @@ private struct Footer: View {
     let snapshot: DeviceSnapshot
     var body: some View {
         HStack {
-            Text(snapshot.bridgeReachable ? "bridge connected" : "bridge offline")
+            // ⚠ This used to read "bridge offline" on every screen, permanently — a status line for
+            // a Mac-side control bridge that was never built. It reported a fault that did not
+            // exist, on a device that is itself the backend. What is worth stating here is whether
+            // this device is actually serving.
+            Text(snapshot.online ? "serving" : "not serving")
                 .font(DS.F.mono(9))
-                .foregroundStyle(snapshot.bridgeReachable ? DS.C.ok : DS.C.textTertiary)
+                .foregroundStyle(snapshot.online ? DS.C.ok : DS.C.textTertiary)
             Spacer()
             Text("iOS backend").font(DS.F.mono(9)).foregroundStyle(DS.C.textTertiary)
         }

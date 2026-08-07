@@ -22,7 +22,13 @@ struct SettingsSheet: View {
     /// Seeded from the device doc in `onAppear`, not defaulted to on. A toggle that shows the wrong
     /// state is worse than no toggle: it invites a tap that writes the value it was already showing.
     @State private var onStartup = false
-    @State private var expanded: Set<String> = ["Platforms"]
+    @State private var expanded: Set<String> = []
+    /// Which worker's logins the Workers tile is showing.
+    @State private var selectedWorker = 1
+    /// Which API key is being added or replaced.
+    @State private var editingKey: APIKeyStore.Kind?
+    /// Bumped after a key is written, purely to force the presence pills to re-read the Keychain.
+    @State private var keyEpoch = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -32,8 +38,11 @@ struct SettingsSheet: View {
                     appearanceSection
                     deviceSection
                     startupSection
+                    // Workers before API keys — owner request. Workers is the section you open to
+                    // add a browser profile or fix a login, which is a far more frequent visit than
+                    // pasting a key.
+                    workersSection
                     keysSection
-                    platformsSection
                     operationSections
                 }
                 .padding(DS.S.screen)
@@ -41,9 +50,24 @@ struct SettingsSheet: View {
         }
         .background(DS.C.bg)
         .sheet(item: $loginTarget) { platform in
-            LoginFlowView(platform: platform, manifestMarker: nil) { _ in
+            LoginFlowView(
+                platform: platform, manifestMarker: nil, workerID: selectedWorker
+            ) { signedIn in
                 loginTarget = nil
-                Task { await model.refresh() }
+                // Recorded against the worker whose jar was actually used — not the device — then
+                // republished as the intersection across every worker.
+                Task {
+                    await model.reportLogin(
+                        platform: platform.id, signedIn: signedIn, worker: selectedWorker
+                    )
+                    await model.refresh()
+                }
+            }
+        }
+        .sheet(item: $editingKey) { kind in
+            APIKeyEditor(kind: kind) {
+                editingKey = nil
+                keyEpoch += 1
             }
         }
     }
@@ -114,39 +138,86 @@ struct SettingsSheet: View {
         }
     }
 
+    /// ⚠ Editable, which it was not. The rows reported presence and nothing else, so a key that had
+    /// rotated could be *seen* to be stale and not replaced from anywhere in the app — the only route
+    /// was Clear state, which also destroys the pairing.
+    ///
+    /// The no-display rule is kept: the editor writes a new value, it never reads the old one back.
     private var keysSection: some View {
-        Section(title: "API keys") {
-            keyRow("Anthropic", present: APIKeyStore.has(.anthropic))
-            keyRow("Gemini", present: APIKeyStore.has(.gemini))
-            Text("Stored in the device Keychain. Values are never displayed — a key on screen is a key in a screenshot.")
+        // Collapsible, like the operation groups — owner request. Keys are set once and then only
+        // touched when one rotates, so an always-open section costs scroll on every visit.
+        CollapsibleSection(
+            title: "API keys",
+            isExpanded: expanded.contains("API keys"),
+            onToggle: { toggle("API keys") }
+        ) {
+            keyRow("Anthropic", kind: .anthropic)
+            keyRow("Gemini", kind: .gemini)
+            Text("Stored in the device Keychain. Values are never shown again once saved — a key on screen is a key in a screenshot — so replacing one means pasting it again.")
                 .font(DS.F.label).foregroundStyle(DS.C.textTertiary)
         }
     }
 
-    private func keyRow(_ name: String, present: Bool) -> some View {
-        HStack {
-            Text(name).font(DS.F.body).foregroundStyle(DS.C.textPrimary)
-            Spacer()
-            Pill(text: present ? "saved" : "not set", tone: present ? .ok : .neutral)
+    private func keyRow(_ name: String, kind: APIKeyStore.Kind) -> some View {
+        // `keyEpoch` is what forces the presence pill to re-read the Keychain after an edit.
+        // `APIKeyStore.has` is not observable, so without it a key saved in the sheet still showed
+        // "not set" until the whole screen was rebuilt.
+        let present = keyEpoch >= 0 && APIKeyStore.has(kind)
+        return Button { editingKey = kind } label: {
+            HStack {
+                Text(name).font(DS.F.body).foregroundStyle(DS.C.textPrimary)
+                Spacer()
+                Pill(text: present ? "saved" : "not set", tone: present ? .ok : .neutral)
+                Text(present ? "replace ›" : "add ›")
+                    .font(DS.F.label).foregroundStyle(DS.C.accent)
+            }
+            .frame(minHeight: DS.S.touch)
+            .contentShape(Rectangle())
         }
-        .frame(minHeight: 30)
+        .buttonStyle(.plain)
     }
 
-    private var platformsSection: some View {
-        Section(title: "Platform logins") {
+    /// Workers, with each worker's platform logins folded inside it.
+    ///
+    /// ⚠ This replaced a flat "Platform logins" list, which could only ever describe ONE browser
+    /// profile — and silently described the device as a whole while actually showing worker 1. With
+    /// more than one profile that list was not just incomplete, it was wrong.
+    private var workersSection: some View {
+        Section(title: "Workers") {
+            WorkerPicker(
+                workers: model.workers,
+                selected: $selectedWorker,
+                busyWorkerIDs: model.snapshot.busyWorkerIDs,
+                onAdd: {
+                    if let added = model.addWorker() { selectedWorker = added.id }
+                },
+                onRemove: { id in
+                    if model.removeWorker(id: id) == nil {
+                        selectedWorker = model.workers.last?.id ?? 1
+                    }
+                }
+            )
+            WorkerExplainer()
+
+            Divider().background(DS.C.border)
+
+            Text("Platform logins for \(WorkerPicker.name(selectedWorker))")
+                .font(DS.F.label).foregroundStyle(DS.C.textTertiary)
+
             ForEach(model.snapshot.platforms) { platform in
                 Button { loginTarget = platform } label: {
                     HStack {
                         AgentIcon(id: platform.id, size: 20)
                         Text(platform.name).font(DS.F.body).foregroundStyle(DS.C.textPrimary)
                         Spacer()
-                        // Three states. "Unknown" is rendered as unknown rather than as "not signed
-                        // in" — claiming a platform is signed out when nobody has checked sends the
-                        // owner to redo a login they may not need.
+                        // Three states, read from THIS worker's jar. "Unknown" is rendered as unknown
+                        // rather than as "not signed in" — claiming a platform is signed out when
+                        // nobody has checked sends the owner to redo a login they may not need.
+                        let state = model.workerRegistry?
+                            .worker(id: selectedWorker)?.logins[platform.id]
                         Pill(
-                            text: platform.signedIn.map { $0 ? "signed in" : "signed out" }
-                                ?? "not checked",
-                            tone: platform.signedIn.map { $0 ? .ok : .violet } ?? .neutral
+                            text: state.map { $0 ? "signed in" : "signed out" } ?? "not checked",
+                            tone: state.map { $0 ? .ok : .violet } ?? .neutral
                         )
                         Text("›").font(DS.F.body).foregroundStyle(DS.C.textTertiary)
                     }
@@ -162,28 +233,35 @@ struct SettingsSheet: View {
 
     private var operationSections: some View {
         VStack(alignment: .leading, spacing: DS.S.lg * 2) {
-            ForEach(Operations.groups.filter { $0 != "Platforms" }, id: \.self) { group in
+            ForEach(Operations.groups, id: \.self) { group in
                 CollapsibleSection(
                     title: group,
                     isExpanded: expanded.contains(group),
-                    onToggle: {
-                        // Collapsed by default. These are month-scale actions, and a list of fifteen
-                        // open rows is how you scroll past the two you came for.
-                        if expanded.contains(group) { expanded.remove(group) }
-                        else { expanded.insert(group) }
-                    }
+                    onToggle: { toggle(group) }
                 ) {
                     ForEach(Operations.inGroup(group)) { op in
-                        OperationRow(op: op, busy: model.busyOpID == op.id) {
+                        // ⚠ Gated on the LIVE toggle value, not on the snapshot's. `onStartup` is
+                        // what the switch above is showing right now; `snapshot.supervised` only
+                        // catches up after the write and the next refresh, so reading it here would
+                        // leave Daemon loop disabled for a beat after the owner enables On Startup —
+                        // which reads as the toggle not having worked.
+                        OperationRow(
+                            op: op,
+                            busy: model.busyOpID == op.id,
+                            unavailable: op.unavailableReason(supervised: onStartup)
+                        ) {
                             model.invoke(op)
                         }
-                    }
-                    if group != "Pairing" {
-                        BridgeNotice(reachable: model.snapshot.bridgeReachable)
                     }
                 }
             }
         }
+    }
+
+    private func toggle(_ group: String) {
+        // Collapsed by default. These are month-scale actions, and a list of open rows is how you
+        // scroll past the two you came for.
+        if expanded.contains(group) { expanded.remove(group) } else { expanded.insert(group) }
     }
 
     private func row(_ label: String, _ value: String) -> some View {

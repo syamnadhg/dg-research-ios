@@ -73,6 +73,13 @@ final class PairingController: ObservableObject {
     // Stage 4
     @Published var loginState: [String: Bool] = [:]
     @Published var loginTarget: PlatformState?
+    /// Which worker (browser profile) the logins on screen belong to.
+    ///
+    /// ⚠ Stage 4 used to have no notion of this at all, which is why the flow never offered to add
+    /// browser instances: there was one cookie jar, so there was nothing to choose between. Each
+    /// worker has to be signed in separately — a session in worker 1's jar is invisible to worker 2.
+    @Published var selectedWorker = 1
+    @Published var workers: [WorkerProfile] = []
 
     private let backend: DeviceBackend
     let platforms: [PlatformState]
@@ -80,6 +87,8 @@ final class PairingController: ObservableObject {
     init(backend: DeviceBackend, platforms: [PlatformState]) {
         self.backend = backend
         self.platforms = platforms
+        self.workers = backend.workers.workers
+        self.selectedWorker = backend.workers.workers.first?.id ?? 1
     }
 
     // MARK: Stage 1
@@ -125,7 +134,11 @@ final class PairingController: ObservableObject {
     /// longer the only exit: :meth:`cancel` leaves without minting anything, and it is the one offered
     /// at every stage.
     func restart() async {
-        backend.resetPairing()
+        // ⚠ Abandon the OLD one before minting a new one. Restart previously cleared local state and
+        // left the previous half-made device on the server — which is precisely how seven documents
+        // accumulated in one evening, five never claimed, each with its own synthetic Auth user that
+        // no expiry sweep can reach.
+        await backend.abandonPairing()   // awaited here: the new code must not race the old one's delete
         pairCode = ""
         deviceID = ""
         stage = .pair
@@ -138,23 +151,25 @@ final class PairingController: ObservableObject {
     /// document), cancel asks for nothing. Before this existed the only way out of a stuck flow was to
     /// start over, which is why abandoned documents accumulated instead of ending.
     ///
-    /// ⚠ **What "cleans up the device" can honestly mean here.** During pairing the app holds a
-    /// `deviceId` and a `pollSecret`, and *no* Firebase credential — the custom token only arrives once
-    /// the owner claims the code. So the device cannot delete its own document: that is
-    /// `unpair-self` Branch 1, which authenticates as the synthetic device user. What makes the
-    /// document go away is the TTL `initiate-pair` stamps on it (`expireAt`, 24h). Cancel therefore:
+    /// ⚠ **This now really removes the half-made device**, which it previously could not.
     ///
-    /// * stops the heartbeat and clears the Keychain identity, so nothing beats against a document
-    ///   that is about to be reaped, and
-    /// * **does not mint a replacement**, which is the actual leak.
+    /// The old note here said a cancel could only stop the heartbeat and decline to mint a
+    /// replacement, because deleting the document needed an unauthenticated endpoint keyed on the
+    /// `pollSecret` that did not exist. It exists now (`/api/devices/cancel-pair`), so
+    /// `abandonPairing()` calls it.
     ///
-    /// A cancel that deleted the document immediately would need an unauthenticated endpoint keyed on
-    /// the `pollSecret`. That is a frontend change and cannot be made from here (A8), so this is
-    /// deliberately the honest subset rather than a claim the app cannot keep.
+    /// That matters more than "a document lingers for 24h" suggested. `initiate-pair` creates three
+    /// things — the document, a `_internal/device_secrets` entry, and a **synthetic Firebase Auth
+    /// user** — and a Firestore TTL sweep deletes documents and cannot reach Firebase Auth at all.
+    /// Eighteen orphaned machine logins accumulated between May and July from pairs that were
+    /// started and never claimed, one apiece. Waiting for expiry was never going to clear those.
     func cancel() async {
         busy = true
         let abandoned = deviceID
-        backend.resetPairing()
+        // ⚠ Fire and forget — deliberately NOT awaited. The server owns correctness here (a killed
+        // app never runs its own cleanup at all), so blocking the dismissal on a network round trip
+        // buys nothing and risks a cancel screen the owner cannot leave.
+        Task { await backend.abandonPairing() }
         pairCode = ""
         deviceID = ""
         confirmWindow = nil
@@ -170,7 +185,7 @@ final class PairingController: ObservableObject {
         busy = false
         status = abandoned.isEmpty
             ? "Cancelled. Nothing was created."
-            : "Cancelled. The unclaimed code expires by itself within 24 hours."
+            : "Cancelled. The half-made device was removed."
     }
 
     // MARK: Stage 2
@@ -202,9 +217,45 @@ final class PairingController: ObservableObject {
     func finishLogin(_ platform: PlatformState, signedIn: Bool) {
         loginState[platform.id] = signedIn
         loginTarget = nil
-        // Reported to the device doc's `logins` map so the frontend shows the same per-platform state
-        // the app does. Device-writable per the rules' synth allow-list.
-        Task { await backend.reportLogins(loginState) }
+        // Recorded against the worker whose jar was actually used, then published as the intersection
+        // across every worker. Device-writable per the rules' synth allow-list.
+        let worker = selectedWorker
+        Task { await backend.reportLogins([platform.id: signedIn], forWorker: worker) }
+    }
+
+    /// What stage 4 shows for the currently selected worker.
+    ///
+    /// Read from the registry rather than from `loginState`, which only remembers what *this run of
+    /// the flow* did. Switching to worker 2 must show worker 2's jar, not worker 1's leftovers.
+    func loginState(for platform: PlatformState) -> Bool? {
+        backend.workers.worker(id: selectedWorker)?.logins[platform.id]
+    }
+
+    /// Add a browser profile from inside the pair flow, and switch to it.
+    ///
+    /// Switching is the point: a worker you added but never signed into is capacity the device
+    /// advertises and cannot use, and `deviceLogins()` deliberately reports the intersection, so an
+    /// untouched worker drags every platform back to "not checked".
+    func addWorker() {
+        let added = backend.workers.addWorker()
+        workers = backend.workers.workers
+        selectWorker(added.id)
+    }
+
+    func selectWorker(_ id: Int) {
+        selectedWorker = id
+        // Reloaded from the registry, not merged: `loginState` is per-worker and worker 2 showing
+        // worker 1's ticks is precisely the confusion that makes people skip signing 2 in at all.
+        loginState = backend.workers.worker(id: id)?.logins ?? [:]
+    }
+
+    /// How many platforms the CURRENTLY SELECTED worker is signed in to.
+    ///
+    /// Per worker rather than across all of them, because that is what stage 4 is asking you to do
+    /// right now. The device-wide figure is the intersection and lives on the dashboard.
+    var signedInCount: Int {
+        let jar = backend.workers.worker(id: selectedWorker)?.logins ?? [:]
+        return platforms.filter { jar[$0.id] == true }.count
     }
 
     // MARK: Stage 5
@@ -228,8 +279,6 @@ final class PairingController: ObservableObject {
 
     /// Set by the app so stage 5's Finish can hand control back.
     var onFinished: (() async -> Void)?
-
-    var signedInCount: Int { loginState.values.filter { $0 }.count }
 
     private func advance() {
         if let next = PairingStage(rawValue: stage.rawValue + 1) { stage = next }
@@ -277,7 +326,9 @@ struct PairingFlowView: View {
             get: { controller.loginTarget },
             set: { if $0 == nil { controller.loginTarget = nil } }
         )) { platform in
-            LoginFlowView(platform: platform, manifestMarker: nil) { signedIn in
+            LoginFlowView(
+                platform: platform, manifestMarker: nil, workerID: controller.selectedWorker
+            ) { signedIn in
                 controller.finishLogin(platform, signedIn: signedIn)
             }
         }
@@ -483,13 +534,26 @@ struct PairingFlowView: View {
             Text("Once each. The session persists across restarts, so this is a one-time job.")
                 .font(DS.F.label).foregroundStyle(DS.C.textSecondary)
 
+            // Add worker lives HERE as well as in Settings, because this is the moment the owner is
+            // already signing in — asking them to finish the pair and then repeat the whole login
+            // round in another screen is why the flow never grew more than one browser instance.
+            WorkerPicker(
+                workers: controller.workers,
+                selected: Binding(
+                    get: { controller.selectedWorker },
+                    set: { controller.selectWorker($0) }
+                ),
+                onAdd: { controller.addWorker() }
+            )
+            WorkerExplainer()
+
             ForEach(controller.platforms) { platform in
                 Button { controller.loginTarget = platform } label: {
                     HStack {
                         AgentIcon(id: platform.id, size: 20)
                         Text(platform.name).font(DS.F.body).foregroundStyle(DS.C.textPrimary)
                         Spacer()
-                        let state = controller.loginState[platform.id]
+                        let state = controller.loginState(for: platform)
                         Text(state == true ? "signed in" : state == false ? "skipped" : "sign in")
                             .font(DS.F.label)
                             .foregroundStyle(

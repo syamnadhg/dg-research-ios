@@ -19,6 +19,9 @@ import WebKit
 struct LoginFlowView: View {
     let platform: PlatformState
     let manifestMarker: String?
+    /// Which worker's cookie jar this login lands in. Defaults to worker 1, which is the device's
+    /// original single profile — see `WorkerDataStores`.
+    var workerID: Int = 1
     let onFinished: (Bool) -> Void
 
     @State private var status: Status = .loading
@@ -39,6 +42,7 @@ struct LoginFlowView: View {
             LoginWebView(
                 url: Self.url(for: platform.id),
                 marker: manifestMarker ?? Self.candidateMarkers(for: platform.id),
+                workerID: workerID,
                 onStatus: { status = $0 }
             )
             footer
@@ -167,6 +171,7 @@ struct LoginFlowView: View {
 private struct LoginWebView: UIViewRepresentable {
     let url: URL
     let marker: String?
+    let workerID: Int
     let onStatus: (LoginFlowView.Status) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(marker: marker, onStatus: onStatus) }
@@ -174,8 +179,8 @@ private struct LoginWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         // Persistent, so the session survives app relaunch. This is the point of doing the login
-        // in-app at all.
-        config.websiteDataStore = .default()
+        // in-app at all — and per-worker, so signing worker 2 in does not just re-sign worker 1.
+        config.websiteDataStore = WorkerDataStores.store(forWorkerID: workerID)
         let web = WKWebView(frame: .zero, configuration: config)
         web.enableInspectionInSimulator()
         // The documented mitigation for the embedded-web-view OAuth block. Not a guarantee —

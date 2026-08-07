@@ -1,92 +1,68 @@
 import SwiftUI
 import UIKit
 
-/// The People sheet — the same UX as the web app's "Shared with" popup, which its own code calls the
-/// **worker rest/wake control center**.
+/// Who can use this device, and what each of them is doing on it right now.
 ///
-/// The design rule that makes it work, taken from `account/page.tsx` rather than guessed:
+/// ⚠ **Deliberately mirrors the web app's owner "Shared with" popup** (`account/page.tsx`,
+/// `SharersModalBody`), because the owner asked for the same UI/UX on the phone. Same render order:
+/// explanation, legend, people tiles, then the worker pills last. Same pill semantics — `(N)` filled
+/// green is running-or-free, `(N)` hollow is resting, `(#N)` amber is a queue position — and `N` and
+/// `#N` are deliberately *different number spaces*: `N` is a worker slot id, `#N` is a place in the
+/// global FIFO queue.
 ///
-/// > *"every known worker slot is visible at ALL times. Busy slots render as green pills on the
-/// > owner/sharer row that holds them (uid join); idle slots park as neutral pills in the 'Free workers'
-/// > tile; a busy slot whose runner has NO rendered row shows as a green ORPHAN pill — so no slot can
-/// > ever vanish."*
+/// Two deliberate differences from the web app, both requested or forced:
 ///
-/// Three consequences worth stating, because each one is a bug if you skip it:
-///
-/// * **A slot can never disappear.** If a worker is busy for a uid nobody shares with, it still shows —
-///   as an orphan. Dropping it would make capacity silently unaccountable, which is exactly when you go
-///   looking at this screen.
-/// * **Pills move rather than appear.** `matchedGeometryEffect` is the app's equivalent of the web's
-///   shared `layoutId`: the same pill flies from the free tile to a person's row when their run starts.
-///   A pill that vanished in one place and appeared in another would read as two different workers.
-/// * **Capacity is clamped.** The web clamps to 16; a bad `workerCount` off the wire must not size a
-///   render loop.
-///
-/// Queued runs get pills too, on the row of whoever is waiting, so "who is using this device" and "who
-/// is about to" are answerable in the same glance.
-/// Presented as a **popup**, not a page — matching the frontend's modal chrome exactly:
-/// `bg-black/60 backdrop-blur-sm` behind, `items-end` on mobile so the card is bottom-anchored,
-/// `max-w-sm rounded-2xl bg-surface border border-border p-5 max-h-[85dvh] overflow-y-auto`.
-///
-/// ⚠ The height cap and inner scroll are load-bearing, and the frontend says why in its own comment: a
-/// bottom-anchored sheet **clips off the TOP first**, so an over-tall card loses its title rather than
-/// its footer. A full-screen page was the first attempt here and it lost the sense of a thing floating
-/// over the device you were just looking at.
+/// * **No "Free workers" tile.** The owner was explicit: the pills at the end ARE the control. The
+///   boxed tile the old version had is gone, exactly as the web app removed its own.
+/// * **No Revoke, no Stop, no Cancel.** Those are owner-authenticated actions (`/api/devices/unshare`
+///   and the owner-control queue write). This app signs in as the *device*, so shipping them would
+///   ship three buttons that 403. The legend uses the web app's own non-owner wording for the same
+///   reason — it already had wording for a viewer who cannot perform them.
 struct PeoplePopup: View {
     let snapshot: DeviceSnapshot
+    let onToggleRest: (Int, Bool) -> Void
     let onClose: () -> Void
 
     @Namespace private var pillSpace
-    /// Measured content height, so the card can hug it. See `card`.
     @State private var contentHeight: CGFloat = 0
 
-    /// Declared capacity, clamped exactly as the web app clamps it.
-    ///
-    /// ⚠ Takes the max of the declared count and the number actually busy. A busy worker id above
-    /// `workerCount` is real — the FE notes it "still tracks (row or orphan pill)" — so counting only
-    /// the declared number would report "1 of 1 busy" on a device running two, which is the one number
-    /// on this screen nobody should have to double-check.
-    ///
-    /// Free-slot generation deliberately does NOT use this: see `freeSlots`.
-    private var capacity: Int { min(max(snapshot.workerCount, busy.count), 16) }
+    // MARK: Derived state — mirrors the web app's own derivation
 
-    /// The DECLARED capacity, used only to mint free slots.
-    private var declaredCapacity: Int { min(max(snapshot.workerCount, 0), 16) }
-
+    /// Busy workers, from the `workers` map.
     private var busy: [WorkerState] { snapshot.workers.filter(\.isBusy) }
 
-    /// Busy workers whose uid has no row to sit on. Rendered rather than dropped.
+    private var capacity: Int { min(max(snapshot.workerCount, busy.count), 16) }
+
+    /// Workers running for someone this device is no longer shared with.
+    ///
+    /// Kept visible rather than dropped: a slot that vanishes from the UI while still occupied is a
+    /// slot the owner cannot account for.
     private var orphans: [WorkerState] {
         let known = Set(snapshot.users.map(\.id))
-        return busy.filter { worker in worker.uid.map { !known.contains($0) } ?? false }
+        return busy.filter { worker in
+            guard let uid = worker.uid else { return true }
+            return !known.contains(uid)
+        }
     }
 
-    /// Idle slots, as ids. Derived from capacity rather than from the map, because the map only carries
-    /// busy workers — the free slots are precisely the ones it does not mention.
-    private var freeSlots: [String] {
-        // Declared capacity, not the adjusted one — the web app is explicit that the free universe "is
-        // only the declared capacity", so a busy id above it "never mints phantom intermediate free
-        // slots". Using `capacity` here would invent an idle worker to sit beside an over-count one.
-        guard declaredCapacity > 0 else { return [] }
-        let busyIDs = Set(busy.map(\.id))
-        return (1...declaredCapacity).map(String.init).filter { !busyIDs.contains($0) }
+    /// The pills at the end: every slot that is NOT busy on someone's row, plus orphans.
+    private var trailingPills: [(id: Int, busy: Bool)] {
+        guard capacity > 0 else { return [] }
+        let busyIDs = Set(busy.compactMap { Int($0.id) })
+        let free = (1...capacity).filter { !busyIDs.contains($0) }.map { (id: $0, busy: false) }
+        let orphaned = orphans.compactMap(\.intID).map { (id: $0, busy: true) }
+        return (free + orphaned).sorted { $0.id < $1.id }
     }
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            // Tapping outside closes, as it does on the web. The backdrop is a button rather than a
-            // gesture so it is reachable to assistive tech too.
             Color.black.opacity(0.6)
-                .ignoresSafeArea()
                 .background(.ultraThinMaterial.opacity(0.6))
+                .ignoresSafeArea()
                 .onTapGesture(perform: onClose)
-
-            card
-                .padding(DS.S.lg)
+            card.padding(DS.S.lg)
         }
         .transition(.opacity)
-        // The pill flight between the free tile and a person's row is only visible if the change is
-        // animated — matchedGeometryEffect interpolates, it does not schedule.
         .animation(.spring(response: 0.45, dampingFraction: 0.8), value: snapshot.workers)
         .animation(.spring(response: 0.45, dampingFraction: 0.8), value: snapshot.queue)
     }
@@ -96,22 +72,15 @@ struct PeoplePopup: View {
             header
             ScrollView {
                 content
-                    // ⚠ Measured, because neither a bare ScrollView nor `ViewThatFits` hugs here. A
-                    // ScrollView claims every point it is offered, and a VStack handed surplus height
-                    // CENTRES its children — which is why the first two attempts produced a full-height
-                    // card with the content floating in the middle of it.
-                    //
-                    // Measuring the content and clamping to it reproduces what the web app gets for
-                    // free from `max-h` on a normal-flow div: hug the content, scroll only past the cap.
+                    .padding(.horizontal, DS.S.lg)
+                    .padding(.bottom, DS.S.lg)
                     .background(
-                        GeometryReader { proxy in
-                            Color.clear.preference(
-                                key: ContentHeightKey.self, value: proxy.size.height
-                            )
+                        GeometryReader { geo in
+                            Color.clear.preference(key: ContentHeightKey.self, value: geo.size.height)
                         }
                     )
             }
-            .frame(height: min(contentHeight, UIScreen.main.bounds.height * 0.85 - 64))
+            .frame(maxHeight: min(contentHeight + 8, UIScreen.main.bounds.height * 0.85 - 64))
             .onPreferenceChange(ContentHeightKey.self) { contentHeight = $0 }
         }
         .background(DS.C.surface)
@@ -120,23 +89,11 @@ struct PeoplePopup: View {
         .shadow(color: .black.opacity(0.5), radius: 24, y: 8)
     }
 
-    private var content: some View {
-        VStack(alignment: .leading, spacing: DS.S.lg) {
-            peopleRows
-            if !orphans.isEmpty { orphanTile }
-            if !snapshot.queue.isEmpty { queueTile }
-            // Last, as on the web app's popup: the free-worker tray is the resting place a pill
-            // returns to, so it belongs below the rows pills fly up to.
-            freeWorkersTile
-        }
-        .padding(DS.S.lg)
-    }
-
     private var header: some View {
         HStack {
             VStack(alignment: .leading, spacing: 1) {
                 Text("People").font(DS.F.body.weight(.medium)).foregroundStyle(DS.C.textPrimary)
-                Text("\(busy.count) of \(capacity) workers busy")
+                Text("\(busy.count) of \(max(capacity, 1)) workers busy")
                     .font(DS.F.label).foregroundStyle(DS.C.textTertiary)
             }
             Spacer()
@@ -150,176 +107,284 @@ struct PeoplePopup: View {
         .overlay(alignment: .bottom) { Rectangle().fill(DS.C.border).frame(height: 1) }
     }
 
-    private var peopleRows: some View {
+    private var content: some View {
         VStack(alignment: .leading, spacing: DS.S.lg) {
-            SectionLabel(text: "Who can use this device")
-            ForEach(snapshot.users) { user in
-                VStack(alignment: .leading, spacing: DS.S.md) {
-                    HStack {
-                        Text(user.label)
-                            .font(DS.F.body).foregroundStyle(DS.C.textPrimary)
-                            .lineLimit(1).truncationMode(.middle)
-                        Spacer()
-                        Pill(text: user.isOwner ? "owner" : "shared",
-                             tone: user.isOwner ? .accent : .neutral)
-                    }
-                    // Their busy workers, as green pills on their row — the uid join.
-                    let theirs = busy.filter { $0.uid == user.id }
-                    let queued = snapshot.queue.filter { $0.uid == user.id }
-                    if theirs.isEmpty && queued.isEmpty {
-                        Text("nothing running")
-                            .font(DS.F.label).foregroundStyle(DS.C.textTertiary)
-                    } else {
-                        VStack(alignment: .leading, spacing: DS.S.sm) {
-                            ForEach(theirs) { worker in
-                                WorkerPill(worker: worker, namespace: pillSpace)
-                            }
-                            ForEach(queued) { run in
-                                HStack(spacing: DS.S.md) {
-                                    Pill(text: "queued #\(run.position)", tone: .queued)
-                                    Text(run.title)
-                                        .font(DS.F.label).foregroundStyle(DS.C.textSecondary)
-                                        .lineLimit(1)
-                                }
-                            }
-                        }
-                    }
-                }
-                .padding(DS.S.lg)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(DS.C.surfaceRaised)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(DS.C.border, lineWidth: 1))
-            }
+            explanation
+            legend
+            peopleTiles
+            if !trailingPills.isEmpty { pillRow }
             if snapshot.users.isEmpty {
-                Text("No one has access to this device yet.")
-                    .font(DS.F.body).foregroundStyle(DS.C.textSecondary)
+                // Below the pills, not above — centred text sitting directly on top of a tile reads
+                // as that tile's heading. Same placement decision the web app made.
+                Text("No one else has access.")
+                    .font(DS.F.label).foregroundStyle(DS.C.textTertiary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, DS.S.sm)
             }
         }
+        .padding(.top, DS.S.lg)
     }
 
-    /// Busy workers with nobody to attribute them to.
+    // MARK: 1 — the explanation
+
+    /// Copy taken from the web app's own popup, which carries a "don't re-word it" note.
     ///
-    /// Shown rather than hidden. A slot that vanished because its runner is not in `sharedWith` would
-    /// make the busy count disagree with the visible pills, and this screen is where someone comes to
-    /// find out why a device is busy.
-    private var orphanTile: some View {
-        VStack(alignment: .leading, spacing: DS.S.md) {
-            SectionLabel(text: "Busy, runner not listed")
-            ForEach(orphans) { worker in
-                WorkerPill(worker: worker, namespace: pillSpace)
-            }
-            Text("A worker is running for someone this device is no longer shared with.")
+    /// ⚠ Its third line — about revoking and resetting the blocklist — is deliberately **not** here.
+    /// This popup has no Revoke button, because the device cannot revoke anyone, and describing a
+    /// control that is not on the screen is how a UI teaches someone to look for something that does
+    /// not exist.
+    private var explanation: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            (Text("People who can send research to ")
+                .foregroundStyle(DS.C.textTertiary)
+             + Text(snapshot.deviceName.isEmpty ? "this device" : snapshot.deviceName)
+                .foregroundStyle(DS.C.textPrimary)
+             + Text(".").foregroundStyle(DS.C.textTertiary))
+                .font(DS.F.label)
+            Text("Only the owner can change its settings, unpair or update it.")
                 .font(DS.F.label).foregroundStyle(DS.C.textTertiary)
         }
-        .padding(DS.S.lg)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(DS.C.surfaceRaised)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(DS.C.warn.opacity(0.3), lineWidth: 1))
     }
 
-    private var freeWorkersTile: some View {
+    // MARK: 2 — the legend
+
+    private var legend: some View {
         VStack(alignment: .leading, spacing: DS.S.md) {
-            HStack {
-                SectionLabel(text: "Free workers")
-                Spacer()
-                Text("\(freeSlots.count)")
-                    .font(DS.F.mono(11)).foregroundStyle(DS.C.textTertiary)
+            legendRow(badge: AnyView(LegendBadge(glyph: "N", style: .running))) {
+                (Text("Running / Free").foregroundStyle(DS.C.ok)
+                 + Text("\nWhile running: tap for phase.\nWhile free: tap to rest.")
+                    .foregroundStyle(DS.C.textTertiary))
+                    .font(DS.F.label)
             }
-            if freeSlots.isEmpty {
-                Text("Every worker is busy.")
-                    .font(DS.F.label).foregroundStyle(DS.C.textTertiary)
-            } else {
-                // Wrapped rather than a single row: capacity can be up to 16 and a horizontal row would
-                // push slots off a 402pt screen — the one thing this tile must never do.
-                FlowRow(spacing: DS.S.sm) {
-                    ForEach(freeSlots, id: \.self) { id in
-                        IdleWorkerPill(
-                            id: id,
-                            resting: snapshot.restingWorkerIDs.contains(id),
-                            namespace: pillSpace
-                        )
+            legendRow(badge: AnyView(LegendBadge(glyph: "N", style: .resting))) {
+                (Text("Resting").foregroundStyle(DS.C.textSecondary)
+                 + Text(" — takes no new runs; tap to wake.\nAll resting → fired researches wait in queue.")
+                    .foregroundStyle(DS.C.textTertiary))
+                    .font(DS.F.label)
+            }
+            legendRow(badge: AnyView(LegendBadge(glyph: "#N", style: .queued))) {
+                (Text("Queued").foregroundStyle(DS.C.warn)
+                 + Text(" — #N is their place in line.").foregroundStyle(DS.C.textTertiary))
+                    .font(DS.F.label)
+            }
+        }
+        .padding(.horizontal, DS.S.lg)
+        .padding(.vertical, DS.S.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(DS.C.surfaceRaised.opacity(0.4))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(DS.C.border, lineWidth: 1))
+    }
+
+    private func legendRow<T: View>(badge: AnyView, @ViewBuilder text: () -> T) -> some View {
+        HStack(alignment: .top, spacing: DS.S.md) {
+            badge
+            text()
+            Spacer(minLength: 0)
+        }
+    }
+
+    // MARK: 3 — the people tiles
+
+    private var peopleTiles: some View {
+        VStack(alignment: .leading, spacing: DS.S.sm) {
+            ForEach(snapshot.users) { user in
+                PersonTile(
+                    user: user,
+                    workers: busy.filter { $0.uid == user.id },
+                    queued: snapshot.queue.filter { $0.uid == user.id },
+                    namespace: pillSpace
+                )
+            }
+        }
+    }
+
+    // MARK: 4 — the worker pills, last, and tappable
+
+    private var pillRow: some View {
+        FlowRow(spacing: DS.S.sm) {
+            ForEach(trailingPills, id: \.id) { pill in
+                WorkerSlotPill(
+                    id: pill.id,
+                    state: pill.busy ? .busy
+                        : (snapshot.restingWorkerIDs.contains("\(pill.id)") ? .resting : .ready),
+                    namespace: pillSpace,
+                    // A busy pill is never tappable — a run in flight always finishes. Same rule as
+                    // the web app, and for the same reason: parking a worker mid-run would either do
+                    // nothing or orphan the run.
+                    onTap: pill.busy ? nil : {
+                        onToggleRest(pill.id, !snapshot.restingWorkerIDs.contains("\(pill.id)"))
                     }
-                }
-                // ⚠ Read-only, and the reason is in the rules rather than a decision made here:
-                // `restingWorkerIds` is **owner-only** — *"owner-only worker rest/wake from the
-                // Shared-With popup … sharers can read it but never write it."* This app signs in as
-                // the synthetic DEVICE, not as the owner, so a tap here would 403 every time.
-                //
-                // Shipping a toggle that always fails would be worse than shipping none, so the state
-                // is shown and the place it can be changed is named.
-                Text("Resting workers take no new runs. Rest and wake are owner-only — the rules allow only the account owner to write them, and this app signs in as the device. Toggle them in the web app's Shared-with popup.")
-                    .font(DS.F.label).foregroundStyle(DS.C.textTertiary)
+                )
             }
         }
-        .padding(DS.S.lg)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(DS.C.surfaceRaised)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(DS.C.border, lineWidth: 1))
-    }
-
-    private var queueTile: some View {
-        VStack(alignment: .leading, spacing: DS.S.md) {
-            HStack {
-                SectionLabel(text: "Queue")
-                Spacer()
-                Text("\(snapshot.queue.count)")
-                    .font(DS.F.mono(11)).foregroundStyle(DS.C.textTertiary)
-            }
-            ForEach(snapshot.queue) { run in
-                HStack(spacing: DS.S.md) {
-                    Pill(text: "#\(run.position)", tone: .queued)
-                    Text(run.title)
-                        .font(DS.F.label).foregroundStyle(DS.C.textSecondary).lineLimit(1)
-                    Spacer()
-                }
-            }
-        }
-        .padding(DS.S.lg)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(DS.C.surfaceRaised)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(DS.C.border, lineWidth: 1))
+        .padding(.horizontal, DS.S.xs)
     }
 }
 
-/// A busy worker: green pill, plus what it is running.
-private struct WorkerPill: View {
-    let worker: WorkerState
+// MARK: - A person
+
+private struct PersonTile: View {
+    let user: ConnectedUser
+    let workers: [WorkerState]
+    let queued: [QueuedRun]
     let namespace: Namespace.ID
 
     var body: some View {
-        HStack(spacing: DS.S.md) {
-            Text("w\(worker.id)")
-                .font(DS.F.mono(10, .medium))
-                .foregroundStyle(DS.C.ok)
-                .padding(.horizontal, DS.S.lg)
-                .padding(.vertical, DS.S.sm)
-                .background(DS.C.ok.opacity(0.12))
-                .clipShape(Capsule())
-                .overlay(Capsule().stroke(DS.C.ok.opacity(0.4), lineWidth: 1))
-                // The same id as the free-slot pill, so the pill FLIES between the tile and this row
-                // when a run starts or ends instead of vanishing here and appearing there.
-                .matchedGeometryEffect(id: "worker-\(worker.id)", in: namespace)
-            VStack(alignment: .leading, spacing: 0) {
-                Text(worker.title ?? "a run")
-                    .font(DS.F.label).foregroundStyle(DS.C.textPrimary).lineLimit(1)
-                if let phase = worker.phase {
-                    Text("phase \(phase)" + (worker.totalPhases.map { " of \($0)" } ?? ""))
-                        .font(DS.F.mono(9)).foregroundStyle(DS.C.textTertiary)
+        HStack(alignment: .center, spacing: DS.S.md) {
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: DS.S.sm) {
+                    Text(user.label)
+                        .font(DS.F.label.weight(.medium))
+                        .foregroundStyle(DS.C.textPrimary)
+                        .lineLimit(1)
+                        // Middle truncation only matters for an unresolved uid; a name should
+                        // truncate at the end like a name.
+                        .truncationMode(user.isResolved ? .tail : .middle)
+
+                    ForEach(workers) { worker in
+                        WorkerSlotPill(id: worker.intID ?? 0, state: .busy, namespace: namespace,
+                                       onTap: nil)
+                    }
+                    ForEach(queued) { run in
+                        QueuePill(position: run.position)
+                    }
+                }
+                if let second = secondLine {
+                    Text(second)
+                        .font(DS.F.mono(9))
+                        .foregroundStyle(DS.C.textTertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
             }
-            Spacer()
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, DS.S.lg)
+        .padding(.vertical, DS.S.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(DS.C.surfaceRaised.opacity(0.6))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(DS.C.border, lineWidth: 1))
+    }
+
+    /// Owner / their email / a warning that this is only a uid.
+    private var secondLine: String? {
+        if user.isOwner { return user.secondary ?? "Owner" }
+        if let secondary = user.secondary { return secondary }
+        // Said out loud. A bare uid on screen with no explanation looks like a bug in the app; it is
+        // actually a name the server has not denormalised yet.
+        return user.isResolved ? nil : "name not shared with this device"
+    }
+}
+
+// MARK: - Pills
+
+/// The `(N)` worker pill, in all three states.
+///
+/// `matchedGeometryEffect` on the slot id is what makes a pill *fly* between the person's row and
+/// the row at the end when a run starts or finishes — the same shared-layout trick the web app uses,
+/// and the reason a busy worker and a free one are the same object rather than two lookalikes.
+private struct WorkerSlotPill: View {
+    enum State { case busy, resting, ready }
+
+    let id: Int
+    let state: State
+    let namespace: Namespace.ID
+    /// Nil makes the pill inert — used for busy pills, which must never be toggled.
+    let onTap: (() -> Void)?
+
+    var body: some View {
+        let pill = Text("\(id)")
+            .font(DS.F.mono(10, .semibold))
+            .foregroundStyle(state == .resting ? DS.C.ok : Color.white)
+            .frame(width: 22, height: 22)
+            .background(state == .resting ? Color.clear : DS.C.ok)
+            .clipShape(Circle())
+            .overlay(
+                Circle().stroke(
+                    state == .resting ? DS.C.ok.opacity(0.8) : .clear,
+                    lineWidth: state == .resting ? 2 : 0
+                )
+            )
+            .matchedGeometryEffect(id: "worker-\(id)", in: namespace)
+
+        if let onTap {
+            Button(action: onTap) { pill }
+                .buttonStyle(.plain)
+                .accessibilityLabel(state == .resting
+                                    ? "Worker \(id) is resting — tap to wake"
+                                    : "Worker \(id) is ready — tap to rest")
+        } else {
+            pill.accessibilityLabel("Worker \(id) is busy")
         }
     }
 }
 
-/// A wrapping row, because capacity can reach 16 and a `HStack` would push pills off screen.
-///
-/// Hand-rolled rather than `LazyVGrid`: a grid forces equal column widths, and these pills are
-/// intentionally content-sized.
+/// The `(#N)` queue-position pill. A different number space from the worker id, which is exactly why
+/// it looks different.
+private struct QueuePill: View {
+    let position: Int
+
+    var body: some View {
+        Text("#\(position)")
+            .font(DS.F.mono(10, .semibold))
+            .foregroundStyle(DS.C.bg)
+            .padding(.horizontal, 6)
+            .frame(height: 22)
+            .background(DS.C.warn)
+            .clipShape(Capsule())
+            .accessibilityLabel("Queued, position \(position)")
+    }
+}
+
+private struct LegendBadge: View {
+    enum Style { case running, resting, queued }
+    let glyph: String
+    let style: Style
+
+    var body: some View {
+        Text(glyph)
+            .font(DS.F.mono(9, .semibold))
+            .foregroundStyle(foreground)
+            .padding(.horizontal, style == .queued ? 4 : 0)
+            .frame(minWidth: 18, minHeight: 18)
+            .background(background)
+            .clipShape(Capsule())
+            .overlay(
+                Capsule().stroke(
+                    style == .resting ? DS.C.ok.opacity(0.8) : .clear,
+                    lineWidth: style == .resting ? 2 : 0
+                )
+            )
+    }
+
+    private var foreground: Color {
+        switch style {
+        case .running: return .white
+        case .resting: return DS.C.ok
+        case .queued: return DS.C.bg
+        }
+    }
+
+    private var background: Color {
+        switch style {
+        case .running: return DS.C.ok
+        case .resting: return .clear
+        case .queued: return DS.C.warn
+        }
+    }
+}
+
+extension WorkerState {
+    /// The slot ordinal, tolerating both `"2"` and `"worker-2"` keys the contract has carried.
+    var intID: Int? { Int(id) ?? Int(id.replacingOccurrences(of: "worker-", with: "")) }
+}
+
+// MARK: - Layout
+
+/// A wrapping row. Hand-rolled because SwiftUI has no flow layout before iOS 16's `Layout`, and the
+/// pill row genuinely needs to wrap once a device has more than a handful of workers.
 struct FlowRow: Layout {
     var spacing: CGFloat = 6
 
@@ -357,36 +422,6 @@ struct FlowRow: Layout {
     }
 }
 
-
-/// An idle worker slot. Hollow green border when the owner has parked it, neutral when it is
-/// idle-and-ready — the same two states the web app's popup shows.
-private struct IdleWorkerPill: View {
-    let id: String
-    let resting: Bool
-    let namespace: Namespace.ID
-
-    var body: some View {
-        Text("w\(id)")
-            .font(DS.F.mono(10, .medium))
-            .foregroundStyle(resting ? DS.C.ok : DS.C.textTertiary)
-            .padding(.horizontal, DS.S.lg)
-            .padding(.vertical, DS.S.sm)
-            // Hollow when resting: the colour says "this slot is green-lit but parked", and the empty
-            // fill says it is not carrying anything. A filled green pill would read as busy.
-            .background(resting ? Color.clear : DS.C.surfaceRaised)
-            .clipShape(Capsule())
-            .overlay(
-                Capsule().stroke(
-                    resting ? DS.C.ok.opacity(0.6) : DS.C.border,
-                    lineWidth: resting ? 1.5 : 1
-                )
-            )
-            .matchedGeometryEffect(id: "worker-\(id)", in: namespace)
-    }
-}
-
-
-/// Carries the popup's measured content height up to the card.
 private struct ContentHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {

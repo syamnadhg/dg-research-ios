@@ -782,10 +782,21 @@ def test_restart_by_contrast_DOES_mint_one_and_that_is_deliberate():
 
 
 def test_cancel_clears_the_local_identity_and_stops_the_heartbeat():
-    """Otherwise the app keeps beating against a document that is about to be TTL-reaped."""
+    """Otherwise the app keeps beating against a document nothing will ever reap.
+
+    ⚠ The anchor moved, and the property got STRONGER. This asserted `resetPairing`, which is
+    local-only: it stops the heartbeat and clears the identity, and leaves the half-made device on
+    the server. That was the honest limit until `/api/devices/cancel-pair` existed.
+
+    It matters more than "a document lingers" implied. `initiate-pair` mints a synthetic Firebase
+    Auth login BEFORE anyone types the code, and a Firestore TTL sweep deletes documents and cannot
+    reach Firebase Auth — so sweeping the tile strands the login with nothing pointing at it. About
+    twenty accumulated that way since May. `abandonPairing` is what removes all three, and it wraps
+    `resetPairing`, so asserting the wrapper is asserting strictly more.
+    """
     body = _func_body(_swift_code_only(_pairing_flow()), "func cancel() async")
-    assert "resetPairing" in body, (
-        "resetPairing is what stops the heartbeat and clears the Keychain identity"
+    assert "abandonPairing" in body, (
+        "cancel must abandon the half-made device server-side, not merely forget it locally"
     )
     assert 'deviceID = ""' in body
 
@@ -844,11 +855,24 @@ def test_cancel_is_hidden_once_pairing_is_COMPLETE():
 def test_cancel_states_what_happened_to_the_unclaimed_code():
     """"Cancelled" alone invites the question the owner actually asked — does the device get cleaned up.
 
-    The honest answer is the TTL, and saying so is what stops someone hunting for a stale device that
-    is already scheduled for deletion.
+    ⚠ The true answer CHANGED, and the old one is now false twice over. This used to require the
+    message to name a 24-hour TTL. Measured since:
+
+      1. The `devices.expireAt` TTL policy reads **CREATING** — nothing is being swept at all.
+      2. Even once it runs, a TTL deletes documents and cannot reach Firebase Auth. Every pair mints
+         a synthetic login before anyone types the code, so sweeping the tile strands the login with
+         nothing pointing at it. About twenty accumulated that way since May.
+
+    Cancel now calls `/api/devices/cancel-pair`, which removes login, secret and document. So the
+    message must say the device was removed — and must NOT offer the expiry reassurance, which would
+    send someone away satisfied about a cleanup that is not happening.
     """
     body = _func_body(_pairing_flow(), "func cancel() async")   # comments kept: this asserts on prose
-    assert "24 hours" in body, "the message must name the TTL rather than implying instant deletion"
+    assert "removed" in body, "the message must state that the half-made device is actually gone"
+    assert "24 hours" not in body, (
+        "the TTL reassurance is false: the policy reads CREATING, and a TTL could never delete the "
+        "synthetic login even if it ran"
+    )
 
 
 def test_the_restart_button_documents_the_cost_it_carries():

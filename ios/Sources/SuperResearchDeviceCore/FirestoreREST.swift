@@ -219,6 +219,43 @@ public actor FirestoreREST {
 
     public var isAuthenticated: Bool { idToken != nil }
 
+    /// The long-lived credential, so the caller can persist it across launches.
+    ///
+    /// ⚠ Without persistence this whole session is process-lifetime only, and the device has no way
+    /// to prove who it is on the next launch. That is not a theoretical gap: `resumeIfPaired()`
+    /// probes the device document, the probe throws `notAuthenticated`, and the caller used to read
+    /// that as "the document is gone" and delete the pairing. The pair survived the day and died on
+    /// relaunch.
+    public var currentRefreshToken: String? { refreshToken }
+
+    /// Re-arm a session from a persisted refresh token, without a custom token.
+    ///
+    /// ⚠ `expiry` is set to `.distantPast` on purpose. `refreshIfNeeded` returns early unless the
+    /// deadline is within 60s, so leaving `expiry` nil would make it a no-op — the refresh token
+    /// would be present, `idToken` would stay nil, and every request would throw `notAuthenticated`
+    /// while the object *looked* correctly restored.
+    public func restoreSession(refreshToken: String) {
+        self.refreshToken = refreshToken
+        self.idToken = nil
+        self.expiry = .distantPast
+    }
+
+    /// An authenticated request to an arbitrary URL — specifically the frontend's own API.
+    ///
+    /// `unpair-self` is not a Firestore endpoint, and the device genuinely cannot delete its own
+    /// document any other way: `match /devices/{deviceId}` has no `allow delete`, so that route is
+    /// the only one. Exposed here rather than duplicating token handling in a second place, because
+    /// two token stores would drift and only one of them would be refreshed.
+    public func authorizedPOST(url: URL, body: [String: Any]) async throws -> (Int, Data) {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        try await authorize(&request)
+        let (data, status) = try await transport.send(request)
+        return (status, data)
+    }
+
     // MARK: Auth
 
     /// Exchange a custom token for a session. The REST equivalent of

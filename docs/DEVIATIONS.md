@@ -985,3 +985,56 @@ Six of the tests written for the above passed for reasons unrelated to what they
 The general lesson, stated once: **when two guards protect the same outcome, a test that asserts only
 the outcome cannot tell you which guard is load-bearing.** Assert the mechanism — timing, call counts,
 which object was asked — not just the verdict.
+
+
+---
+
+## 2026-08-07 — A8 lifted for the app wave, and what it cost
+
+**`purity.assert_pristine()` is RED, deliberately.** The owner lifted A8 for this goal
+(*"feel free to work on fe or be if needed for this ios emulator"*), and then extended it
+(*"sync up with current fe personal and then push our changes too there"*). So `dg-research`
+moved `f34a3af -> 8b481ec`: two commits, both pushed to the personal remote.
+
+* `6854f5d` — the sign-in redirect no longer eats a scanned pair code.
+* `8b481ec` — a `people` map denormalised onto the device doc so a paired device can show real
+  names, plus `restingWorkerIds` added to the synthetic-device rules allow-list.
+
+⚠ **The baseline is NOT regenerated.** Making the guard green by re-recording the tree is the one
+response that would destroy its value: the next unauthorised change would then look identical to
+this authorised one. It stays red until the owner decides the wave is finished, and this entry is
+the record of why.
+
+### Update, same day — both guarded repos are now SYNCED, not just modified
+
+⚠ **The "20 uncommitted files that exist nowhere else" note is now WRONG, and acting on it as
+written would have been the mistake.** The primary Mac committed and pushed that wave. Measured
+before touching anything:
+
+* 6 of the 11 untracked files were **byte-identical** to `origin/master`.
+* 6 of the 9 modified files were **byte-identical** to `origin/master`.
+* `narrate.py` and `tests/_domshim.py` had **zero** lines absent from upstream.
+* `research.py` had 33 of 2267 added lines absent upstream — all one block, and upstream carries a
+  **better** version of it: the local draft refused a generated title whenever the title shared no
+  topic anchors; upstream refuses only when the title *and the corpus* are both off-topic, and keeps
+  the topic-derived name silently when the corpus is fine.
+
+So the working tree was a stale copy, not unique work. It was **stashed, not discarded**
+(`stash@{0}`), with a file-level backup in the session scratchpad, and `dg-research-backend`
+fast-forwarded `f1c68a5 -> 214403d`. `dg-research` fast-forwarded to `54a1fde`.
+
+Both repos are now clean and level with their personal remotes. A8 stays red because HEAD moved in
+both — which is exactly what it should say — and the baseline is still not regenerated.
+
+### `emubackend/control.py` deleted
+
+The executor half of the Mac control bridge. Its transport was never built, so nothing in the app
+ever reached it; its only non-test caller was zero. `test_the_swift_and_python_registries_agree`
+asserted that the Swift operation catalogue and this Python allow-list were identical — a
+relationship that became **false by design** when the phone stopped being a remote control for a
+Mac and became the backend itself. The Swift catalogue is now the *device's* operations; the Python
+list was the *Mac CLI's*.
+
+Keeping it would have meant either deleting the guard (leaving an untested remote-execution surface)
+or forcing two lists to agree that describe different machines. Both are worse than removing dead
+code that git still remembers.

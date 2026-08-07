@@ -1,19 +1,23 @@
 import SwiftUI
 
-/// Light / dark / follow-the-system, persisted.
+/// Light or dark, persisted. **No "follow the system".**
 ///
-/// The web app puts a theme toggle in two places — the app's own settings and the top of the login
-/// page — and this mirrors both. Three states rather than a boolean, because "follow the system" is a
-/// real preference and a two-way switch silently overrides it forever after the first tap.
+/// Owner decision, 2026-08-07: two states, not three, in both places the toggle appears — the
+/// landing page header and Settings. The two must agree; a landing page offering System and a
+/// Settings sheet offering two options is the same control disagreeing with itself.
+///
+/// ⚠ A stored `"system"` from a build that had three options must still be readable. Dropping the
+/// case without handling it would send `Choice(rawValue: "system")` to nil and silently reset the
+/// owner's choice — so it is migrated to an explicit value on the way in, and overwritten on the way
+/// out the first time the toggle is touched.
 @MainActor
 final class ThemeManager: ObservableObject {
     enum Choice: String, CaseIterable, Identifiable {
-        case system, light, dark
+        case light, dark
         var id: String { rawValue }
 
         var label: String {
             switch self {
-            case .system: return "System"
             case .light: return "Light"
             case .dark: return "Dark"
             }
@@ -21,16 +25,15 @@ final class ThemeManager: ObservableObject {
 
         var symbol: String {
             switch self {
-            case .system: return "circle.lefthalf.filled"
             case .light: return "sun.max"
             case .dark: return "moon"
             }
         }
 
-        /// nil means "don't override" — which is what makes System actually follow the system.
+        /// Always a concrete scheme now. Returning nil for any case would re-introduce
+        /// follow-the-system through the back door, which is what was removed.
         var colorScheme: ColorScheme? {
             switch self {
-            case .system: return nil
             case .light: return .light
             case .dark: return .dark
             }
@@ -43,17 +46,25 @@ final class ThemeManager: ObservableObject {
 
     private static let key = "sr.theme"
 
-    init() {
-        let stored = UserDefaults.standard.string(forKey: Self.key)
-        // Defaults to dark, not system: this is a backend that sits on a desk running a browser, and
+    /// Read a stored value, migrating the retired `"system"` and defaulting to dark.
+    ///
+    /// Separate and static so the migration is testable without a live `ThemeManager` — the whole
+    /// risk here is a silent reset, which a running app cannot report.
+    static func resolve(stored: String?) -> Choice {
+        // Defaults to dark, not light: this is a backend that sits on a desk running a browser, and
         // the rest of the product's authed surface is dark. A first launch that came up white would
-        // look like a different app.
-        choice = stored.flatMap(Choice.init(rawValue:)) ?? .dark
+        // look like a different app. A previously stored "system" lands here too — dark is the
+        // product's own default, so it is the honest thing to fall back to.
+        Choice(rawValue: stored ?? "") ?? .dark
+    }
+
+    init() {
+        choice = Self.resolve(stored: UserDefaults.standard.string(forKey: Self.key))
     }
 }
 
-/// The segmented light/dark/system control. Used at the top of the landing page and in Settings —
-/// the same two places the web app offers it.
+/// The segmented light/dark control. Used at the top of the landing page and in Settings — the same
+/// two places the web app offers it, and now offering the same two options in both.
 struct ThemeToggle: View {
     @ObservedObject var theme: ThemeManager
     /// Compact drops the labels, for the landing page's header where space is tight.

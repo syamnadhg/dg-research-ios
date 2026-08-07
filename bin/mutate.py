@@ -833,11 +833,11 @@ MUTATIONS = [
     ),
     (
         "ios/App/PairingFlow.swift",
-        "        backend.resetPairing()\n        pairCode = \"\"\n        deviceID = \"\"\n        confirmWindow = nil",
-        "        pairCode = \"\"\n        deviceID = \"\"\n        confirmWindow = nil",
+        "        Task { await backend.abandonPairing() }\n        pairCode = \"\"",
+        "        pairCode = \"\"",
         "test_capture_guards.py::test_cancel_clears_the_local_identity_and_stops_the_heartbeat",
-        "cancel leaving the heartbeat running against a document that is about to be TTL-reaped, so "
-        "every beat 404s while the UI claims the device is not paired",
+        "cancel forgetting the device only LOCALLY — the heartbeat keeps running, and the "
+        "half-made device keeps its synthetic Firebase login, which no TTL sweep can reach",
     ),
     # --- verification needs a render tick -------------------------------------------------------
     (
@@ -1025,11 +1025,249 @@ MUTATIONS = [
         "readiness treated as a one-time fact — enabling deep research NAVIGATES on ChatGPT, so the "
         "pre-navigation composer is dead and typing into it succeeds silently and sends nothing",
     ),
+
+    # --- A8 over an ALREADY-DIRTY guarded repo --------------------------------------------------
+    (
+        "emubackend/purity.py",
+        "            if rel not in cur.dirty_digests:",
+        "            if False:",
+        "test_a8_purity.py::test_compare_detects_a_DISCARDED_uncommitted_change",
+        "a discarded uncommitted change going unreported — the porcelain entry vanishes and a "
+        "current-minus-baseline set difference cannot see a removal, so the one thing handoff "
+        "rule 1 forbids was the one thing the guard could not detect",
+    ),
+    (
+        "emubackend/purity.py",
+        "            elif cur.dirty_digests[rel] != base_digest:",
+        "            elif False:",
+        "test_a8_purity.py::test_compare_detects_an_edit_to_an_ALREADY_modified_file",
+        "editing a file that the baseline already records as modified — git status is "
+        "byte-identical either way, so nothing but the content digest can notice",
+    ),
+    (
+        "emubackend/purity.py",
+        "            dirty_digests=_dirty_digests(repo, dirty_paths),",
+        "            dirty_digests={},",
+        "test_a8_purity.py::test_capture_really_digests_dirty_paths",
+        "the digests never being collected at all, which leaves both compare branches "
+        "permanently inert while every compare test still passes on hand-built states",
+    ),
+    (
+        "emubackend/purity.py",
+        '        path = path.split(" -> ", 1)[1]',
+        '        path = path.split(" -> ", 1)[0]',
+        "test_a8_purity.py::test_porcelain_path_handles_renames_and_plain_entries",
+        "digesting a rename's OLD path, which no longer exists — every renamed file would "
+        "record as absent and then read as discarded on the next check",
+    ),
+    (
+        "emubackend/purity.py",
+        '        if not rel or rel.split("/", 1)[0] in _VOLATILE:',
+        "        if not rel:",
+        "test_a8_purity.py::test_volatile_dirs_are_not_digested",
+        "digesting queues/, which the production daemon writes on every real run — the guard "
+        "would go red for reasons unrelated to us, and a guard that cries wolf gets switched off",
+    ),
+
+    # --- workers are browser profiles (the multi-worker build) -----------------------------------
+    (
+        "ios/Sources/SuperResearchDeviceCore/WorkerProfiles.swift",
+        # ⚠ Both branches, deliberately. Flipping only the first comparison LOOKED like the union
+        # bug and was recorded MISSED: with worker-1 true and worker-2 false, `contains(true)` is
+        # also true, so the mutant still wrote `false` and the test could not tell them apart. The
+        # union is a two-branch change, and only mutating both actually simulates it.
+        "            if values.contains(where: { $0 == false }) {\n"
+        "                out[platform] = false\n"
+        "            } else if values.allSatisfy({ $0 == true }) {\n"
+        "                out[platform] = true\n"
+        "            }",
+        "            if values.contains(where: { $0 == true }) {\n"
+        "                out[platform] = true\n"
+        "            } else if values.allSatisfy({ $0 == false }) {\n"
+        "                out[platform] = false\n"
+        "            }",
+        "swift:WorkerProfileTests/testAPlatformSignedInOnOnlyOneOfTwoWorkersIsReportedSignedOut",
+        "reporting device logins as the UNION, so the device advertises itself ready for a run the "
+        "backend hands to a worker with no cookie — surfacing phases later as a login wall",
+    ),
+    (
+        "ios/Sources/SuperResearchDeviceCore/WorkerProfiles.swift",
+        "            } else if values.allSatisfy({ $0 == true }) {",
+        "            } else if values.allSatisfy({ $0 != false }) {",
+        "swift:WorkerProfileTests/"
+        "testAPlatformNotYetCheckedOnOneWorkerIsOmittedRatherThanCalledSignedOut",
+        "treating never-measured as signed-in, so an unchecked worker reads as ready",
+    ),
+    (
+        "ios/Sources/SuperResearchDeviceCore/WorkerProfiles.swift",
+        # ⚠ On the LOAD path, not the create path. The first attempt mutated the fresh-registry
+        # branch and was recorded MISSED, because a relaunch test never reaches it — the data is
+        # there, so it decodes. The defect worth simulating is the identity being regenerated on
+        # the way back IN, which is what actually points WebKit at a different jar.
+        "            workers = decoded.sorted { $0.id < $1.id }",
+        "            workers = decoded.sorted { $0.id < $1.id }"
+        ".map { WorkerProfile(id: $0.id, storeID: UUID(), logins: $0.logins) }",
+        "swift:WorkerProfileTests/testAWorkerKeepsItsCookieJarAcrossRelaunch",
+        "a store identifier regenerated on load, pointing WebKit at a different jar on disk — every "
+        "platform login silently lost with nothing in any log to explain it",
+    ),
+    (
+        "ios/Sources/SuperResearchDeviceCore/WorkerProfiles.swift",
+        "        guard let data = try? JSONEncoder().encode(workers) else { return }\n"
+        "        storage.saveWorkers(data)",
+        "        guard (try? JSONEncoder().encode(workers)) != nil else { return }",
+        "swift:WorkerProfileTests/testMeasuredLoginsSurviveARelaunch",
+        "a registry that never writes back, so every added worker and every measured login is lost "
+        "on the next launch while the running app looks entirely correct",
+    ),
+    (
+        "ios/Sources/SuperResearchDeviceCore/WorkerProfiles.swift",
+        "        if busyWorkerIDs.contains(last.id) { return .busy(id: last.id) }",
+        "        if busyWorkerIDs.contains(last.id + 1000) { return .busy(id: last.id) }",
+        "swift:WorkerProfileTests/testABusyWorkerIsNotRemoved",
+        "removing a worker that is mid-run, orphaning the run the backend assigned to it",
+    ),
+    (
+        "ios/Sources/SuperResearchDeviceCore/WorkerProfiles.swift",
+        "        if id != highest { return .notTheLastWorker(highest: highest) }",
+        "        if id > highest { return .notTheLastWorker(highest: highest) }",
+        "swift:WorkerProfileTests/testRemovingFromTheMiddleIsRefusedSoOrdinalsAreNeverRenumbered",
+        "allowing a middle removal, which renumbers ordinals and hands a running worker a different "
+        "id from the one its run was assigned to",
+    ),
+    (
+        "ios/Sources/SuperResearchDeviceCore/WorkerProfiles.swift",
+        "        let next = WorkerProfile(id: workers.count + 1, storeID: makeID())",
+        "        let next = WorkerProfile(id: workers.count + 2, storeID: makeID())",
+        "swift:WorkerProfileTests/testAddingWorkersProducesContiguousOneBasedIDs",
+        "non-contiguous worker ids, which breaks the backend's 1...workerCount padding",
+    ),
+
+    # ⚠ The ios/App boundary guard is NOT mutated here. It is a scanner, so the only mutation that
+    # matters is a positive one — see `probe_app_layer_boundary`. Weakening its allow-list would make
+    # it pass harder, not fail, and would have been recorded as CAUGHT while proving nothing.
+
+    # --- the app wave: unpair, session survival, autostart, names ---------------------------------
+    (
+        "ios/Sources/SuperResearchDeviceCore/DeviceBackend.swift",
+        "            let action = try await pairing.unpairSelf(deviceId: deviceID)",
+        "            let action = \"retired\"; try await pairing.patchDevice(\n"
+        "                deviceId: deviceID, set: [\"status\": \"retired\"], delete: [])",
+        "swift:DeviceBackendBehaviourTests/testUnpairCallsTheServerRouteRatherThanWritingAStatusField",
+        "the old unpair: writing status:retired, which NO frontend code reads, so the device stayed "
+        "on the Account page forever while the app reported 'Unpaired'",
+    ),
+    (
+        "ios/Sources/SuperResearchDeviceCore/DeviceBackend.swift",
+        "            startHeartbeat()\n"
+        "            return OpResult(\n"
+        "                ok: false,\n"
+        "                message: \"Unpair failed, so this device is still paired: \\(error)\"\n"
+        "            )",
+        "            clearLocalIdentity()\n"
+        "            return OpResult(\n"
+        "                ok: false,\n"
+        "                message: \"Unpair failed, so this device is still paired: \\(error)\"\n"
+        "            )",
+        "swift:DeviceBackendBehaviourTests/testAFailedUnpairKeepsTheIdentitySoItCanBeRetried",
+        "clearing the local identity after a FAILED unpair, stranding a device that still exists "
+        "server-side and can never be removed — the credential authorising removal is gone",
+    ),
+    (
+        "ios/Sources/SuperResearchDeviceCore/DeviceBackend.swift",
+        "            do {\n"
+        "                if try await self.pairing.readDocument(path: \"devices/\\(id)\") == nil {",
+        "            do {\n"
+        "                if (try? await self.pairing.readDocument(path: \"devices/\\(id)\")) == nil {",
+        "swift:DeviceBackendBehaviourTests/testAThrownReadKeepsTheIdentityBecauseOfflineIsNotUnpaired",
+        "the `try?` that flattened 'offline / not signed in' into 'the document is gone', so a "
+        "dropped connection at launch unpaired the device permanently",
+    ),
+    (
+        "ios/Sources/SuperResearchDeviceCore/DeviceBackend.swift",
+        "            guard Self.storedSupervised else {",
+        "            guard true else {",
+        "swift:DeviceBackendBehaviourTests/testAutostartOffMeansTheDeviceDoesNotComeOnlineByItself",
+        "the heartbeat starting unconditionally, which made the On Startup toggle decorative — the "
+        "device came online whether or not it had been asked to",
+    ),
+    (
+        "ios/Sources/SuperResearchDeviceCore/DeviceBackend.swift",
+        "        try? await coordinator.heartbeat(deviceId: deviceID, workerCount: workers.count)",
+        "        try? await coordinator.heartbeat(deviceId: deviceID, workerCount: 1)",
+        "swift:DeviceBackendBehaviourTests/testTheHeartbeatReportsTheRealWorkerCount",
+        "the hardcoded workerCount: 1, so the frontend sized the capacity UI off a constant and "
+        "handed a multi-worker device one run at a time",
+    ),
+    (
+        "ios/Sources/SuperResearchDeviceCore/DeviceBackend.swift",
+        "            if await !self.pairing.hasSession(), let token = self.store.refreshToken {\n"
+        "                await self.pairing.restoreSession(refreshToken: token)\n"
+        "            }",
+        "            if false, let token = self.store.refreshToken {\n"
+        "                await self.pairing.restoreSession(refreshToken: token)\n"
+        "            }",
+        "swift:DeviceBackendBehaviourTests/testResumeReArmsTheSessionBeforeProbingTheDocument",
+        "never re-arming the session on launch, so a relaunched app holds an identity it cannot "
+        "authenticate and can neither heartbeat nor unpair",
+    ),
+    (
+        "ios/Sources/SuperResearchDeviceCore/DeviceBackend.swift",
+        "            if let label = name ?? email {",
+        "            if let label = email ?? name {",
+        "swift:PeopleResolutionTests/testTheOwnerIsNamedFromOwnerDisplayNameWithNoFrontendChange",
+        "preferring the email over the display name, so People shows addresses where the web app "
+        "shows names",
+    ),
+    (
+        "ios/Sources/SuperResearchDeviceCore/DeviceBackend.swift",
+        "            case .string(let text): return Int(text) ?? Int(text.replacingOccurrences(\n"
+        "                of: \"worker-\", with: \"\"))",
+        "            case .string: return nil",
+        "swift:PeopleResolutionTests/testBusyWorkerIDsParseBothIntegerAndStringForms",
+        "parsing only one of the two busyWorkerIds shapes, yielding an EMPTY busy set — which is "
+        "what lets Remove worker delete a worker mid-run",
+    ),
+    (
+        "ios/Sources/SuperResearchDeviceCore/Operations.swift",
+        "        guard let requiresSupervised, requiresSupervised != supervised else { return nil }",
+        "        guard let requiresSupervised, requiresSupervised == supervised else { return nil }",
+        "swift:OperationsCatalogueTests/testDaemonLoopIsUsableOnlyWhenAutostartIsOn",
+        "inverting the supervision gate, so Daemon loop is offered exactly when it cannot work and "
+        "Start serving exactly when it is pointless",
+    ),
 ]
 
 
 def run(node: str) -> bool:
-    """True if the test PASSES."""
+    """True if the test PASSES.
+
+    Two runners, chosen by prefix. A `swift:` node runs `swift test --filter` in `ios/`; anything
+    else is a pytest node id under `emubackend/tests/`.
+
+    ⚠ The Swift runner is not a convenience. Every Swift-source mutation here used to be verified by
+    a *Python* test that reads the Swift file as text — which proves the string changed, not that
+    any Swift assertion depends on it. A guard written in XCTest can only be shown to fail by
+    running XCTest, so mutating Swift and checking pytest would be exactly the decorative-guard
+    shape this harness exists to catch.
+    """
+    if node.startswith("swift:"):
+        p = subprocess.run(
+            ["swift", "test", "--filter", node[len("swift:"):]],
+            cwd=ROOT / "ios",
+            capture_output=True,
+            text=True,
+            env={"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "HOME": str(Path.home())},
+        )
+        # `--filter` matching nothing still exits 0, so a typo'd filter would report every mutation
+        # CAUGHT while running no assertions at all. Demand evidence that tests actually executed.
+        if "Executed 0 tests" in p.stdout or "Executed" not in p.stdout:
+            raise SystemExit(
+                f"swift --filter {node[len('swift:'):]!r} selected no tests — "
+                "the mutation result would be meaningless"
+            )
+        return p.returncode == 0
+
     p = subprocess.run(
         [str(PY), "-m", "pytest", f"emubackend/tests/{node}", "-q", "--no-header"],
         cwd=ROOT,
@@ -1076,6 +1314,37 @@ def probe_forbidden_call_detector(failures: list[str]) -> None:
     print(f"{status} {node}\n          simulates: our own code calling setup_firestore_run()")
 
 
+def probe_app_layer_boundary(failures: list[str]) -> None:
+    """Positive fixture: plant a pure-logic file in `ios/App` and prove the boundary test finds it.
+
+    Same inverse direction as `probe_forbidden_call_detector`, and for the same reason. The guard
+    scans a directory; a scan that finds nothing is indistinguishable from a clean directory. And the
+    defect it guards against is one this repo actually shipped — the whole device model layer sat in
+    `ios/App` behind an `import SwiftUI` where `swift test` compiled none of it, while the suite
+    reported 104 green tests.
+    """
+    node = "swift:AppLayerBoundaryTests/testEveryFileInTheAppDirectoryIsAView"
+    probe = ROOT / "ios" / "App" / "_MutationProbe.swift"
+    assert not probe.exists(), "probe file already present — refusing to clobber"
+    try:
+        # Foundation only: this is precisely the shape that must not be allowed to hide here.
+        probe.write_text(
+            "import Foundation\n\n"
+            "/// Planted by bin/mutate.py. Pure logic, no UI framework — the boundary test must "
+            "flag it.\n"
+            "enum _MutationProbe { static let untestedLogic = 1 }\n"
+        )
+        caught = not run(node)
+    finally:
+        probe.unlink()
+    clean = run(node)
+    status = "CAUGHT " if (caught and clean) else "MISSED "
+    if status == "MISSED ":
+        failures.append(f"{status}{node} (planted_file_detected={caught} clean_passed={clean})")
+    print(f"{status} {node}\n          simulates: pure logic living in ios/App, where NOTHING "
+          f"compiles it under swift test")
+
+
 def _purge_bytecode() -> None:
     """Remove stale __pycache__ trees before starting.
 
@@ -1114,6 +1383,7 @@ def main() -> int:
             )
         print(f"{status} {node}\n          simulates: {defect}")
     probe_forbidden_call_detector(failures)
+    probe_app_layer_boundary(failures)
     print()
     if failures:
         print("PROBLEMS:")

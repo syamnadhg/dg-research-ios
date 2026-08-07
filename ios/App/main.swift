@@ -76,13 +76,22 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             "\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)"
         }
 
+        // ⚠ A backend that sleeps is a backend that is offline. iOS dims and locks an idle device,
+        // which suspends the app and stops the heartbeat — so a device left paired on a desk would
+        // silently drop off the web app. This is exactly the trade a backend wants and an ordinary
+        // app does not.
+        //
+        // Installed BEFORE the model is built, because `AppModel.init` calls `resumeIfPaired()`,
+        // which is the first thing that wants it. Set from the stored On Startup intent rather than
+        // hardcoded true: a device the owner has told not to serve automatically has no business
+        // holding the screen awake.
+        DeviceBackend.keepAwakeHook = { keepAwake in
+            Task { @MainActor in UIApplication.shared.isIdleTimerDisabled = keepAwake }
+        }
+        application.isIdleTimerDisabled = DeviceBackend.storedSupervised
+
         let model = AppModel(backend: Self.chooseBackend())
         self.model = model
-
-        // ⚠ A backend that sleeps is a backend that is offline. iOS dims and locks an idle device, which
-        // suspends the app and stops the heartbeat — so a device left paired on a desk would silently
-        // drop off the web app. This is exactly the trade a backend wants and an ordinary app does not.
-        application.isIdleTimerDisabled = true
 
         let window = UIWindow(frame: UIScreen.main.bounds)
         window.rootViewController = UIHostingController(
