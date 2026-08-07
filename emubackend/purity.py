@@ -60,6 +60,27 @@ _IGNORED_BUT_LIVE = ("build", "dist", "superresearch.egg-info")
 #: legitimate should appear. See :func:`queue_census` and :func:`no_queue_writes`.
 _VOLATILE = ("queues",)
 
+#: Why dirty paths are digested as well as listed.
+#:
+#: ``compare`` reports *newly appearing* porcelain entries, which is the right shape while
+#: a guarded repo is clean: any modification is a new entry. It stops being sufficient the
+#: moment the baseline is taken over a repo that is *already* dirty — which is exactly the
+#: state this machine is in, holding a wave of uncommitted backend work that exists
+#: nowhere else. Two failures then become invisible, because both leave the porcelain
+#: string identical or absent rather than new:
+#:
+#:   * editing a file that is already reported as " M" — same entry, different bytes;
+#:   * **discarding** such a file (checkout/restore/stash/clean) — the entry simply
+#:     disappears, and a set difference of ``current - baseline`` can never see a removal.
+#:
+#: The second is the single worst thing that can happen to this checkout, so a guard that
+#: cannot see it is not a guard. Digesting content closes both directions.
+_DIRTY_DIGEST_RATIONALE = __doc__
+
+#: Marker recorded for a dirty path that does not exist on disk (a staged deletion).
+#: Distinct from "absent from the mapping", which means the path is no longer dirty.
+_ABSENT = "<absent>"
+
 _BASELINE_PATH = Path(__file__).resolve().parent.parent / "fixtures" / "a8_baseline.json"
 
 
@@ -79,6 +100,9 @@ class RepoState:
     untracked: list[str] = field(default_factory=list)
     #: name -> content digest for the ignored-but-live dirs (absent dirs are omitted)
     ignored_digests: dict[str, str] = field(default_factory=dict)
+    #: path -> content digest for every path git already reports as dirty (tracked
+    #: modifications *and* untracked files). See :data:`_DIRTY_DIGEST_RATIONALE`.
+    dirty_digests: dict[str, str] = field(default_factory=dict)
 
     def to_json(self) -> dict:
         return {
@@ -87,6 +111,7 @@ class RepoState:
             "tracked_changes": self.tracked_changes,
             "untracked": self.untracked,
             "ignored_digests": self.ignored_digests,
+            "dirty_digests": self.dirty_digests,
         }
 
     @classmethod
@@ -97,6 +122,7 @@ class RepoState:
             tracked_changes=list(raw.get("tracked_changes", [])),
             untracked=list(raw.get("untracked", [])),
             ignored_digests=dict(raw.get("ignored_digests", {})),
+            dirty_digests=dict(raw.get("dirty_digests", {})),
         )
 
 
@@ -136,6 +162,41 @@ def _digest_tree(root: Path) -> str:
     return h.hexdigest()
 
 
+def _porcelain_path(entry: str) -> str:
+    """Extract the working-tree path from one ``git status --porcelain=v1`` line.
+
+    Renames arrive as ``R  old -> new``; the *new* path is the one on disk. Quoted paths
+    (non-ASCII, spaces) keep their quotes — they are only ever used as dict keys and
+    compared against themselves, so unquoting would add a failure mode for no gain.
+    """
+    path = entry[3:] if len(entry) > 3 else ""
+    if " -> " in path:
+        path = path.split(" -> ", 1)[1]
+    return path.strip()
+
+
+def _digest_file(path: Path) -> str:
+    """Content digest of one file, or :data:`_ABSENT` if it is not a readable file."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except (OSError, ValueError):
+        return _ABSENT
+
+
+def _dirty_digests(repo: Path, entries: list[str]) -> dict[str, str]:
+    """Digest every dirty path, skipping the volatile dirs the daemon writes to."""
+    out: dict[str, str] = {}
+    for rel in entries:
+        if not rel or rel.split("/", 1)[0] in _VOLATILE:
+            continue
+        target = repo / rel
+        if target.is_dir():
+            out[rel] = _digest_tree(target)
+        else:
+            out[rel] = _digest_file(target)
+    return out
+
+
 def capture(parent: Path | None = None) -> dict[str, RepoState]:
     """Fingerprint every guarded repo. *parent* defaults to this repo's parent dir."""
     parent = parent or Path(__file__).resolve().parent.parent.parent
@@ -154,12 +215,14 @@ def capture(parent: Path | None = None) -> dict[str, RepoState]:
         digests = {
             d: _digest_tree(repo / d) for d in _IGNORED_BUT_LIVE if (repo / d).is_dir()
         }
+        dirty_paths = [_porcelain_path(e) for e in tracked] + list(untracked)
         states[name] = RepoState(
             name=name,
             head=_git(repo, "rev-parse", "HEAD").strip(),
             tracked_changes=sorted(tracked),
             untracked=sorted(untracked),
             ignored_digests=digests,
+            dirty_digests=_dirty_digests(repo, dirty_paths),
         )
     return states
 
@@ -221,6 +284,18 @@ def compare(
                 problems.append(
                     f"{name}: contents of {d!r} changed — .gitignore hid this from "
                     f"git status, which is exactly why it is fingerprinted"
+                )
+        for rel, base_digest in sorted(base.dirty_digests.items()):
+            if rel not in cur.dirty_digests:
+                problems.append(
+                    f"{name}: {rel!r} is no longer reported as modified — an uncommitted "
+                    f"change was DISCARDED (checkout/restore/stash/clean). This wave "
+                    f"exists nowhere else; recover it before doing anything else"
+                )
+            elif cur.dirty_digests[rel] != base_digest:
+                problems.append(
+                    f"{name}: contents of {rel!r} changed while it was already modified "
+                    f"— git status looks identical, so only the digest can see this"
                 )
         appeared = sorted(set(cur.ignored_digests) - set(base.ignored_digests))
         if appeared:

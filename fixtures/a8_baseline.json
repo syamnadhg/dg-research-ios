@@ -1,25 +1,65 @@
 {
   "dg-research": {
-    "head": "7073d25290c606e6f65be0d4aaf03170755dead8",
+    "dirty_digests": {},
+    "head": "f34a3afbe0679acc265197c4c51523189c0b58da",
     "ignored_digests": {},
     "name": "dg-research",
     "tracked_changes": [],
     "untracked": []
   },
   "dg-research-backend": {
-    "head": "36817f023569f214d52296d5eba165a45faf3e79",
+    "dirty_digests": {
+      "narrate.py": "9f9a405ebcc4cc8d9ac403515d6cc7fa42b8b4c1242e76bafd42070423fbb698",
+      "research.py": "836cef6fbb38ef800891e29d6b432c50d5b6e50ca5cb0246e4f5266edf148b2e",
+      "tests/_domshim.py": "4abcc35f02143db017cc9dcdbb3850c933fad2849d084a4a4edc91958a827641",
+      "tests/test_alert_copy_hygiene_63.py": "50f0afed36b4deb73cbacf3769ca79690acd466aa0a5d9b9ce2d984e17376dbc",
+      "tests/test_bug_batch_929.py": "1a466e821b663379ed43a1c45f362392bab15370ba5c8fa5cc087eab00148ebd",
+      "tests/test_chatgpt_conversation_identity.py": "7afbb2f9c78f3f2d65e32df294b7aa73bbcc1a95234af5cac7c74f45e34521f0",
+      "tests/test_chatgpt_dr_menu.py": "9415e47a955b2e27a77ca71a2af0883c9e224b54d41905b135b5d58d958c2ce9",
+      "tests/test_chatgpt_dr_one_predicate.py": "e3dac351b27e8da5fde48e64f703d3f9aaa415c14c277e526ae6b5686b4050a4",
+      "tests/test_chatgpt_row_scope_0805.py": "ac2d3a6f38dc05a89ec017ba7b40fb919a17cfc7bbf38c2797192f1bc0f9d8e7",
+      "tests/test_claude_model_pick.py": "5ed2da02b21822d76e1ab67f498e4f5ba8563162756bd64f0c774ba2433b735e",
+      "tests/test_claude_popover_skip.py": "e1c5dfcaec43661af1169393b2245626f3cc109d29ce6211fa36b9d2b2181d20",
+      "tests/test_ctrl_c_stops_the_fleet.py": "0d7f81084e5f9f59b1b736f653d42d680632a1f02e4077d5b6760ff22b019962",
+      "tests/test_cua_generating_polarity.py": "094d2ed0bfa0e406b9717952a3c42ca200828a209ad431a76dc2969b8d095c5b",
+      "tests/test_decision_resolves_on_arrival.py": "b34bdc1ad592596681ade1e278bfb21f8acc7f52e46f54977a2a56b5588ec462",
+      "tests/test_drift_review_0805.py": "25d850b8f0a82ee986e3e9c388fe8c0f39894369c22f4ab3b7d3b859951e8346",
+      "tests/test_gemini_thinking_config_rejected.py": "854a576a0bbb7df46081a6f6f6455b696efe63d1b015d53fe67b721bab1d3096",
+      "tests/test_p2_botscore_fixes.py": "c3e2bac1918b3fa46e795c757348bb299da2b5b298a7e498348c09a516f632be",
+      "tests/test_p2_panel_rows_9614.py": "549c8df8e7ca40d0d1603e6c9173c2ac7ddcbe316b787765744c2d73f3b67078",
+      "tests/test_secondaries_prod0805.py": "97d9bd62be9140ece5396f7475339f29f90db2efe1e44bde080671c8c97d9314",
+      "tests/test_topic_guard_and_never_grew.py": "9b5de5819660048c8db482fa96f2a97d5075a0230c5d52add1dd2c0b70ebaa76"
+    },
+    "head": "f1c68a589ece2043d11658e26f3ec030b9dd1fac",
     "ignored_digests": {
-      "build": "911e9095a33d723288b37742eb7b20a6cacc4b489eac47003bd638eee361744f",
-      "dist": "4ae6d97c972ee325b7e6ffc5301f2effff8f65bc4658e7ca9f8df1d5c5e3c2ad",
-      "superresearch.egg-info": "42b5630a61cfe6039ffc709475d33844ab9e13a5043dc0d5e838288502006af6"
+      "build": "41031c7762e6ea7a4bfd5ede5ca365de2e5a75a323dd4d8cce37d0756d440d89",
+      "dist": "1a7cd9e42a81dcd3477701ed068d6777ab0a7e54359404c920c83f55fba0f42e",
+      "superresearch.egg-info": "e19eba020f3006c359654943327bea90c3a051a038f51ac2e538d07f1b243b40"
     },
     "name": "dg-research-backend",
-    "tracked_changes": [],
+    "tracked_changes": [
+      " M narrate.py",
+      " M research.py",
+      " M tests/_domshim.py",
+      " M tests/test_alert_copy_hygiene_63.py",
+      " M tests/test_bug_batch_929.py",
+      " M tests/test_chatgpt_dr_menu.py",
+      " M tests/test_claude_model_pick.py",
+      " M tests/test_claude_popover_skip.py",
+      " M tests/test_p2_botscore_fixes.py"
+    ],
     "untracked": [
-      ".DS_Store",
-      ".claude/",
-      "agent/uv.lock",
-      "uv.lock"
+      "tests/test_chatgpt_conversation_identity.py",
+      "tests/test_chatgpt_dr_one_predicate.py",
+      "tests/test_chatgpt_row_scope_0805.py",
+      "tests/test_ctrl_c_stops_the_fleet.py",
+      "tests/test_cua_generating_polarity.py",
+      "tests/test_decision_resolves_on_arrival.py",
+      "tests/test_drift_review_0805.py",
+      "tests/test_gemini_thinking_config_rejected.py",
+      "tests/test_p2_panel_rows_9614.py",
+      "tests/test_secondaries_prod0805.py",
+      "tests/test_topic_guard_and_never_grew.py"
     ]
   }
 }
