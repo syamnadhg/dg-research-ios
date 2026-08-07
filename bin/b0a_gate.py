@@ -32,6 +32,8 @@ sys.path.insert(0, str(REPO))
 
 from emubackend.substrate import geometry, hid, iwdp  # noqa: E402
 
+from emubackend.substrate import device
+
 PAGE_URL = "http://127.0.0.1:8899/"
 ARTIFACTS = REPO / "artifacts" / "b0a"
 
@@ -53,17 +55,24 @@ def sh(*args: str, timeout: float = 180.0) -> str:
 
 
 def booted_udid(preferred: str | None) -> str:
-    out = sh("xcrun", "simctl", "list", "devices", "booted")
-    if preferred and preferred in out:
-        return preferred
-    for line in out.splitlines():
-        if "(Booted)" in line and "(" in line:
-            return line.split("(")[1].split(")")[0]
-    if preferred:
-        sh("xcrun", "simctl", "boot", preferred)
-        sh("xcrun", "simctl", "bootstatus", preferred, "-b")
-        return preferred
-    raise GateFailure("no booted simulator and no --udid given")
+    """Resolve THIS project's simulator, and boot it.
+
+    ⚠ This used to take the FIRST BOOTED device. On 2026-08-07 that was a stock ``iPhone 17`` that
+    had never had the app installed — CoreSimulator had shut our device down after a Mac reboot and
+    Simulator.app booted its own remembered one instead. The gate would have run end to end against
+    a blank phone and reported green, while the pairing and four hand-made platform logins sat
+    untouched on the device nobody was looking at. This Mac has three devices whose names start
+    "iPhone 17", so it is not a remote coincidence.
+
+    ``require_app=True``: refuse to fall back to a device that has never had the app, rather than
+    quietly testing nothing.
+    """
+    try:
+        udid = device.resolve_udid(preferred, require_app=True)
+    except device.NoDeviceFound as exc:
+        raise GateFailure(str(exc)) from exc
+    device.ensure_booted(udid)
+    return udid
 
 
 def page_reachable(url: str = PAGE_URL, timeout: float = 3.0) -> bool:

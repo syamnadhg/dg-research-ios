@@ -187,10 +187,17 @@ On an idle page the capture reports "no candidate" for them, which reads as a to
 simply has no such nodes yet.
 
 ```bash
-UDID=$(xcrun simctl list devices booted | sed -n 's/.*(\([0-9A-F-]\{36\}\)) (Booted).*/\1/p' | head -1)
+# 0. Bring up THIS project's phone and pin it as the one Simulator.app opens.
+#
+# ⚠ Do NOT resolve the target as "the first booted simulator", which is what this line used to do.
+# On 2026-08-07 that returned a stock `iPhone 17` with nothing installed: after a Mac reboot
+# CoreSimulator shut SR-iPhone17Pro down and Simulator.app booted its own remembered device. The
+# home screen looked wiped, and any rebuild would have installed onto the wrong phone. This Mac has
+# three devices whose names begin "iPhone 17".
+bin/sim.sh
+UDID=$(xcrun simctl list devices | sed -n 's/^ *SR-iPhone17Pro (\([0-9A-Fa-f-]\{36\}\)).*/\1/p' | head -1)
 
 # 1. Sign in to the platform in the Simulator's Safari. 2FA, password manager, whatever it needs.
-open -a Simulator
 
 # 2. Pass one — the idle signed-in page. Captures composer / send / logged_in_marker / the toggle.
 .venv/bin/python bin/capture_selectors.py --udid "$UDID" --platform chatgpt --url https://chatgpt.com
