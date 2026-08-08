@@ -12,9 +12,10 @@ import Foundation
 /// along with the bridge, and an entry that cannot be performed here is not listed. Three
 /// consequences worth stating, because each removed something the UI used to show:
 ///
-/// * **No Pairing group.** By the time Settings is reachable the device is paired, so "Pair this
-///   device" was dead copy. `unpair` moved to Maintenance, where the rest of the device-lifecycle
-///   actions already were.
+/// * **No Pairing group, and no Maintenance group either.** By the time Settings is reachable the
+///   device is paired, so "Pair this device" was dead copy. And splitting Runtime from Maintenance
+///   put Restart and Reset in different collapsed sections despite being the same kind of act on
+///   the same loop, so there is now ONE group.
 /// * **No `retire`, `resurrect` or `resume`.** Retire/resurrect are the On Startup toggle — the
 ///   terminal's `--retire` means *disable autostart*, not *unpair*, and the old entry's summary
 ///   ("Unpair and mark the device retired") was the inverted-retire bug written into the copy. A

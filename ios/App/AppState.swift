@@ -63,6 +63,15 @@ final class AppModel: ObservableObject {
             device.resumeIfPaired()
         }
         workers = workerRegistry?.workers ?? []
+
+        // Skip the marketing splash when a pairing was LOST rather than never made. The rule itself
+        // is in the core so the suite can reach it — see `shouldOpenOnLostPairingNotice`.
+        if DeviceIdentityStore.shouldOpenOnLostPairingNotice(
+            reason: DeviceIdentityStore.lostPairingReason,
+            isRealBackend: workerRegistry != nil
+        ) {
+            screen = .notPaired
+        }
     }
 
     // MARK: - Workers (browser profiles)

@@ -120,4 +120,48 @@ final class DeviceIdentityStoreTests: XCTestCase {
         }
         s.clear()
     }
+
+    // MARK: - The lost-pairing breadcrumb, and who reads it
+
+    /// ⚠ The property this exists for is NOT "the reason is stored" — that already worked. It is
+    /// that the app OPENS on the page which renders it. The breadcrumb was written correctly for
+    /// two whole waves and shown to nobody, because launch routes to `.landing` and only
+    /// `NotPairedView` prints it.
+    func testALostPairingRoutesLaunchPastTheSplash() {
+        XCTAssertTrue(DeviceIdentityStore.shouldOpenOnLostPairingNotice(
+            reason: "device document no longer exists", isRealBackend: true))
+    }
+
+    /// A device that was simply never paired is not owed an explanation, and sending it to a page
+    /// headed "No user paired" instead of the splash would be a regression for every first launch.
+    func testAFirstLaunchStillGetsTheSplash() {
+        XCTAssertFalse(DeviceIdentityStore.shouldOpenOnLostPairingNotice(
+            reason: nil, isRealBackend: true))
+    }
+
+    /// An empty string is what a cleared-but-not-nilled breadcrumb looks like. It routes the owner
+    /// to a page whose entire purpose is the explanation, and then has none to give.
+    func testAnEmptyReasonIsNotAReason() {
+        XCTAssertFalse(DeviceIdentityStore.shouldOpenOnLostPairingNotice(
+            reason: "", isRealBackend: true))
+    }
+
+    /// The preview backend has no pairing to have lost, so a stale breadcrumb from a real run on
+    /// the same simulator must not hijack its launch.
+    func testThePreviewBackendIsNeverRoutedToTheNotice() {
+        XCTAssertFalse(DeviceIdentityStore.shouldOpenOnLostPairingNotice(
+            reason: "device document no longer exists", isRealBackend: false))
+    }
+
+    /// The two clearing paths, asserted through the routing decision rather than through the
+    /// property — a reason that survives a deliberate unpair would tell the owner their own action
+    /// was an unexplained loss.
+    func testClearingTheNoteStopsTheRouting() {
+        DeviceIdentityStore.noteLostPairing(deviceID: "dev-gone", reason: "unpaired remotely")
+        XCTAssertTrue(DeviceIdentityStore.shouldOpenOnLostPairingNotice(
+            reason: DeviceIdentityStore.lostPairingReason, isRealBackend: true))
+        DeviceIdentityStore.clearLostPairingNote()
+        XCTAssertFalse(DeviceIdentityStore.shouldOpenOnLostPairingNotice(
+            reason: DeviceIdentityStore.lostPairingReason, isRealBackend: true))
+    }
 }

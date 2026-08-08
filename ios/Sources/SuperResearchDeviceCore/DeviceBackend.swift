@@ -494,7 +494,7 @@ final class DeviceBackend: AppBackend {
         }
     }
 
-    // MARK: - Maintenance
+    // MARK: - Doctor, version, diagnostics, reset
 
     /// The app's own version, which IS the backend version on this device.
     /// Version AND update, in one operation.
@@ -1165,6 +1165,26 @@ struct DeviceIdentityStore {
     /// cases where the owner knows what happened and does not need telling.
     static func clearLostPairingNote() {
         lostPairingReason = nil
+    }
+
+    /// Whether launch should skip the marketing splash and open on the not-paired notice.
+    ///
+    /// ⚠ **The breadcrumb was written but never read by anyone who needed it.** `noteLostPairing`
+    /// records why a pairing ended on its own, and only `NotPairedView` renders it — but the app
+    /// opens on `.landing`, so the explanation sat one tap behind a "Get started" button. The owner
+    /// taps Get started, pairs again, and produces a SECOND empty device document without ever
+    /// seeing that the first one was lost. That is the exact silence the breadcrumb exists to break,
+    /// and it has now happened twice.
+    ///
+    /// Lives here rather than in `AppModel.init` because `ios/App` is not a package target — see
+    /// `AppLayerBoundaryTests`. A launch-routing rule inside a view initialiser is a rule no test
+    /// can reach.
+    static func shouldOpenOnLostPairingNotice(reason: String?, isRealBackend: Bool) -> Bool {
+        // An empty string is what a cleared-but-not-nilled breadcrumb looks like; it explains
+        // nothing, so routing to a page whose whole purpose is the explanation would be worse than
+        // the splash. And the preview backend has no pairing to have lost.
+        guard let reason, !reason.isEmpty, isRealBackend else { return false }
+        return true
     }
 
     /// Overridable so the tests can exercise the fallback without touching a real container.
