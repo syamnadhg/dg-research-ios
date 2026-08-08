@@ -565,6 +565,32 @@ final class DeviceBackendBehaviourTests: XCTestCase {
         backend.stopHeartbeat()
     }
 
+    /// ⚠ The reset must not run INSIDE the heartbeat task.
+    ///
+    /// `pollCommands` is called from `beat()`, which runs inside `heartbeatTask`. The handler calls
+    /// `stopHeartbeat()`, cancelling that very task — and `Task.sleep` in a cancelled task returns
+    /// immediately, so the deliberate pause silently did not happen: the device stopped serving and
+    /// resumed within the same tick. Asserting the mechanism (the poll returns promptly, rather than
+    /// blocking for the pause) rather than the outcome, because the outcome looked identical.
+    func testTheResetPauseDoesNotRunInsideTheCancelledHeartbeatTask() async {
+        let transport = FakeTransport()
+        transport.document = ["pairConfirmedAt": .boolean(true)]
+        transport.commands = [command("hard_reset")]
+        let (backend, _) = paired(transport)
+
+        let started = Date()
+        await backend.pollCommands()
+        let elapsed = Date().timeIntervalSince(started)
+
+        XCTAssertLessThan(
+            elapsed, 2.0,
+            "pollCommands must hand the bounce off and return — if it awaited it inline, the whole "
+            + "heartbeat tick would block for the 10s pause"
+        )
+        XCTAssertEqual(transport.deletedPaths.count, 1, "the command is still acked")
+        backend.stopHeartbeat()
+    }
+
     func testAnAlreadyProcessedCommandIsNotRunAgain() async {
         let transport = FakeTransport()
         transport.commands = [command("hard_reset", processed: true)]

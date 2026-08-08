@@ -447,7 +447,7 @@ final class DeviceBackend: AppBackend {
         switch command {
         case "hard_reset", "restart":
             NSLog("[SR] command %@ — bouncing the worker loop", command)
-            await bounceForReset()
+            bounceForReset()
         case "check-update":
             // Stamp `versionCheckedAt` so the web app's About row stops spinning. Allow-listed for
             // the synthetic device user, so this is a write the device may actually make.
@@ -470,17 +470,28 @@ final class DeviceBackend: AppBackend {
     /// ⚠ The desktop's version ends in `os._exit`, and a supervisor respawns it. iOS has no
     /// supervisor: terminating the app stops the heartbeat and the device goes offline permanently
     /// rather than bouncing. So this does the part that is real — stop serving, drop the cached run
-    /// state, come back up — and deliberately keeps the process alive.
+    /// state, come back — and deliberately keeps the process alive.
     ///
-    /// The pause is not cosmetic. The web app proves a reset happened by watching the device go
-    /// DOWN (`RESET_OFFLINE_DETECTION_MS`, 8s) and then return; without a gap it would sit on
-    /// "Resetting…" until its 90-second failsafe and report nothing. Ten seconds of genuine silence
-    /// is the honest signal, because the device really has stopped serving during it.
-    private func bounceForReset() async {
+    /// ⚠⚠ **DETACHED, and that is load-bearing.** This is reached from `pollCommands()`, which runs
+    /// inside `heartbeatTask`. `stopHeartbeat()` cancels that task — the very task this code is
+    /// executing in — and `Task.sleep` in a cancelled task returns IMMEDIATELY rather than
+    /// sleeping. Written inline, the pause below silently did not happen: the device stopped
+    /// serving and resumed in the same tick. Running it detached is what makes the gap real.
+    ///
+    /// ⚠ What the pause is NOT. It is tempting to say it exists so the web app can see the device
+    /// go down (`RESET_OFFLINE_DETECTION_MS`, 8s) and prove the reset worked — but the phone beats
+    /// every 20s, so heartbeat age exceeds 8s for most of any ordinary interval and that detector
+    /// trips whether or not a reset happened. **Do not judge an end-to-end reset by the pill going
+    /// green.** The pause is here because the device genuinely is not serving during it; the web
+    /// app's own signal is too weak to be evidence either way.
+    private func bounceForReset() {
         stopHeartbeat()
-        _ = await resetState()
-        try? await Task.sleep(nanoseconds: 10_000_000_000)
-        _ = await restartServing()
+        Task.detached { [weak self] in
+            guard let self else { return }
+            _ = await self.resetState()
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            _ = await self.restartServing()
+        }
     }
 
     // MARK: - Maintenance
