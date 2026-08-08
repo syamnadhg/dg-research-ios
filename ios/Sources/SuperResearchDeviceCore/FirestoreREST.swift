@@ -349,6 +349,64 @@ public actor FirestoreREST {
         }
     }
 
+    /// One document in a collection listing.
+    public struct ListedDocument: Sendable {
+        /// The document id — the last path segment of the REST `name`.
+        public let id: String
+        public let fields: [String: FirestoreValue]
+    }
+
+    /// List a collection.
+    ///
+    /// ⚠ The first collection-level verb this client has ever had. Until now it could read, patch
+    /// and create exactly one document at a time, which is why the device could not consume its own
+    /// command subcollection: `devices/{id}/commands` is written by the web app whenever someone
+    /// taps a device's Online pill, and nothing on the phone could enumerate it.
+    ///
+    /// A POLL, not a listener, and that is forced rather than chosen: Firestore's `Listen` is
+    /// gRPC-only and this client is REST. The caller folds it into the heartbeat tick.
+    ///
+    /// Page size is bounded. An unbounded list of a collection that should hold a handful of
+    /// short-lived documents would, if something ever went wrong upstream, turn one poll into a
+    /// download of everything — on a phone, on cellular.
+    public func listDocuments(
+        collectionPath: String, pageSize: Int = 20
+    ) async throws -> [ListedDocument] {
+        var request = URLRequest(
+            url: URL(string: "\(config.documentsRoot)/\(collectionPath)?pageSize=\(pageSize)")!
+        )
+        request.httpMethod = "GET"
+        try await authorize(&request)
+        do {
+            let json = try await send(request)
+            let docs = json["documents"] as? [[String: Any]] ?? []
+            return docs.compactMap { doc in
+                guard let name = doc["name"] as? String else { return nil }
+                let fields = doc["fields"] as? [String: [String: Any]] ?? [:]
+                return ListedDocument(
+                    id: String(name.split(separator: "/").last ?? ""),
+                    fields: fields.compactMapValues(FirestoreValue.decode)
+                )
+            }
+        } catch FirestoreRESTError.http(status: 404, _) {
+            // An empty subcollection does not exist in Firestore — 404 means "nothing here", which
+            // is the normal state for a command queue nobody has written to.
+            return []
+        }
+    }
+
+    /// Delete one document. The ack the command protocol is built on.
+    public func deleteDocument(path: String) async throws {
+        var request = URLRequest(url: URL(string: "\(config.documentsRoot)/\(path)")!)
+        request.httpMethod = "DELETE"
+        try await authorize(&request)
+        do {
+            _ = try await send(request)
+        } catch FirestoreRESTError.http(status: 404, _) {
+            // Already gone is the goal.
+        }
+    }
+
     /// Patch a document: set some fields, delete others.
     ///
     /// ⚠ **The delete mechanism is a field named in `updateMask` and absent from the body.** Writing

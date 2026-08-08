@@ -64,6 +64,22 @@ final class FakeTransport: DeviceTransport, @unchecked Sendable {
         return try cancelPairResult.get()
     }
 
+    var commands: [FirestoreREST.ListedDocument] = []
+    private(set) var listedPaths: [String] = []
+    private(set) var docPatches: [(path: String, set: [String: FirestoreValue])] = []
+    private(set) var deletedPaths: [String] = []
+
+    func listDocuments(collectionPath: String) async throws -> [FirestoreREST.ListedDocument] {
+        listedPaths.append(collectionPath)
+        return commands
+    }
+
+    func deleteDocument(path: String) async throws { deletedPaths.append(path) }
+
+    func patchDocument(path: String, set: [String: FirestoreValue]) async throws {
+        docPatches.append((path, set))
+    }
+
     func sessionRefreshToken() async -> String? { refreshToken }
     func restoreSession(refreshToken: String) async {
         restoredTokens.append(refreshToken)
@@ -285,7 +301,7 @@ final class DeviceBackendBehaviourTests: XCTestCase {
         )
     }
 
-    // MARK: - Maintenance actually does something
+    // MARK: - The maintenance-shaped operations actually do something
 
     func testDoctorReportsFindingsRatherThanAVerdictAlone() async {
         let transport = FakeTransport()
@@ -321,13 +337,13 @@ final class DeviceBackendBehaviourTests: XCTestCase {
         transport.document = ["pairConfirmedAt": .boolean(true)]
         let (backend, _) = paired(transport)
 
-        let result = await backend.perform(try! XCTUnwrap(Operations.byID("clear")))
+        let result = await backend.perform(try! XCTUnwrap(Operations.byID("reset")))
 
         XCTAssertTrue(result.ok)
         let patch = try! XCTUnwrap(transport.patches.last)
         XCTAssertNotNil(patch.set["workers"])
         XCTAssertNotNil(patch.set["queueOwners"])
-        XCTAssertNil(patch.set["logins"], "Clear state must not sign the device out of anything")
+        XCTAssertNil(patch.set["logins"], "Reset must not sign the device out of anything")
         XCTAssertNil(patch.set["pairConfirmedAt"], "nor unpair it")
     }
 
@@ -348,11 +364,14 @@ final class DeviceBackendBehaviourTests: XCTestCase {
 
         // "9" is past capacity — a worker parked and then removed. Left in place, nothing could ever
         // un-park it, because there is no pill to tap.
-        let result = await backend.setWorkerResting(1, resting: true, current: ["9"])
+        let result = await backend.setWorkerResting(1, resting: true, current: [9])
 
         XCTAssertTrue(result.ok)
-        let written = try! XCTUnwrap(transport.patches.last?.set["restingWorkerIds"] as? [String])
-        XCTAssertEqual(written, ["1"])
+        // ⚠ INTEGERS on the wire. The web app types this field `number[]` and filters reads on
+        // `typeof n === "number"`, while the backend accepts digit-strings — so writing strings
+        // parked the worker for real while the web app showed full capacity.
+        let written = try! XCTUnwrap(transport.patches.last?.set["restingWorkerIds"] as? [Int])
+        XCTAssertEqual(written, [1])
     }
 
     func testWakingAWorkerRemovesItFromTheList() async {
@@ -360,13 +379,13 @@ final class DeviceBackendBehaviourTests: XCTestCase {
         transport.document = ["pairConfirmedAt": .boolean(true)]
         let (backend, _) = paired(transport, workers: 2)
 
-        _ = await backend.setWorkerResting(2, resting: false, current: ["1", "2"])
+        _ = await backend.setWorkerResting(2, resting: false, current: [1, 2])
 
-        let written = try! XCTUnwrap(transport.patches.last?.set["restingWorkerIds"] as? [String])
-        XCTAssertEqual(written, ["1"])
+        let written = try! XCTUnwrap(transport.patches.last?.set["restingWorkerIds"] as? [Int])
+        XCTAssertEqual(written, [1])
     }
 
-    /// ⚠ Clear state's payload has to survive the REAL wire conversion, which the fake never runs.
+    /// ⚠ Reset's payload has to survive the REAL wire conversion, which the fake never runs.
     ///
     /// `testClearStateDropsRunCachesAndLeavesLoginsAlone` asserts what the transport was handed —
     /// and the fake stores `[String: Any]` verbatim. In production those values go through
@@ -374,7 +393,7 @@ final class DeviceBackendBehaviourTests: XCTestCase {
     /// `default:` branch would be silently serialised as the STRING "[]" rather than as an empty
     /// collection. The write would be accepted and the caches would never clear. Asserting the
     /// mechanism, not just the call.
-    func testClearStatesEmptyCollectionsSurviveTheWireConversion() {
+    func testResetsEmptyCollectionsSurviveTheWireConversion() {
         XCTAssertEqual(FirestoreValue.from([String: Any]()), .map([:]),
                        "an empty `workers` map must stay a map")
         XCTAssertEqual(FirestoreValue.from([Any]()), .array([]),
@@ -505,5 +524,120 @@ final class DeviceBackendBehaviourTests: XCTestCase {
 
         let snapshot = await backend.loadSnapshot()
         XCTAssertFalse(snapshot.paired, "the UI must return to a clean state even when cleanup fails")
+    }
+
+    // MARK: - ⭐ Device commands — the web app's Online-pill reset
+
+    private func command(
+        _ action: String, ageMillis: Int64 = 0, processed: Bool = false, id: String = "cmd-1"
+    ) -> FirestoreREST.ListedDocument {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        return FirestoreREST.ListedDocument(
+            id: id,
+            fields: [
+                "action": .string(action),
+                "processed": .boolean(processed),
+                "timestamp": .integer(now - ageMillis),
+                "submittedBy": .string("owner-uid"),
+            ]
+        )
+    }
+
+    /// ⭐ The gap this closes. The web app wrote a valid, rules-accepted command and NOTHING on the
+    /// phone could enumerate the subcollection — it has no collection-read verb at all. The document
+    /// sat there forever while the web app waited for a device bounce that never came.
+    func testAHardResetCommandIsReadAndAcknowledged() async {
+        let transport = FakeTransport()
+        transport.document = ["pairConfirmedAt": .boolean(true)]
+        transport.commands = [command("hard_reset")]
+        let (backend, _) = paired(transport)
+
+        await backend.pollCommands()
+
+        XCTAssertEqual(transport.listedPaths, ["devices/dev-1/commands"])
+        XCTAssertTrue(
+            transport.docPatches.contains { $0.set["processed"] == .boolean(true) },
+            "marked processed BEFORE running: the handler stops the heartbeat, and a crash "
+            + "mid-handler must not leave a command that re-runs on every poll forever"
+        )
+        XCTAssertEqual(transport.deletedPaths, ["devices/dev-1/commands/cmd-1"],
+                       "deleting IS the ack — reset-pair-code polls 5s for exactly this")
+        backend.stopHeartbeat()
+    }
+
+    func testAnAlreadyProcessedCommandIsNotRunAgain() async {
+        let transport = FakeTransport()
+        transport.commands = [command("hard_reset", processed: true)]
+        let (backend, _) = paired(transport)
+
+        await backend.pollCommands()
+
+        XCTAssertTrue(transport.deletedPaths.isEmpty)
+        XCTAssertTrue(transport.docPatches.isEmpty, "a handled command must not be handled twice")
+    }
+
+    /// ⚠ A stale reset describes a world that no longer exists. Running "reset my backend" ten
+    /// minutes late can kill a run that started since.
+    func testAStaleCommandIsSkippedRatherThanRun() async {
+        let transport = FakeTransport()
+        transport.commands = [command("hard_reset", ageMillis: 45_000)]
+        let (backend, _) = paired(transport)
+
+        await backend.pollCommands()
+
+        let patch = try! XCTUnwrap(transport.docPatches.first)
+        XCTAssertEqual(patch.set["staleSkipped"], .boolean(true))
+        XCTAssertEqual(patch.set["processed"], .boolean(true))
+        XCTAssertTrue(transport.deletedPaths.isEmpty,
+                      "a skipped command is marked, not acked as done")
+    }
+
+    /// ⚠ An action this device cannot perform must be consumed ONCE. Leaving it unprocessed would
+    /// retry it on every 20-second beat for the life of the pairing.
+    func testAnUnsupportedCommandIsConsumedRatherThanRetriedForever() async {
+        let transport = FakeTransport()
+        transport.commands = [command("summon_a_daemon")]
+        let (backend, _) = paired(transport)
+
+        await backend.pollCommands()
+
+        XCTAssertTrue(transport.docPatches.contains { $0.set["processed"] == .boolean(true) })
+        XCTAssertEqual(transport.deletedPaths.count, 1)
+    }
+
+    func testCheckUpdateStampsTheFieldTheWebAppSpinsOn() async {
+        let transport = FakeTransport()
+        transport.commands = [command("check-update")]
+        let (backend, _) = paired(transport)
+
+        await backend.pollCommands()
+
+        XCTAssertTrue(
+            transport.patches.contains { $0.set["versionCheckedAt"] != nil },
+            "without this the About row's Check spinner never stops"
+        )
+    }
+
+    func testACommandWithNoActionIsIgnoredRatherThanCrashing() async {
+        let transport = FakeTransport()
+        transport.commands = [
+            FirestoreREST.ListedDocument(id: "junk", fields: ["processed": .boolean(false)])
+        ]
+        let (backend, _) = paired(transport)
+
+        await backend.pollCommands()
+
+        XCTAssertTrue(transport.deletedPaths.isEmpty)
+    }
+
+    func testAnUnpairedDeviceDoesNotPollForCommands() async {
+        let transport = FakeTransport()
+        let empty = store()
+        empty.clear()
+        let backend = DeviceBackend(
+            transport: transport, store: empty, workers: registry(workers: 1)
+        )
+        await backend.pollCommands()
+        XCTAssertTrue(transport.listedPaths.isEmpty)
     }
 }

@@ -34,15 +34,49 @@ final class OperationsCatalogueTests: XCTestCase {
 
     // MARK: - What the owner asked to be gone
 
-    func testTheDuplicateUpgradeOperationIsGone() {
+    func testTheDuplicateUpgradeAndUpdateRowsAreBothGone() {
         XCTAssertNil(Operations.byID("upgrade"),
-                     "upgrade and update meant the same thing; only update remains")
-        XCTAssertNotNil(Operations.byID("update"))
+                     "upgrade and update meant the same thing")
+        // ⚠ `update` folded into `version` too. They were two rows answering one question, and
+        // Update's report always began by restating Version's — so the owner tapped twice to learn
+        // one thing. The row TITLE now carries the update state.
+        XCTAssertNil(Operations.byID("update"))
+        XCTAssertNotNil(Operations.byID("version"))
     }
 
-    func testUninstallIsGoneAndUnpairTookItsPlaceInMaintenance() {
+    func testTheVersionRowAnnouncesAnUpdateInItsTitle() {
+        let op = try! XCTUnwrap(Operations.byID("version"))
+        XCTAssertEqual(op.title(updateAvailable: nil), "Version")
+        XCTAssertEqual(op.title(updateAvailable: ""), "Version",
+                       "an empty string is not an update — it must not shout")
+        XCTAssertTrue(op.title(updateAvailable: "0.1.14").contains("0.1.14"),
+                      "the list must show an update without anything being opened")
+    }
+
+    /// ⚠ Only `version` may rewrite its title. A row whose label changes under you is disorienting
+    /// unless it is the one row whose whole job is to report a changing fact.
+    func testNoOtherOperationRewritesItsTitle() {
+        for op in Operations.all where op.id != "version" {
+            XCTAssertEqual(op.title(updateAvailable: "9.9.9"), op.title,
+                           "\(op.id) must not change its label")
+        }
+    }
+
+    func testUninstallIsGoneAndUnpairIsLastInTheOneGroup() {
         XCTAssertNil(Operations.byID("uninstall"), "iOS uninstalls apps itself")
-        XCTAssertEqual(Operations.byID("unpair")?.group, "Maintenance")
+        XCTAssertEqual(Operations.byID("unpair")?.group, "Runtime")
+        XCTAssertEqual(Operations.all.last?.id, "unpair",
+                       "the irreversible one goes last — same reason it is .destructive")
+    }
+
+    /// ⚠ Maintenance was folded into Runtime. Splitting them put Restart and Reset in different
+    /// collapsed sections despite being the same kind of act on the same loop.
+    func testThereIsExactlyOneGroupAndTheOrderIsTheOwnersOrder() {
+        XCTAssertEqual(Operations.groups, ["Runtime"])
+        XCTAssertEqual(
+            Operations.all.map(\.id),
+            ["serve", "restart", "reset", "version", "doctor", "daemon-loop", "collect", "unpair"]
+        )
     }
 
     func testThereIsNoPairingGroupAndNoPairOperation() {
@@ -91,8 +125,8 @@ final class OperationsCatalogueTests: XCTestCase {
                       "a greyed row with no named cause reads as broken, not as conditional")
     }
 
-    func testMaintenanceOperationsAreAlwaysAvailable() {
-        for op in Operations.inGroup("Maintenance") {
+    func testTheNonRuntimeOperationsAreAlwaysAvailable() {
+        for op in Operations.all where !["serve", "daemon-loop"].contains(op.id) {
             XCTAssertNil(op.unavailableReason(supervised: true))
             XCTAssertNil(op.unavailableReason(supervised: false),
                          "\(op.id) must not depend on the autostart toggle")
@@ -106,11 +140,11 @@ final class OperationsCatalogueTests: XCTestCase {
             XCTAssertTrue(op.requiresConfirmation, "\(op.id) is destructive and must be confirmed")
         }
         XCTAssertEqual(Operations.byID("unpair")?.risk, .destructive)
-        XCTAssertEqual(Operations.byID("clear")?.risk, .destructive)
+        XCTAssertEqual(Operations.byID("reset")?.risk, .destructive)
     }
 
     func testSafeOperationsAreOneTap() {
-        for id in ["doctor", "version", "update", "collect", "serve"] {
+        for id in ["doctor", "version", "collect", "serve"] {
             XCTAssertFalse(try! XCTUnwrap(Operations.byID(id)).requiresConfirmation,
                            "\(id) changes nothing that needs a confirmation step")
         }

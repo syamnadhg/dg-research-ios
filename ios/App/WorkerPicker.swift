@@ -15,7 +15,9 @@ struct WorkerPicker: View {
     /// Worker ordinals running something right now. Rendered, because "why can't I remove this one"
     /// is the first question a refusal raises.
     var busyWorkerIDs: Set<Int> = []
-    let onAdd: () -> Void
+    /// Nil where adding makes no sense — Browser watch is for looking, not configuring. A menu
+    /// row that does nothing reads as a broken control.
+    var onAdd: (() -> Void)? = nil
     /// Absent in the pair flow — you cannot remove a profile you are still setting up.
     var onRemove: ((Int) -> Void)? = nil
 
@@ -35,11 +37,13 @@ struct WorkerPicker: View {
                         }
                     }
                 }
-                Divider()
-                Button {
-                    onAdd()
-                } label: {
-                    Label("Add worker", systemImage: "plus")
+                if let onAdd {
+                    Divider()
+                    Button {
+                        onAdd()
+                    } label: {
+                        Label("Add worker", systemImage: "plus")
+                    }
                 }
                 if let onRemove, let last = workers.last, workers.count > 1 {
                     Button(role: .destructive) {

@@ -25,6 +25,8 @@ struct PeoplePopup: View {
 
     @Namespace private var pillSpace
     @State private var contentHeight: CGFloat = 0
+    /// Which busy worker's pill is expanded to show its phase. One at a time, like the web app.
+    @State private var openWorker: Int?
 
     // MARK: Derived state — mirrors the web app's own derivation
 
@@ -63,6 +65,20 @@ struct PeoplePopup: View {
             card.padding(DS.S.lg)
         }
         .transition(.opacity)
+        // 15s, matching the web app: an expanded pill that never collapses hides the slot id, which
+        // is the one thing every other pill in the popup is showing.
+        .task(id: openWorker) {
+            guard openWorker != nil else { return }
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
+            if !Task.isCancelled { openWorker = nil }
+        }
+        // A slot reclaimed by a different run must not stay expanded describing the old one.
+        .onChange(of: snapshot.workers) { _, workers in
+            if let open = openWorker,
+               !workers.contains(where: { $0.intID == open && $0.isBusy }) {
+                openWorker = nil
+            }
+        }
         .animation(.spring(response: 0.45, dampingFraction: 0.8), value: snapshot.workers)
         .animation(.spring(response: 0.45, dampingFraction: 0.8), value: snapshot.queue)
     }
@@ -92,7 +108,7 @@ struct PeoplePopup: View {
     private var header: some View {
         HStack {
             VStack(alignment: .leading, spacing: 1) {
-                Text("People").font(DS.F.body.weight(.medium)).foregroundStyle(DS.C.textPrimary)
+                Text("People").font(DS.F.title).foregroundStyle(DS.C.textPrimary)
                 Text("\(busy.count) of \(max(capacity, 1)) workers busy")
                     .font(DS.F.label).foregroundStyle(DS.C.textTertiary)
             }
@@ -187,13 +203,14 @@ struct PeoplePopup: View {
     // MARK: 3 — the people tiles
 
     private var peopleTiles: some View {
-        VStack(alignment: .leading, spacing: DS.S.sm) {
+        VStack(alignment: .leading, spacing: DS.S.md) {
             ForEach(snapshot.users) { user in
                 PersonTile(
                     user: user,
                     workers: busy.filter { $0.uid == user.id },
                     queued: snapshot.queue.filter { $0.uid == user.id },
-                    namespace: pillSpace
+                    namespace: pillSpace,
+                    openWorker: $openWorker
                 )
             }
         }
@@ -207,13 +224,13 @@ struct PeoplePopup: View {
                 WorkerSlotPill(
                     id: pill.id,
                     state: pill.busy ? .busy
-                        : (snapshot.restingWorkerIDs.contains("\(pill.id)") ? .resting : .ready),
+                        : (snapshot.restingWorkerIDs.contains(pill.id) ? .resting : .ready),
                     namespace: pillSpace,
                     // A busy pill is never tappable — a run in flight always finishes. Same rule as
                     // the web app, and for the same reason: parking a worker mid-run would either do
                     // nothing or orphan the run.
                     onTap: pill.busy ? nil : {
-                        onToggleRest(pill.id, !snapshot.restingWorkerIDs.contains("\(pill.id)"))
+                        onToggleRest(pill.id, !snapshot.restingWorkerIDs.contains(pill.id))
                     }
                 )
             }
@@ -229,39 +246,63 @@ private struct PersonTile: View {
     let workers: [WorkerState]
     let queued: [QueuedRun]
     let namespace: Namespace.ID
+    @Binding var openWorker: Int?
 
     var body: some View {
         HStack(alignment: .center, spacing: DS.S.md) {
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: DS.S.sm) {
-                    Text(user.label)
-                        .font(DS.F.label.weight(.medium))
-                        .foregroundStyle(DS.C.textPrimary)
-                        .lineLimit(1)
-                        // Middle truncation only matters for an unresolved uid; a name should
-                        // truncate at the end like a name.
-                        .truncationMode(user.isResolved ? .tail : .middle)
+            VStack(alignment: .leading, spacing: 3) {
+                // ⚠ The name is the point of this tile and it was set in the LABEL font — the same
+                // size as the captions beneath it — so a person read as a footnote. Body weight and
+                // size, on its own line, with the pills below rather than competing for the row.
+                Text(user.label)
+                    .font(DS.F.body.weight(.medium))
+                    .foregroundStyle(DS.C.textPrimary)
+                    .lineLimit(1)
+                    // Middle truncation only matters for an unresolved uid; a name should truncate
+                    // at the end like a name.
+                    .truncationMode(user.isResolved ? .tail : .middle)
 
-                    ForEach(workers) { worker in
-                        WorkerSlotPill(id: worker.intID ?? 0, state: .busy, namespace: namespace,
-                                       onTap: nil)
-                    }
-                    ForEach(queued) { run in
-                        QueuePill(position: run.position)
-                    }
-                }
                 if let second = secondLine {
                     Text(second)
-                        .font(DS.F.mono(9))
+                        .font(DS.F.label)
                         .foregroundStyle(DS.C.textTertiary)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                }
+
+                if !workers.isEmpty || !queued.isEmpty {
+                    FlowRow(spacing: DS.S.sm) {
+                        ForEach(workers) { worker in
+                            // ⚠ Tap-for-phase is the ONE web-app pill interaction a device
+                            // principal can actually perform: it writes nothing. Long-press to
+                            // Stop/Cancel addDoc's into devices/{id}/queue, whose `allow create`
+                            // requires ownerUid or sharedWith — the synthetic device uid is
+                            // neither, so those chips would 403 every time and are deliberately
+                            // not here.
+                            WorkerSlotPill(
+                                id: worker.intID ?? 0,
+                                state: .busy,
+                                namespace: namespace,
+                                phase: worker.phase,
+                                totalPhases: worker.totalPhases,
+                                expanded: openWorker == worker.intID,
+                                onTap: {
+                                    let id = worker.intID
+                                    openWorker = (openWorker == id) ? nil : id
+                                }
+                            )
+                        }
+                        ForEach(queued) { run in
+                            QueuePill(position: run.position)
+                        }
+                    }
+                    .padding(.top, 2)
                 }
             }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, DS.S.lg)
-        .padding(.vertical, DS.S.md)
+        .padding(.vertical, DS.S.lg)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(DS.C.surfaceRaised.opacity(0.6))
         .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -291,30 +332,62 @@ private struct WorkerSlotPill: View {
     let id: Int
     let state: State
     let namespace: Namespace.ID
-    /// Nil makes the pill inert — used for busy pills, which must never be toggled.
+    var phase: Int? = nil
+    var totalPhases: Int? = nil
+    /// Busy pills expand to name their phase. Read-only — see PersonTile for why Stop is absent.
+    var expanded: Bool = false
     let onTap: (() -> Void)?
 
+    /// The web app's own short labels, so the two surfaces name a phase identically.
+    private static let phaseLabels = ["Init", "Brief", "Research", "NLM", "Youtube", "Email"]
+
+    private var total: Int { max(totalPhases ?? 6, 1) }
+    private var step: Int { min((phase ?? 0) + 1, total) }
+    private var label: String {
+        let name = Self.phaseLabels.indices.contains(phase ?? -1)
+            ? Self.phaseLabels[phase ?? 0] : "Running"
+        return "\(name) · \(step)/\(total)"
+    }
+
     var body: some View {
-        let pill = Text("\(id)")
-            .font(DS.F.mono(10, .semibold))
-            .foregroundStyle(state == .resting ? DS.C.ok : Color.white)
-            .frame(width: 22, height: 22)
-            .background(state == .resting ? Color.clear : DS.C.ok)
-            .clipShape(Circle())
-            .overlay(
-                Circle().stroke(
-                    state == .resting ? DS.C.ok.opacity(0.8) : .clear,
-                    lineWidth: state == .resting ? 2 : 0
-                )
+        // 26pt, not 22 — the owner could not read these. Still a circle when collapsed.
+        let side: CGFloat = 26
+        let pill = ZStack(alignment: .leading) {
+            if expanded {
+                GeometryReader { geo in
+                    Rectangle()
+                        .fill(DS.C.ok.opacity(0.55))
+                        .frame(width: max(geo.size.width * CGFloat(step) / CGFloat(total), 8))
+                }
+            }
+            Text(expanded ? label : "\(id)")
+                .font(DS.F.mono(11, .semibold))
+                .foregroundStyle(state == .resting ? DS.C.ok : Color.white)
+                .lineLimit(1)
+                .padding(.horizontal, expanded ? 9 : 0)
+                .frame(minWidth: expanded ? 0 : side, alignment: expanded ? .leading : .center)
+        }
+        .frame(height: side)
+        .frame(maxWidth: expanded ? 190 : side)
+        .background(state == .resting ? Color.clear : DS.C.ok.opacity(expanded ? 0.35 : 1))
+        .clipShape(Capsule())
+        .overlay(
+            Capsule().stroke(
+                state == .resting ? DS.C.ok.opacity(0.8) : .clear,
+                lineWidth: state == .resting ? 2 : 0
             )
-            .matchedGeometryEffect(id: "worker-\(id)", in: namespace)
+        )
+        .matchedGeometryEffect(id: "worker-\(id)", in: namespace)
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: expanded)
 
         if let onTap {
             Button(action: onTap) { pill }
                 .buttonStyle(.plain)
-                .accessibilityLabel(state == .resting
-                                    ? "Worker \(id) is resting — tap to wake"
-                                    : "Worker \(id) is ready — tap to rest")
+                .accessibilityLabel(
+                    state == .busy ? "Worker \(id): \(label) — tap for phase"
+                        : state == .resting ? "Worker \(id) is resting — tap to wake"
+                        : "Worker \(id) is ready — tap to rest"
+                )
         } else {
             pill.accessibilityLabel("Worker \(id) is busy")
         }
@@ -328,10 +401,10 @@ private struct QueuePill: View {
 
     var body: some View {
         Text("#\(position)")
-            .font(DS.F.mono(10, .semibold))
+            .font(DS.F.mono(11, .semibold))
             .foregroundStyle(DS.C.bg)
-            .padding(.horizontal, 6)
-            .frame(height: 22)
+            .padding(.horizontal, 7)
+            .frame(height: 26)
             .background(DS.C.warn)
             .clipShape(Capsule())
             .accessibilityLabel("Queued, position \(position)")

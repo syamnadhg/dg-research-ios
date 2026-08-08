@@ -6,10 +6,10 @@ import SwiftUI
 /// operations list on the same screen buries all three of those answers under things you touch once a
 /// month, so they live here.
 ///
-/// Sections follow the operation registry's **own** `group` field (`Operations.groups`: Pairing, Runtime,
-/// Maintenance, Platforms) rather than a grouping invented for this screen. That matters for two
-/// reasons: the registry's grouping is the one the backend already uses, and a category list derived
-/// from the data cannot drift from the data.
+/// Sections follow the operation registry's **own** `group` field rather than a grouping invented
+/// for this screen, so a category list cannot drift from the data. There is one group now: Runtime
+/// absorbed Maintenance, because splitting them put Restart and Reset in different sections despite
+/// being the same kind of act on the same loop.
 ///
 /// Two things are surfaced above the operations because they are *state*, not actions: On Startup (the
 /// `supervised` flag the frontend's Account toggle reads) and which API keys are present.
@@ -22,13 +22,19 @@ struct SettingsSheet: View {
     /// Seeded from the device doc in `onAppear`, not defaulted to on. A toggle that shows the wrong
     /// state is worse than no toggle: it invites a tap that writes the value it was already showing.
     @State private var onStartup = false
-    @State private var expanded: Set<String> = []
+    /// ⚠ Runtime opens by default. It was collapsed when there were several groups and a long
+    /// list; now that Maintenance is folded in there is exactly ONE group, and collapsing it means
+    /// a Settings page whose entire operations section is a single closed row. API keys stay shut —
+    /// those really are set-once.
+    @State private var expanded: Set<String> = ["Runtime"]
     /// Which worker's logins the Workers tile is showing.
     @State private var selectedWorker = 1
     /// Which API key is being added or replaced.
     @State private var editingKey: APIKeyStore.Kind?
     /// Bumped after a key is written, purely to force the presence pills to re-read the Keychain.
     @State private var keyEpoch = 0
+    /// The live supervisor view. Daemon loop is a thing you WATCH, not a one-shot.
+    @State private var daemonOpen = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -49,6 +55,29 @@ struct SettingsSheet: View {
             }
         }
         .background(DS.C.bg)
+        // ⚠ The sheet declares its OWN color scheme. `.preferredColorScheme` applies to the nearest
+        // enclosing PRESENTATION, and a `.sheet` is a new one — so RootView's copy styled the root
+        // window and never reached here. The palette resolves off the UIKit trait
+        // (`DS.C.dyn` reads `traits.userInterfaceStyle`), which only flips where a hosting
+        // controller has an override installed. That is why the theme looked stuck until Settings
+        // was closed and reopened: reopening re-presented it, inheriting the by-then-current trait.
+        .preferredColorScheme(theme.choice.colorScheme)
+        // ⚠ Rendered HERE, not on RootView. UIKit stacks a presented sheet above the presenter's
+        // entire view, so the root's copies of these sat underneath this page: the Restart
+        // confirmation was unreachable, and every toast raised from Settings was invisible.
+        .overlay { ConfirmSheet(model: model) }
+        .overlay(alignment: .bottom) { Toast(text: model.toast) }
+        // ⚠ Likewise the detail sheet. It used to live on RootView — which is already presenting
+        // THIS sheet — and a view controller can only present one modal, so Doctor, Version and
+        // Diagnostics set `opDetail` and nothing ever appeared. Those three are reachable only from
+        // this screen, so this is where the sheet belongs.
+        .sheet(item: Binding(
+            get: { model.opDetail },
+            set: { if $0 == nil { model.opDetail = nil } }
+        )) { detail in
+            OpDetailSheet(title: detail.title, body_: detail.body) { model.opDetail = nil }
+                .preferredColorScheme(theme.choice.colorScheme)
+        }
         .sheet(item: $loginTarget) { platform in
             LoginFlowView(
                 platform: platform, manifestMarker: nil, workerID: selectedWorker
@@ -63,6 +92,10 @@ struct SettingsSheet: View {
                     await model.refresh()
                 }
             }
+        }
+        .sheet(isPresented: $daemonOpen) {
+            DaemonLoopView(model: model) { daemonOpen = false }
+                .preferredColorScheme(theme.choice.colorScheme)
         }
         .sheet(item: $editingKey) { kind in
             APIKeyEditor(kind: kind) {
@@ -91,7 +124,7 @@ struct SettingsSheet: View {
     private var appearanceSection: some View {
         Section(title: "Appearance") {
             ThemeToggle(theme: theme)
-            Text("Follows the system unless you choose. Defaults to dark, since the rest of the product's signed-in surface is.")
+            Text("Defaults to dark, since the rest of the product's signed-in surface is.")
                 .font(DS.F.label).foregroundStyle(DS.C.textTertiary)
         }
     }
@@ -104,8 +137,8 @@ struct SettingsSheet: View {
             row("Backend", model.snapshot.backendVersion.isEmpty
                 ? "—" : model.snapshot.backendVersion)
             if let newer = model.snapshot.updateAvailable {
-                // Surfaced, not acted on: updating is a Mac operation, and the button for it is in
-                // Maintenance below with its scope honestly labelled.
+                // Surfaced here as state; the Version row in Runtime below is where you act on it,
+                // and its title carries the same signal so the list shows it without being opened.
                 HStack {
                     Text("Update available").font(DS.F.label).foregroundStyle(DS.C.warn)
                     Spacer()
@@ -247,10 +280,21 @@ struct SettingsSheet: View {
                         // which reads as the toggle not having worked.
                         OperationRow(
                             op: op,
+                            // Version reads "Update available — 0.1.14" when there is one, so the
+                            // owner sees it while scanning rather than after tapping.
+                            title: op.title(updateAvailable: model.snapshot.updateAvailable),
                             busy: model.busyOpID == op.id,
                             unavailable: op.unavailableReason(supervised: onStartup)
                         ) {
-                            model.invoke(op)
+                            // ⚠ Daemon loop opens the live view instead of firing a toast. It still
+                            // performs the operation — the view is what supervising LOOKS like, and
+                            // a sentence in a toast could never be that.
+                            if op.id == "daemon-loop" {
+                                model.invoke(op)
+                                daemonOpen = true
+                            } else {
+                                model.invoke(op)
+                            }
                         }
                     }
                 }

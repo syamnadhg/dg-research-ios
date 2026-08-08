@@ -29,6 +29,11 @@ protocol DeviceTransport: PairingBackend {
     func unpairSelf(deviceId: String) async throws -> String
     /// `POST /api/devices/cancel-pair` — for a pair that never got as far as a session.
     func cancelPair(deviceId: String, pollSecret: String) async throws -> String
+    /// List a collection. The device's command queue is a subcollection, so this is what makes the
+    /// web app's Online-pill reset reachable at all.
+    func listDocuments(collectionPath: String) async throws -> [FirestoreREST.ListedDocument]
+    func deleteDocument(path: String) async throws
+    func patchDocument(path: String, set: [String: FirestoreValue]) async throws
     /// The persisted half of the auth session.
     func sessionRefreshToken() async -> String?
     func restoreSession(refreshToken: String) async
@@ -38,6 +43,18 @@ protocol DeviceTransport: PairingBackend {
 extension RESTPairingBackend: DeviceTransport {
     func readDocument(path: String) async throws -> [String: FirestoreValue]? {
         try await firestore.getDocument(path: path)
+    }
+
+    func listDocuments(collectionPath: String) async throws -> [FirestoreREST.ListedDocument] {
+        try await firestore.listDocuments(collectionPath: collectionPath)
+    }
+
+    func deleteDocument(path: String) async throws {
+        try await firestore.deleteDocument(path: path)
+    }
+
+    func patchDocument(path: String, set: [String: FirestoreValue]) async throws {
+        try await firestore.patchDocument(path: path, set: set)
     }
 }
 
@@ -121,12 +138,10 @@ final class DeviceBackend: AppBackend {
         if case .string(let version)? = fields["version"] { snapshot.backendVersion = version }
         if case .string(let newer)? = fields["updateAvailable"] { snapshot.updateAvailable = newer }
         if case .boolean(let supervised)? = fields["supervised"] { snapshot.supervised = supervised }
-        if case .array(let resting)? = fields["restingWorkerIds"] {
-            snapshot.restingWorkerIDs = Set(resting.compactMap { value in
-                if case .string(let id) = value { return id }
-                return nil
-            })
-        }
+        // ⚠ Both shapes. The web app writes NUMBERS; this used to parse only strings, so a worker
+        // the owner parked from the web app was invisible on the phone — the pill rendered awake
+        // and tapping it "woke" an already-awake worker.
+        snapshot.restingWorkerIDs = Self.workerIDs(from: fields["restingWorkerIds"])
         snapshot.users = Self.users(from: fields)
         if let logins = Self.platforms(from: fields) { snapshot.platforms = logins }
         return snapshot
@@ -244,12 +259,21 @@ final class DeviceBackend: AppBackend {
     /// map is keyed by. Parsing only one of them would silently return an empty set — and an empty
     /// busy set is exactly what lets Remove worker delete a worker mid-run.
     static func busyWorkerIDs(from fields: [String: FirestoreValue]) -> Set<Int> {
-        guard case .array(let entries)? = fields["busyWorkerIds"] else { return [] }
+        workerIDs(from: fields["busyWorkerIds"])
+    }
+
+    /// Parse a worker-ordinal array, tolerating every shape the contract has carried.
+    ///
+    /// ⚠ Integers AND digit-strings AND `worker-N`. The two writers disagree: the web app writes
+    /// numbers, the backend accepts either. Parsing only one silently yields an EMPTY set — which
+    /// is what lets Remove worker delete a busy worker, and what made a web-app rest invisible here.
+    static func workerIDs(from value: FirestoreValue?) -> Set<Int> {
+        guard case .array(let entries)? = value else { return [] }
         return Set(entries.compactMap { entry -> Int? in
             switch entry {
             case .integer(let number): return Int(number)
-            case .string(let text): return Int(text) ?? Int(text.replacingOccurrences(
-                of: "worker-", with: ""))
+            case .string(let text):
+                return Int(text) ?? Int(text.replacingOccurrences(of: "worker-", with: ""))
             default: return nil
             }
         })
@@ -303,10 +327,9 @@ final class DeviceBackend: AppBackend {
         case "restart": return await restartServing()
         case "daemon-loop": return await runDaemonLoop()
         case "doctor": return await doctor()
-        case "version": return versionReport()
-        case "update": return await checkForUpdate()
+        case "version": return await versionAndUpdate()
         case "collect": return await collectDiagnostics()
-        case "clear": return await clearState()
+        case "reset": return await resetState()
         case "unpair": return await release(op)
         default:
             // Only reachable if the catalogue and this switch drift apart, which is a bug in this
@@ -364,19 +387,142 @@ final class DeviceBackend: AppBackend {
         await pairing.restoreSession(refreshToken: token)
     }
 
+    // MARK: - Device commands (the web app's Online-pill reset)
+
+    /// How stale a command may be before it is skipped rather than run.
+    ///
+    /// 30s, matching the desktop backend. A command that has been sitting because the device was
+    /// asleep describes a world that no longer exists — running it late is worse than not running
+    /// it, because "reset my backend" issued ten minutes ago may now kill a run started since.
+    private static let commandStaleMillis: Int64 = 30_000
+
+    /// Poll and execute this device's command queue.
+    ///
+    /// ⚠ **This did not exist, and its absence was invisible from both ends.** Tapping a device's
+    /// Online pill in the web app writes `{action, processed: false, timestamp, submittedBy}` into
+    /// `devices/{id}/commands`. The desktop backend has a snapshot listener for it; the phone had
+    /// nothing — not even the ability to enumerate a collection. So the document was written,
+    /// accepted by the rules, and never read. The web app then waited for the device to go offline
+    /// (its proof the backend bounced), never saw it, sat on "Resetting…" for the full 90-second
+    /// failsafe and silently gave up. Nothing on the phone had happened, and nothing said so.
+    ///
+    /// A poll rather than a listener because Firestore's `Listen` is gRPC-only and this client is
+    /// REST. Folded into the heartbeat so there is one timer, not two.
+    func pollCommands() async {
+        guard let deviceID else { return }
+        let path = "devices/\(deviceID)/commands"
+        guard let docs = try? await pairing.listDocuments(collectionPath: path) else { return }
+
+        for doc in docs {
+            // Already handled. The desktop sweeps these at startup; here the delete below is the
+            // normal path and this is the guard for one that failed to delete.
+            if case .boolean(true)? = doc.fields["processed"] { continue }
+            guard case .string(let action)? = doc.fields["action"] else { continue }
+
+            let issued: Int64
+            if case .integer(let millis)? = doc.fields["timestamp"] { issued = millis } else { issued = 0 }
+            let age = Int64(Date().timeIntervalSince1970 * 1000) - issued
+            if issued > 0, age > Self.commandStaleMillis {
+                NSLog("[SR] command %@ is %dms old — skipping as stale", action, Int32(age))
+                try? await pairing.patchDocument(
+                    path: "\(path)/\(doc.id)",
+                    set: ["processed": .boolean(true), "staleSkipped": .boolean(true)]
+                )
+                continue
+            }
+
+            // ⚠ Marked processed BEFORE running it, as the desktop does for hard_reset. The handler
+            // stops the heartbeat, and a crash mid-handler must not leave a command that re-runs on
+            // every poll forever — a reset loop would be far worse than a reset that half-ran.
+            try? await pairing.patchDocument(
+                path: "\(path)/\(doc.id)", set: ["processed": .boolean(true)]
+            )
+            await handle(command: action, deviceID: deviceID)
+            // Deleting is the ACK. `/api/devices/reset-pair-code` polls 5s for exactly this.
+            try? await pairing.deleteDocument(path: "\(path)/\(doc.id)")
+        }
+    }
+
+    private func handle(command: String, deviceID: String) async {
+        switch command {
+        case "hard_reset", "restart":
+            NSLog("[SR] command %@ — bouncing the worker loop", command)
+            await bounceForReset()
+        case "check-update":
+            // Stamp `versionCheckedAt` so the web app's About row stops spinning. Allow-listed for
+            // the synthetic device user, so this is a write the device may actually make.
+            try? await pairing.patchDevice(
+                deviceId: deviceID,
+                set: ["versionCheckedAt": Int64(Date().timeIntervalSince1970 * 1000)],
+                delete: []
+            )
+        case "clear_local_storage":
+            _ = await resetState()
+        default:
+            // Marked processed by the caller regardless, so an action this device cannot perform is
+            // skipped once rather than retried on every poll for the life of the pairing.
+            NSLog("[SR] command %@ is not supported on an iOS backend — skipped", command)
+        }
+    }
+
+    /// The iOS-honest hard reset.
+    ///
+    /// ⚠ The desktop's version ends in `os._exit`, and a supervisor respawns it. iOS has no
+    /// supervisor: terminating the app stops the heartbeat and the device goes offline permanently
+    /// rather than bouncing. So this does the part that is real — stop serving, drop the cached run
+    /// state, come back up — and deliberately keeps the process alive.
+    ///
+    /// The pause is not cosmetic. The web app proves a reset happened by watching the device go
+    /// DOWN (`RESET_OFFLINE_DETECTION_MS`, 8s) and then return; without a gap it would sit on
+    /// "Resetting…" until its 90-second failsafe and report nothing. Ten seconds of genuine silence
+    /// is the honest signal, because the device really has stopped serving during it.
+    private func bounceForReset() async {
+        stopHeartbeat()
+        _ = await resetState()
+        try? await Task.sleep(nanoseconds: 10_000_000_000)
+        _ = await restartServing()
+    }
+
     // MARK: - Maintenance
 
     /// The app's own version, which IS the backend version on this device.
-    private func versionReport() -> OpResult {
+    /// Version AND update, in one operation.
+    ///
+    /// ⚠ These were two rows, and Update's report always began by restating Version's — so the
+    /// owner tapped twice to learn one thing. Merged: this always answers "what am I running", and
+    /// adds "and here is what is newer" when there is something newer. The ROW TITLE carries the
+    /// same signal, so the list shows an update without anything being opened.
+    private func versionAndUpdate() async -> OpResult {
         let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+
+        var newer: String?
+        if let deviceID {
+            await restoreSessionIfNeeded()
+            let fields = try? await pairing.readDocument(path: "devices/\(deviceID)")
+            if case .string(let value)? = fields?["updateAvailable"], !value.isEmpty {
+                newer = value
+            }
+        }
+
+        // ⚠ An iOS app cannot replace its own binary — there is no `pipx install --force` here, and
+        // a button that appeared to update would be exactly the failure this wave exists to remove.
+        // So the report names the real route rather than implying one that does not exist.
+        let closing = newer == nil
+            ? "The server reports nothing newer."
+            : "An iOS backend updates by installing a new build (bin/build_app.sh), not from inside "
+              + "the app."
         return OpResult(
             ok: true,
-            message: "Super Research \(short) (build \(build))",
+            message: newer.map { "Update available: \($0) (running \(short))" }
+                ?? "Up to date — Super Research \(short)",
             detail: """
                 Backend version   \(short)
                 Build             \(build)
+                Update            \(newer.map { "\($0) available" } ?? "none — this is current")
                 Runs on           this iPhone — the app is the backend
+
+                \(closing)
                 """
         )
     }
@@ -456,37 +602,6 @@ final class DeviceBackend: AppBackend {
         )
     }
 
-    /// What "update" can honestly mean here.
-    ///
-    /// ⚠ An iOS app cannot replace its own binary — there is no `pipx install --force` equivalent,
-    /// and pretending otherwise would be the one failure mode this whole wave exists to remove. So
-    /// this reports what is running and what the server believes is available, and names the actual
-    /// route. Saying "no update mechanism" plainly beats a button that appears to work.
-    private func checkForUpdate() async -> OpResult {
-        let running = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
-        guard let deviceID else {
-            return OpResult(ok: false, message: "Not paired, so there is nothing to check against")
-        }
-        await restoreSessionIfNeeded()
-        let fields = try? await pairing.readDocument(path: "devices/\(deviceID)")
-        var newer: String?
-        if case .string(let value)? = fields?["updateAvailable"], !value.isEmpty { newer = value }
-
-        if let newer {
-            return OpResult(
-                ok: true,
-                message: "Update available: \(newer) (running \(running))",
-                detail: "Running \(running); the server reports \(newer) is available.\n\n"
-                    + "This device is an iOS app, so it updates by installing a new build — "
-                    + "bin/build_app.sh — not from inside the app."
-            )
-        }
-        return OpResult(
-            ok: true,
-            message: "Up to date — running \(running)",
-            detail: "Running \(running). The server reports nothing newer."
-        )
-    }
 
     /// A shareable report of everything that matters, with nothing secret in it.
     private func collectDiagnostics() async -> OpResult {
@@ -508,7 +623,7 @@ final class DeviceBackend: AppBackend {
     }
 
     /// Drop cached run state. **Not** logins, not API keys, not the pairing.
-    private func clearState() async -> OpResult {
+    private func resetState() async -> OpResult {
         guard let deviceID else { return OpResult(ok: false, message: "Not paired") }
         await restoreSessionIfNeeded()
         do {
@@ -677,20 +792,24 @@ final class DeviceBackend: AppBackend {
     /// A whole-array replace, matching the web app's own `toggleRest` — Firestore's `arrayUnion`
     /// would not let a stale out-of-range id be pruned, and the frontend prunes on every write for
     /// exactly that reason.
-    func setWorkerResting(_ workerID: Int, resting: Bool, current: Set<String>) async -> OpResult {
+    func setWorkerResting(_ workerID: Int, resting: Bool, current: Set<Int>) async -> OpResult {
         guard let deviceID else { return OpResult(ok: false, message: "Not paired") }
         await restoreSessionIfNeeded()
 
-        var next = Set(current.compactMap(Int.init))
+        var next = current
         // Prune ids past the current capacity, as the frontend does: a worker parked and then
         // removed leaves an id with no pill, which nothing can ever un-park.
         next = next.filter { $0 >= 1 && $0 <= workers.count }
         if resting { next.insert(workerID) } else { next.remove(workerID) }
 
         do {
+            // ⚠ INTEGERS. This wrote `.map(String.init)`, and the web app types the field
+            // `number[]` and filters reads on `typeof n === "number"` — so a string entry was
+            // invisible to it while the backend (which accepts digit-strings) honoured it. The
+            // worker really stopped taking runs and the web app showed full capacity.
             try await pairing.patchDevice(
                 deviceId: deviceID,
-                set: ["restingWorkerIds": next.sorted().map(String.init)],
+                set: ["restingWorkerIds": next.sorted()],
                 delete: []
             )
             return OpResult(
@@ -698,6 +817,16 @@ final class DeviceBackend: AppBackend {
                 message: resting ? "Worker \(workerID) is resting" : "Worker \(workerID) is awake"
             )
         } catch {
+            // Name the STATUS. A 403 here means one specific thing — `restingWorkerIds` is still
+            // owner-only in the DEPLOYED rules — and saying so turns an opaque failure into an
+            // instruction. Anything else is a different problem and must not be mislabelled as it.
+            if case FirestoreRESTError.http(let status, _) = error, status == 403 {
+                return OpResult(
+                    ok: false,
+                    message: "Worker rest needs the updated Firestore rules deployed — the device "
+                        + "is not allowed to write restingWorkerIds yet (403)."
+                )
+            }
             return OpResult(
                 ok: false,
                 message: "Could not change worker \(workerID): \(error)"
@@ -897,6 +1026,9 @@ final class DeviceBackend: AppBackend {
         // Re-read every tick rather than captured once: Add worker must take effect on the next beat
         // instead of on the next relaunch.
         try? await coordinator.heartbeat(deviceId: deviceID, workerCount: workers.count)
+        // One timer, not two. The web app's reset budget is ~8-15s and the beat is 20s, so a
+        // command can wait up to a beat — acceptable, and far better than the previous "never".
+        await pollCommands()
     }
 
     /// Unpair: what `superresearch --unpair` does, from the phone.

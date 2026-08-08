@@ -1221,8 +1221,8 @@ MUTATIONS = [
     ),
     (
         "ios/Sources/SuperResearchDeviceCore/DeviceBackend.swift",
-        "            case .string(let text): return Int(text) ?? Int(text.replacingOccurrences(\n"
-        "                of: \"worker-\", with: \"\"))",
+        "            case .string(let text):\n"
+        "                return Int(text) ?? Int(text.replacingOccurrences(of: \"worker-\", with: \"\"))",
         "            case .string: return nil",
         "swift:PeopleResolutionTests/testBusyWorkerIDsParseBothIntegerAndStringForms",
         "parsing only one of the two busyWorkerIds shapes, yielding an EMPTY busy set — which is "

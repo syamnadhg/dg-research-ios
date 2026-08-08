@@ -49,6 +49,40 @@ extension DeviceSnapshot {
         case idle
     }
 
+    /// What a SPECIFIC worker is running, as a RunState the live view can render.
+    ///
+    /// ⚠ `run` describes worker 1 only — it comes from the device doc's `currentRun*` fields, which
+    /// the contract says only worker-1 maintains. With several workers busy it therefore describes
+    /// one of them and silently mislabels the rest. The `workers` map is written by ALL workers, so
+    /// it is the only honest source once more than one is running.
+    func run(forWorker id: Int) -> RunState? {
+        guard let worker = workers.first(where: { Int($0.id) == id }), worker.isBusy else {
+            // Worker 1 falls back to the document's own view, which carries the phase name and
+            // elapsed time the per-worker map does not.
+            return id == 1 ? run : nil
+        }
+        return RunState(
+            researchTitle: worker.title ?? "a run",
+            phase: worker.phase ?? 0,
+            phaseName: Self.phaseName(worker.phase),
+            elapsedSeconds: 0,
+            agents: [:]
+        )
+    }
+
+    /// The pipeline's own phase names, so a per-worker run reads the same as the document's.
+    static func phaseName(_ phase: Int?) -> String {
+        switch phase {
+        case 0: return "Init"
+        case 1: return "Research brief"
+        case 2: return "Deep research"
+        case 3: return "NotebookLM + audio"
+        case 4: return "YouTube upload"
+        case 5: return "Doc + email"
+        default: return "Running"
+        }
+    }
+
     func activity(for uid: String) -> UserActivity {
         if let worker = workers.first(where: { $0.uid == uid }) {
             return .running(
@@ -146,9 +180,14 @@ struct DeviceSnapshot {
     /// The On Startup intent, as stored on the device doc. Read so the Settings toggle reflects reality
     /// rather than defaulting to on and quietly disagreeing with the frontend.
     var supervised = false
-    /// Worker ids the OWNER has parked. A listed worker takes no new runs; the backend reads this at
-    /// claim time. Read-only here — see `PeoplePopup` for why the device cannot write it.
-    var restingWorkerIDs: Set<String> = []
+    /// Worker ordinals parked so they take no new runs; the backend reads this at claim time.
+    ///
+    /// ⚠ `Set<Int>`, not `Set<String>`. The web app types this field `number[]` and filters reads
+    /// with `typeof n === "number"` — so a string entry is invisible to it, while the backend's
+    /// `_worker_is_resting` accepts digit-strings and honours it. Writing strings therefore parked
+    /// the worker for real while the web app showed full capacity: the device would silently stop
+    /// taking work and nothing on screen would explain why.
+    var restingWorkerIDs: Set<Int> = []
 
     static let unpaired = DeviceSnapshot()
 }
@@ -210,7 +249,7 @@ final class PreviewBackend: AppBackend {
                 )
             ],
             supervised: true,
-            restingWorkerIDs: ["2"]
+            restingWorkerIDs: [2]
         )
     }
 

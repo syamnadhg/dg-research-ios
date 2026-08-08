@@ -45,6 +45,16 @@ struct Operation: Identifiable, Hashable {
 
     var requiresConfirmation: Bool { risk != .safe }
 
+    /// The row's title, which for `version` carries the update state.
+    ///
+    /// ⚠ Version and Update used to be two rows, and Update's report always started by restating
+    /// Version's. One row, and the TITLE is the signal — an owner scanning the list sees "Update
+    /// available" without opening anything, which is the only moment the distinction matters.
+    func title(updateAvailable: String?) -> String {
+        guard id == "version", let updateAvailable, !updateAvailable.isEmpty else { return title }
+        return "Update available — \(updateAvailable)"
+    }
+
     /// Nil when available. Otherwise the reason it is not, phrased for the person reading it.
     func unavailableReason(supervised: Bool) -> String? {
         guard let requiresSupervised, requiresSupervised != supervised else { return nil }
@@ -56,10 +66,16 @@ struct Operation: Identifiable, Hashable {
 
 enum Operations {
 
-    /// Everything the device can actually do, grouped as the owner thinks about it.
+    /// Everything the device can actually do, in ONE group, in the order the owner asked for.
+    ///
+    /// ⚠ Maintenance was folded into Runtime — owner decision 2026-08-07. Splitting them put
+    /// Restart and Reset in different sections despite being the same kind of act on the same
+    /// loop, and made the owner open two collapsed groups to find two adjacent controls.
+    ///
+    /// Order is deliberate and runs from routine to irreversible: the things you do to get the
+    /// device working, then the things you do to find out why it is not, then the one that ends
+    /// the relationship. `unpair` is last for the same reason it is `.destructive`.
     static let all: [Operation] = [
-
-        // ── Runtime — this device's own serving loop ─────────────────────────────
         Operation(
             id: "serve", title: "Start serving",
             summary: "Come online now and start accepting runs.",
@@ -75,41 +91,42 @@ enum Operations {
             // nothing else there is manual.
             risk: .disruptive, group: "Runtime"),
         Operation(
+            // ⚠ Renamed from "Clear state". It IS the web app's Reset — the same act reached by
+            // tapping a device's online indicator — and calling one of them something else made
+            // them look like two different operations with two different outcomes.
+            id: "reset", title: "Reset",
+            summary: "Drop queued work and cached run state. Logins and pairing are kept.",
+            risk: .destructive, group: "Runtime"),
+        Operation(
+            // ⚠ Version and Update merged. They were two rows answering one question — "what am I
+            // running, and is that current?" — and Update's answer always began by restating
+            // Version's. The TITLE carries the state: it reads "Update available" when there is
+            // one. See `title(updateAvailable:)`.
+            id: "version", title: "Version",
+            summary: "Show the backend version running on this device, and check for a newer one.",
+            risk: .safe, group: "Runtime"),
+        Operation(
+            id: "doctor", title: "Doctor",
+            summary: "Check this device and report what is wrong.",
+            risk: .safe, group: "Runtime"),
+        Operation(
             id: "daemon-loop", title: "Daemon loop",
-            summary: "Keep this device awake and serving for as long as the app is open.",
+            summary: "Watch the supervisor and workers live while the app stays awake.",
             risk: .safe, group: "Runtime",
             // The supervisor IS the On Startup intent. Offering it while autostart is off would be
             // offering to supervise a device that has not agreed to be supervised.
             requiresSupervised: true),
-
-        // ── Maintenance ──────────────────────────────────────────────────────────
         Operation(
-            id: "doctor", title: "Doctor",
-            summary: "Check this device and report what is wrong.",
-            risk: .safe, group: "Maintenance"),
-        Operation(
-            id: "version", title: "Version",
-            summary: "Show the backend version running on this device.",
-            risk: .safe, group: "Maintenance"),
-        Operation(
-            id: "update", title: "Update",
-            summary: "Check whether a newer backend is available.",
-            risk: .safe, group: "Maintenance"),
-        Operation(
-            id: "collect", title: "Collect diagnostics",
+            id: "collect", title: "Diagnostics",
             summary: "Bundle this device's state into a report you can share.",
-            risk: .safe, group: "Maintenance"),
-        Operation(
-            id: "clear", title: "Clear state",
-            summary: "Drop queued work and cached run state. Logins and pairing are kept.",
-            risk: .destructive, group: "Maintenance"),
+            risk: .safe, group: "Runtime"),
         Operation(
             id: "unpair", title: "Unpair",
             summary: "Release this device from the account. It disappears from the web app.",
-            risk: .destructive, group: "Maintenance"),
+            risk: .destructive, group: "Runtime"),
     ]
 
-    static let groups = ["Runtime", "Maintenance"]
+    static let groups = ["Runtime"]
 
     static func inGroup(_ group: String) -> [Operation] {
         all.filter { $0.group == group }

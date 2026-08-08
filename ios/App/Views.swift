@@ -93,14 +93,21 @@ struct RootView: View {
             watching = false
             loginTarget = nil
         }
-        .overlay(alignment: .bottom) { Toast(text: model.toast) }
-        .overlay { ConfirmSheet(model: model) }
-        .sheet(item: Binding(
-            get: { model.opDetail },
-            set: { if $0 == nil { model.opDetail = nil } }
-        )) { detail in
-            OpDetailSheet(title: detail.title, body_: detail.body) { model.opDetail = nil }
-        }
+        // ⚠ Gated on `!settingsOpen`, and the detail sheet moved into SettingsSheet entirely.
+        //
+        // A `.sheet` starts a NEW presentation: UIKit stacks it above the presenter's whole view,
+        // so an `.overlay` composed here renders UNDERNEATH it, and a presenter that is already
+        // presenting cannot present a second sheet at all. Three symptoms, one cause:
+        //
+        //  * the Restart confirmation appeared below the Settings page,
+        //  * every toast raised from Settings was invisible,
+        //  * Doctor / Version / Diagnostics set `opDetail` and their sheet NEVER APPEARED —
+        //    silently, so the rows looked like they did nothing.
+        //
+        // Each surface now renders these in its own presentation. The state is shared @Published,
+        // so exactly one copy is ever on screen.
+        .overlay(alignment: .bottom) { if !settingsOpen { Toast(text: model.toast) } }
+        .overlay { if !settingsOpen { ConfirmSheet(model: model) } }
         .sheet(isPresented: $settingsOpen) {
             SettingsSheet(theme: theme, model: model, onClose: { settingsOpen = false })
         }
@@ -129,7 +136,9 @@ struct RootView: View {
         // crash. The screen itself now handles the no-run case.
         .fullScreenCover(isPresented: $watching) {
             LiveRunView(
-                run: model.snapshot.run,
+                // The worker's OWN run — see DeviceSnapshot.run(forWorker:). Passing the device's
+                // single `run` here showed worker 1's phase strip above worker 2's browser.
+                run: model.snapshot.run(forWorker: watchWorker),
                 platforms: model.snapshot.platforms,
                 workerID: watchWorker,
                 selected: $watchSelection,
@@ -210,26 +219,34 @@ private struct StatusCard: View {
                 Text(snapshot.deviceID).font(DS.F.mono(11)).foregroundStyle(DS.C.textTertiary)
             }
 
-            // The pair code in mono at display size, hyphenated — it exists to be read off this
-            // screen and typed into another, so legibility is the entire requirement.
-            HStack(alignment: .center, spacing: DS.S.lg * 2) {
-                VStack(alignment: .leading, spacing: DS.S.sm) {
-                    // One line, always. A wrapped pair code is materially harder to read back
-                    // than a smaller one, and reading it back is the whole job of this element —
-                    // so it shrinks to fit instead of breaking.
-                    Text(Pairing.formatForDisplay(snapshot.pairCode))
-                        .font(DS.F.codeLarge)
-                        .foregroundStyle(DS.C.terminal)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.6)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text("Pair code").font(DS.F.label).foregroundStyle(DS.C.textTertiary)
+            // ⚠ Only while there IS a code. A confirmed device keeps `pairCode` empty — it is set
+            // during the flow and never re-read afterwards — so this block rendered an empty line
+            // labelled "Pair code" beside a blank white QR square, on a device that is already
+            // paired and online. It read as a control that had failed to load, and it was the
+            // largest thing on the screen.
+            //
+            // The code in mono at display size, hyphenated: it exists to be read off this screen
+            // and typed into another, so legibility is the entire requirement.
+            if !snapshot.pairCode.isEmpty {
+                HStack(alignment: .center, spacing: DS.S.lg * 2) {
+                    VStack(alignment: .leading, spacing: DS.S.sm) {
+                        // One line, always. A wrapped pair code is materially harder to read back
+                        // than a smaller one, and reading it back is the whole job of this element —
+                        // so it shrinks to fit instead of breaking.
+                        Text(Pairing.formatForDisplay(snapshot.pairCode))
+                            .font(DS.F.codeLarge)
+                            .foregroundStyle(DS.C.terminal)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.6)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text("Pair code").font(DS.F.label).foregroundStyle(DS.C.textTertiary)
+                    }
+                    Spacer(minLength: DS.S.lg)
+                    QRView(code: snapshot.pairCode)
                 }
-                Spacer(minLength: DS.S.lg)
-                QRView(code: snapshot.pairCode)
-            }
 
-            Divider().overlay(DS.C.border)
+                Divider().overlay(DS.C.border)
+            }
 
             HStack(spacing: DS.S.lg * 3) {
                 Metric(label: "Workers", value: "\(snapshot.busyWorkers)/\(snapshot.workerCount)")
@@ -518,19 +535,18 @@ struct BrowserWatchCard: View {
                 SectionLabel(text: "Browser watch")
                 Spacer()
                 Text(activity).font(DS.F.label).foregroundStyle(
-                    snapshot.run == nil ? DS.C.textTertiary : DS.C.accent
+                    selectedRun == nil ? DS.C.textTertiary : DS.C.accent
                 )
             }
 
             // Only when there is a choice to make. One worker plus a picker offering one option is
-            // furniture that asks a question with a single answer. Adding workers belongs in
-            // Settings and in the pair flow, not here — this card is for looking, not configuring.
+            // furniture that asks a question with a single answer. No Add here — this card is for
+            // looking, not configuring, and a menu row that did nothing read as a broken control.
             if workers.count > 1 {
                 WorkerPicker(
                     workers: workers,
                     selected: $selectedWorker,
-                    busyWorkerIDs: snapshot.busyWorkerIDs,
-                    onAdd: {}
+                    busyWorkerIDs: snapshot.busyWorkerIDs
                 )
             }
 
@@ -576,10 +592,25 @@ struct BrowserWatchCard: View {
         .srCard()
     }
 
+    /// The SELECTED worker's run, not the device's.
+    ///
+    /// ⚠ `snapshot.run` comes from the device doc's `currentRun*` fields, which only worker-1
+    /// maintains. Reading it here labelled every worker with worker 1's run — so with two runs in
+    /// flight the card confidently described the wrong one.
+    private var selectedRun: RunState? { snapshot.run(forWorker: selectedWorker) }
+
     /// Says "No runs live" rather than rendering nothing, so an idle device reads as idle instead of
     /// as a card that failed to load.
     private var activity: String {
-        guard let run = snapshot.run else { return "No runs live" }
+        guard let run = selectedRun else {
+            // With several workers, name how many ARE busy — otherwise a device running two other
+            // runs reads as completely idle just because the selected worker happens to be free.
+            let busy = snapshot.busyWorkerIDs.count
+            if busy > 0 && workers.count > 1 {
+                return "idle · \(busy) of \(workers.count) busy"
+            }
+            return "No runs live"
+        }
         return "P\(run.phase) · \(run.phaseName)"
     }
 
@@ -600,12 +631,12 @@ struct BrowserWatchCard: View {
     private func caption(for platform: PlatformState) -> String {
         // Mid-run, what the run is doing on this platform is the more useful fact; between runs, the
         // login state is the only fact that matters.
-        if let state = snapshot.run?.agents[platform.id] { return state }
+        if let state = selectedRun?.agents[platform.id], !state.isEmpty { return state }
         return loginState(for: platform).map { $0 ? "signed in" : "signed out" } ?? "not checked"
     }
 
     private func tone(for platform: PlatformState) -> Color {
-        if let state = snapshot.run?.agents[platform.id] {
+        if let state = selectedRun?.agents[platform.id], !state.isEmpty {
             return state == "done" ? DS.C.ok
                 : state == "active" ? DS.C.accent : DS.C.textTertiary
         }
@@ -698,6 +729,8 @@ private struct PersonRow: View {
 
 struct OperationRow: View {
     let op: Operation
+    /// Overridden so a row can carry state in its title — Version becomes "Update available — x.y.z".
+    var title: String? = nil
     let busy: Bool
     /// Nil when the operation is usable. Otherwise why it is not — see `Operation.requiresSupervised`.
     var unavailable: String? = nil
@@ -707,9 +740,12 @@ struct OperationRow: View {
         Button(action: action) {
             HStack(spacing: DS.S.lg) {
                 VStack(alignment: .leading, spacing: DS.S.xs) {
-                    Text(op.title)
+                    Text(title ?? op.title)
                         .font(DS.F.body)
-                        .foregroundStyle(op.risk == .destructive ? DS.C.danger : DS.C.textPrimary)
+                        .foregroundStyle(
+                            op.risk == .destructive ? DS.C.danger
+                                : (title != nil && title != op.title) ? DS.C.warn : DS.C.textPrimary
+                        )
                     // The REASON, not just a greyed-out row. "Daemon loop" dimmed with no
                     // explanation is a control that looks broken; naming the toggle that governs it
                     // turns a dead end into an instruction.
@@ -737,7 +773,7 @@ struct OperationRow: View {
 
 // MARK: - Confirmation, toast, footer
 
-private struct ConfirmSheet: View {
+struct ConfirmSheet: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
@@ -770,7 +806,7 @@ private struct ConfirmSheet: View {
     }
 }
 
-private struct Toast: View {
+struct Toast: View {
     let text: String?
     var body: some View {
         if let text {
