@@ -19,6 +19,11 @@
 # Usage:
 #   bin/sim.sh              # boot it, pin it, open Simulator.app
 #   bin/sim.sh --check      # report only; change nothing, exit 1 if something is off
+#   bin/sim.sh --udid       # print ONLY the udid, boot nothing — for `UDID=$(bin/sim.sh --udid)`
+#
+# ⚠ `--udid` exists so that no script and no document ever hardcodes one again. Every command in
+# EmulatorRecipe.md Appendix B pinned the old device's UDID as a literal, which is what let the
+# incident above go unnoticed: the commands kept running, against a phone with none of the logins.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -38,6 +43,15 @@ UDID="$(udid_for_name)"
 if [ -z "$UDID" ]; then
   echo "FATAL: no simulator named '$NAME'. Create it, or update NAME in this script." >&2
   exit 1
+fi
+
+# ⚠ Before any other output. `--udid` is meant for `UDID=$(bin/sim.sh --udid)`, so a single stray
+# echo above this line would be captured into the variable and every downstream simctl call would
+# fail on a UDID with a banner glued to it. The missing-device case still exits non-zero above, so
+# command substitution yields an empty string rather than a plausible-looking wrong one.
+if [ "${1:-}" = "--udid" ]; then
+  echo "$UDID"
+  exit 0
 fi
 
 # Where the app really is, read off the filesystem rather than via simctl — `get_app_container`

@@ -171,3 +171,113 @@ def test_the_allow_list_names_only_files_that_exist():
     """A stale allow-list entry silently exempts nothing and hides that the rule moved."""
     missing = [p for p in _BOOTED_ALLOWED if not (REPO / p).exists()]
     assert missing == [], f"allow-list names files that no longer exist: {missing}"
+
+
+# --- nobody pins a UDID, and `--udid` is safe to capture --------------------------------------
+
+# Assembled rather than written out, so this file does not match its own scanner.
+_UDID_LITERAL = re.compile(
+    r"\b[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-" + r"[0-9A-F]{12}\b"
+)
+
+#: Files allowed to contain a literal UDID: the ones recording an incident that was ABOUT a
+#: specific device. A recipe step is never allowed one — that is the defect this guard exists for.
+_UDID_ALLOWED = {
+    "emubackend/tests/test_device_resolution.py",
+}
+
+
+def _udid_offenders(files, root):
+    """The scan itself, factored out so it can be run against a PLANTED offender.
+
+    ⚠ A scanner tested only against the real repo is a negative fixture: it passes because there is
+    nothing to find, which is also what it does when the allow-list is too wide or the read is
+    silently swallowed. Exercising it on a file known to be dirty is the only way to prove it can
+    still say no.
+    """
+    offenders = []
+    for path in files:
+        rel = path.relative_to(root).as_posix()
+        if rel in _UDID_ALLOWED:
+            continue
+        try:
+            text = path.read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        for match in _UDID_LITERAL.finditer(text):
+            offenders.append(f"{rel}: {match.group()[:8]}...")
+    return offenders
+
+
+def _udid_scan_files():
+    return (
+        list(REPO.glob("bin/*.py")) + list(REPO.glob("bin/*.sh"))
+        + list(REPO.glob("emubackend/**/*.py")) + list(REPO.glob("docs/*.md"))
+        + list(REPO.glob("*.md"))
+    )
+
+
+def test_no_script_or_document_pins_a_literal_udid():
+    """⭐ The 2026-08-07 recurrence guard, one level up from "first booted".
+
+    EmulatorRecipe.md v5.0 hardcoded ``EB3E...`` in Appendix B and in the gate-zero steps. When the
+    Mac rebooted and that device was replaced, every one of those commands kept running — against a
+    phone with none of the four hand-made platform logins. A wrong-but-plausible device is the
+    failure mode; a *dead* device at least errors, but only if nothing recreates it under a new id.
+
+    Resolve by name: ``bin/sim.sh --udid``, or ``device.resolve_udid()`` in Python.
+    """
+    offenders = _udid_offenders(_udid_scan_files(), REPO)
+    assert offenders == [], (
+        "these pin a simulator UDID as a literal. Devices are recreated with new ids; use "
+        f"`bin/sim.sh --udid` or device.resolve_udid(): {offenders}"
+    )
+
+
+def test_the_udid_guard_is_not_vacuous():
+    """Both halves, because either one alone makes the scan pass while checking nothing.
+
+    A regex that cannot match a UDID reports zero offenders. So does a correct regex over an empty
+    file list — and the second is the likelier accident, since the globs are the part a refactor
+    moves. Asserting only the pattern would leave exactly the decorative guard this repo keeps
+    finding: green, and blind.
+    """
+    assert _UDID_LITERAL.search("EB3E3597-E62B-413B-B7E5-0FD286ACCC38")
+    assert not _UDID_LITERAL.search("not-a-udid-at-all")
+    scanned = _udid_scan_files()
+    assert len(scanned) > 20, f"only {len(scanned)} files scanned — the globs are wrong"
+    assert any(f.suffix == ".md" for f in scanned), "no markdown scanned — the recipe is where it bit"
+    assert any(f.suffix == ".sh" for f in scanned), "no shell scanned"
+
+
+def test_the_udid_scan_actually_flags_a_dirty_file(tmp_path):
+    """⭐ The positive fixture. The repo is clean, so the guard above passes either way.
+
+    Plant a UDID in a markdown file — the exact shape that bit, since Appendix B and the RUNBOOK
+    were the two that pinned one — and require the scan to name it. Kills a widened allow-list and a
+    read that fails open, neither of which the clean-repo assertion can see.
+    """
+    dirty = tmp_path / "docs" / "recipe.md"
+    dirty.parent.mkdir()
+    dirty.write_text("boot EB3E3597-E62B-413B-B7E5-0FD286ACCC38 then run the gate\n")
+    clean = tmp_path / "docs" / "fine.md"
+    clean.write_text("resolve by name with bin/sim.sh --udid\n")
+
+    found = _udid_offenders([dirty, clean], tmp_path)
+    assert found == ["docs/recipe.md: EB3E3597..."], found
+
+
+def test_sim_sh_udid_mode_emits_the_udid_and_nothing_else():
+    """`UDID=$(bin/sim.sh --udid)` must capture a bare id.
+
+    Asserts the MECHANISM, not just that a UDID appears somewhere in the output: the early-exit has
+    to come before the script's five-line status banner. If a later refactor moves it below those
+    echoes the substitution captures `device SR-iPhone17Pro\nudid ...`, and every downstream simctl
+    call fails on an argument that still visibly contains the right id.
+    """
+    text = (REPO / "bin" / "sim.sh").read_text()
+    exit_at = text.index('"${1:-}" = "--udid"')
+    first_banner = text.index('echo "device ')
+    assert exit_at < first_banner, (
+        "--udid exits AFTER the status banner, so command substitution captures the banner too"
+    )

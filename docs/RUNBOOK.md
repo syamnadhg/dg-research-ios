@@ -3,17 +3,21 @@
 ## Install and try the app right now
 
 ```bash
-xcrun simctl boot EB3E3597-E62B-413B-B7E5-0FD286ACCC38   # any iOS 26.5 device
-bash bin/build_app.sh EB3E3597-E62B-413B-B7E5-0FD286ACCC38
-open -a Simulator
+bash bin/sim.sh                                # boots SR-iPhone17Pro BY NAME and pins it
+bash bin/build_app.sh "$(bash bin/sim.sh --udid)"
 ```
+
+⚠ **Never type a UDID.** This file used to pin one, and on 2026-08-07 that device stopped existing —
+the commands kept working, against a phone with none of the four hand-made platform logins. `sim.sh`
+resolves by name and `--udid` prints just the id; `test_no_script_or_document_pins_a_literal_udid`
+fails the suite if a literal creeps back in.
 
 Unsigned, no Xcode project, no developer account — Simulator builds need none. Add `--shots` to
 render the paired and unpaired states to `artifacts/app/shots/`.
 
-The app currently runs against `PreviewBackend`, so it shows plausible state rather than live
-Firestore. Everything it renders is real UI over real, tested logic; swapping in
-`FirebasePairingBackend` is a one-line change once its package builds.
+The app runs against the **real** `DeviceBackend` — it pairs, heartbeats and performs its operations
+against production Firestore. *(This section used to say it ran on `PreviewBackend`; that has not
+been true since the app wave. `PreviewBackend` survives only for SwiftUI previews and tests.)*
 
 ## ✅ Firebase iOS — done
 
@@ -21,11 +25,20 @@ App ID `1:441214203201:ios:47c2e9b9daaadd41b71dc0`, bundle `com.distributedgloba
 config at `ios/GoogleService-Info.plist` (gitignored — it carries an API key). `super-research-492814`
 now has both a WEB and an IOS app. The build script bundles the plist automatically.
 
-## One owner action remains
+## Owner actions
+
+✅ **Platform sign-in is DONE** on both surfaces — Simulator Safari and in-app. What remains of this
+section is the *capture* procedure, which is ordinary work, not an owner action. The one genuine
+owner action outstanding is **deploying `firestore.rules`** so the device may write
+`restingWorkerIds`; until then tapping a worker pill in People 403s with a message saying so.
 
 ---
 
 ### Platform logins → the 25 selector values
+
+**Coverage is 17/25** (measured by the repo's own loader, 2026-08-08); the 8 absent are
+`claude.{artifact_panel,research_toggle,sources}`, `gemini.{sources,start_research}`,
+`notebooklm.{add_source,audio_ready_marker,generate_audio}` — which is EmulatorRecipe §12 item 12.
 
 **Unlocks:** a P0–P3 run against *real* platforms, in the Simulator and in the app.
 
