@@ -291,6 +291,13 @@ private struct PhaseRow: View {
                     .foregroundStyle(phase.runsHere ? DS.C.textPrimary : DS.C.textSecondary)
                 Spacer()
                 if !phase.runsHere { Pill(text: "in the cloud", tone: .neutral) }
+                // ⚠ The chevron the web login page puts on every card, rotating 180° when open.
+                // Without it the card gives no sign it opens at all — the only affordance was a
+                // 9pt "Details" pill in the corner, which is not what someone taps.
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(DS.C.textTertiary)
+                    .rotationEffect(.degrees(expanded ? 180 : 0))
             }
             Text(phase.description)
                 .font(DS.F.label)
@@ -339,6 +346,15 @@ private struct PhaseRow: View {
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(DS.C.border, lineWidth: 1))
         .padding(.bottom, DS.S.lg)
+        // ⚠ The WHOLE CARD toggles, matching the web login page — its `CardContent` puts `onClick`
+        // on the wrapper, not on the label. Here only the small "Details" pill was tappable, so a
+        // card that looks like a button behaved like static text everywhere except one corner.
+        //
+        // `contentShape` first: without it the tap target is only the drawn glyphs, so the padding
+        // and the gaps between rows would not respond and the card would feel broken in exactly the
+        // places a thumb lands.
+        .contentShape(RoundedRectangle(cornerRadius: 12))
+        .onTapGesture { expanded.toggle() }
         // Details expand by growing the card, so the surrounding timeline shifts with it instead of
         // the new content overlapping what was there.
         .animation(.spring(response: 0.32, dampingFraction: 0.85), value: expanded)

@@ -183,6 +183,10 @@ final class AppModel: ObservableObject {
         // still `.landing`, and the app dropped the owner onto the marketing splash rather than onto
         // "No user paired". Worse, the Settings sheet it was invoked from stayed open on top of it.
         if op.id == "unpair", result.ok {
+            // ⚠ No toast. The screen change IS the feedback — landing on "No user paired" says it
+            // completely — and a floating "Unpaired" chip on top of that page was the same fact
+            // twice, in the smaller of the two type sizes.
+            toast = nil
             screen = .notPaired
             workers = workerRegistry?.workers ?? []
         }
