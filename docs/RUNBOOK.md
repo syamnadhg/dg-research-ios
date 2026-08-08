@@ -42,8 +42,11 @@ owner action outstanding is **deploying `firestore.rules`** so the device may wr
 
 **Unlocks:** a P0–P3 run against *real* platforms, in the Simulator and in the app.
 
-**There are TWO cookie jars, and they are not shared.** The app's web views use
-`WKWebsiteDataStore.default()` inside the app container; Simulator Safari has its own. Signing in on
+**The jars are not shared, and there are more than two now.** Simulator Safari, the app, and the C1
+harness are three separate *families* — and since the worker wave the app holds **one store per
+worker**: worker 1 keeps `WKWebsiteDataStore.default()` (and must keep it forever — every hand-made
+login lives there), workers 2+ get their own `WKWebsiteDataStore(forIdentifier:)`. So name both the
+surface **and the worker** whenever you say "signed in". Signing in on
 one surface does nothing for the other, and iOS gives an app no way to read Safari's jar. Measured on
 this device: all four platforms signed in **in the app** while Safari was signed out of all four —
 each announcing it differently (ChatGPT's `mobile-app-shell-fallback` shell with a "Log in" button,
@@ -69,7 +72,8 @@ Safari, so it sees the signed-in DOM:
 ```bash
 cd dg-research-ios
 # First: in the app, open "Watch the browser" and visit each of the four tabs once. Those web views
-# are retained by design (a run drives all four at once), whereas the login sheet tears its view down
+# are retained by design (a run visits all four platforms, and the views are retained
+# so one page per platform stays alive to be read — P2 itself is strictly SEQUENTIAL (decision B1)), whereas the login sheet tears its view down
 # on dismiss — so this is what keeps one page per platform alive to be read.
 for p in "chatgpt|https://chatgpt.com" "gemini|https://gemini.google.com" \
          "claude|https://claude.ai" "notebooklm|https://notebooklm.google.com"; do
@@ -186,12 +190,17 @@ data-driven browser layer.
   the contract doc names that drift as the historical cause of unexplained 403s. Worth a
   `firebase deploy --only firestore:rules` dry run before trusting the 14/14.
 - **A0's failure taxonomy.** Needs the daemon restarted with the observation flags armed
-  (`docs/` + recipe §0.5.10). Config only, no code — but it is the owner's machine and a release e2e
+  (`docs/` + the v4 recipe's §0.5.10 — v5 has no §0.5; see `EmulatorRecipe.v4-superseded.md`). Config only, no code — but it is the owner's machine and a release e2e
   is pending, so never cycle it unilaterally.
 
 ## The owner's capture session — the one remaining checkpoint
 
-Everything else in this repo is green and credential-free (`bash bin/all_gates.sh <UDID>`). This is the
+⚠ **`bin/all_gates.sh` exits 1 by design right now** — the A8 purity gate is red on purpose (see
+README). It collects failures rather than aborting, so every other gate still runs: **A8 red is the
+only acceptable failure, everything else must pass.** Resolve the UDID with `bash bin/sim.sh --udid`,
+never a literal.
+
+Everything else in this repo is credential-free (`bash bin/all_gates.sh "$(bash bin/sim.sh --udid)"`). This is the
 step that needs a human, because the selectors the pipeline drives only exist on a **signed-in** page.
 
 Two passes per platform, and the second one is the part that surprises people: **three of the seven keys
@@ -208,7 +217,7 @@ simply has no such nodes yet.
 # home screen looked wiped, and any rebuild would have installed onto the wrong phone. This Mac has
 # three devices whose names begin "iPhone 17".
 bin/sim.sh
-UDID=$(xcrun simctl list devices | sed -n 's/^ *SR-iPhone17Pro (\([0-9A-Fa-f-]\{36\}\)).*/\1/p' | head -1)
+UDID=$(bash bin/sim.sh --udid)   # the sanctioned form — never hand-roll this, never a literal
 
 # 1. Sign in to the platform in the Simulator's Safari. 2FA, password manager, whatever it needs.
 

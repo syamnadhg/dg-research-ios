@@ -1,14 +1,28 @@
 # dg-research-ios
 
 The iOS track for Super Research: an iOS-Simulator browser substrate, a vendored Firestore
-contract layer, and (later) the native app.
+contract layer, and a native app the owner uses.
 
-## ⛔ The one hard rule (A8)
+## ⛔ A8 — AMENDED, and the guard is RED on purpose
 
-`dg-research-backend` and `dg-research` are **not modified by this repo. Not a line.** The
-backend is a **read-only** dependency, reached through `emubackend.berepo`.
+⚠ **Read this before you run the suite.** `purity.assert_pristine()` **fails right now, deliberately**,
+and its failure text will tell you to do the wrong thing.
 
-This is enforced, not merely stated:
+* **`dg-research-backend` is read-only.** Not a line. Vendor rather than edit; ask if you need it changed.
+* **`dg-research` is writable with the owner's say-so, per change** — the owner lifted A8 for frontend
+  work the iOS side needed, and two commits are pushed. So both guarded HEADs have moved and the guard
+  says so, correctly.
+* ⛔ **Do NOT regenerate `fixtures/a8_baseline.json` to make it green.** That is the one response that
+  destroys the guard's value: the next *unauthorised* change would then look identical to this
+  authorised one.
+* ⛔ **Do NOT `git stash pop` in either repo.** The guard also prints, once per file, that a backend
+  change *"was DISCARDED … recover it before doing anything else."* **That message is stale.** The wave
+  was measured against `origin/master`, found to be a superseded copy, and stashed with a backup;
+  `dg-research-backend` is clean and level with its remote. See `docs/DEVIATIONS.md`.
+* **`bin/all_gates.sh` collects failures rather than aborting**, so every other gate still runs. **A8 red
+  is the only acceptable failure; everything else must pass.**
+
+The full reasoning is `EmulatorRecipe.md` §0. What A8 still enforces, and how:
 
 ```bash
 PYTHONPATH=. .venv/bin/python -m pytest emubackend/tests -q      # 186 tests
