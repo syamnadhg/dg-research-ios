@@ -165,3 +165,135 @@ final class DeviceIdentityStoreTests: XCTestCase {
             reason: DeviceIdentityStore.lostPairingReason, isRealBackend: true))
     }
 }
+
+
+// MARK: - API keys must actually persist, and say so when they cannot
+
+/// ⚠ THE BUG, reported by the owner 2026-08-08: both API keys were entered during pairing, the UI
+/// accepted them, and Settings then showed neither as set.
+///
+/// The cause was `SecItemAdd`'s `OSStatus` being discarded — the identical defect that had already
+/// cost a whole pairing in `DeviceIdentityStore`, left in place here because only that one store was
+/// fixed. An ad-hoc-signed Simulator build has no keychain access group, so every write fails with
+/// `errSecMissingEntitlement` and the caller is told nothing.
+///
+/// These assert the PROPERTY that broke — a saved key is readable afterwards — rather than that a
+/// particular API was called, because the old code called the right API and still lost the key.
+final class APIKeyStoreTests: XCTestCase {
+
+    private var tempDir: URL!
+
+    /// ⚠ **Every test here runs with the Keychain REFUSING, and that is the point.**
+    ///
+    /// `swift test` runs on a macOS host whose Keychain works. Left alone, every one of these tests
+    /// takes the happy path — and five separate mutations of this store, including restoring the
+    /// exact discard-the-status bug the owner reported, all passed. The bug only exists where the
+    /// Keychain refuses (an ad-hoc-signed Simulator build with no access group), so the suite has to
+    /// be able to make it refuse. `testTheRealKeychainIsStillUsedWhenItWorks` covers the other half.
+    private var keychain: [APIKeyStore.Kind: String] = [:]
+    private var refuseKeychain = true
+
+    override func setUp() {
+        super.setUp()
+        tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sr-apikeys-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        APIKeyStore.fallbackDirectory = tempDir
+        keychain = [:]
+        refuseKeychain = true
+        APIKeyStore.keychainWrite = { [unowned self] kind, value in
+            if refuseKeychain { return errSecMissingEntitlement }
+            keychain[kind] = value
+            return errSecSuccess
+        }
+        APIKeyStore.keychainRead = { [unowned self] kind in keychain[kind] }
+        APIKeyStore.keychainDelete = { [unowned self] kind in keychain[kind] = nil }
+        APIKeyStore.clear()
+    }
+
+    override func tearDown() {
+        APIKeyStore.clear()
+        try? FileManager.default.removeItem(at: tempDir)
+        APIKeyStore.fallbackDirectory = DeviceIdentityStore.defaultFallbackDirectory
+        APIKeyStore.useRealKeychain()
+        super.tearDown()
+    }
+
+    /// The other half: when the Keychain DOES work, no plaintext copy is left in the container.
+    ///
+    /// Without this the fix could satisfy every test above by always writing the file and never
+    /// trying the Keychain at all — which would be a real regression on a provisioned device.
+    func testAWorkingKeychainIsPreferredAndLeavesNoFileBehind() {
+        refuseKeychain = false
+        XCTAssertTrue(APIKeyStore.save(.anthropic, "sk-ant-live"))
+        XCTAssertEqual(keychain[.anthropic], "sk-ant-live", "the Keychain was not used")
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: tempDir.path)) ?? []
+        XCTAssertEqual(files, [], "wrote a plaintext fallback despite a working Keychain: \(files)")
+        XCTAssertTrue(APIKeyStore.has(.anthropic))
+    }
+
+    /// ⭐ A write the Keychain ACCEPTS but cannot read back must still fall back.
+    ///
+    /// This is the shape that cost the pairing: the status said yes and the value was not there. A
+    /// status-only check passes this and loses the key.
+    func testAKeychainThatAcceptsButCannotReadBackFallsBack() {
+        APIKeyStore.keychainWrite = { _, _ in errSecSuccess }   // says yes, stores nothing
+        XCTAssertTrue(APIKeyStore.save(.gemini, "AIza-lost"),
+                      "should have fallen back rather than trusting the status")
+        XCTAssertEqual(APIKeyStore.value(.gemini), "AIza-lost")
+    }
+
+    /// ⭐ The regression. Whichever store took it, a key that was saved must read back as present.
+    func testASavedKeyIsPresentAfterwards() {
+        XCTAssertFalse(APIKeyStore.has(.anthropic), "precondition: starts empty")
+        XCTAssertTrue(APIKeyStore.save(.anthropic, "sk-ant-test"))
+        XCTAssertTrue(APIKeyStore.has(.anthropic),
+                      "saved and then reported absent — this is the reported bug")
+    }
+
+    /// The value has to survive, not merely a presence flag: something must eventually SEND the key.
+    func testTheValueItselfRoundTrips() {
+        APIKeyStore.save(.gemini, "AIza-test-value")
+        XCTAssertEqual(APIKeyStore.value(.gemini), "AIza-test-value")
+    }
+
+    /// Both keys are entered on the same pairing screen; storing one must not disturb the other.
+    func testTheTwoKindsAreIndependent() {
+        APIKeyStore.save(.anthropic, "a")
+        APIKeyStore.save(.gemini, "g")
+        XCTAssertEqual(APIKeyStore.value(.anthropic), "a")
+        XCTAssertEqual(APIKeyStore.value(.gemini), "g")
+        APIKeyStore.remove(.anthropic)
+        XCTAssertFalse(APIKeyStore.has(.anthropic))
+        XCTAssertTrue(APIKeyStore.has(.gemini), "removing one key removed the other")
+    }
+
+    /// ⚠ Removal must clear BOTH stores. Clearing only the Keychain copy leaves the fallback behind,
+    /// and `has()` keeps reporting a key the owner believes they deleted — which would present as
+    /// "I removed it and it came back".
+    func testRemovingAKeyLeavesNoFallbackBehind() {
+        APIKeyStore.save(.anthropic, "sk-ant-test")
+        APIKeyStore.remove(.anthropic)
+        XCTAssertFalse(APIKeyStore.has(.anthropic))
+        XCTAssertNil(APIKeyStore.value(.anthropic))
+        let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: tempDir.path)) ?? []
+        XCTAssertEqual(leftovers, [], "a plaintext key file outlived the key: \(leftovers)")
+    }
+
+    /// Overwriting is an upsert, not a second entry — the pairing screen can be re-run.
+    func testSavingTwiceReplacesRatherThanDuplicates() {
+        APIKeyStore.save(.gemini, "first")
+        APIKeyStore.save(.gemini, "second")
+        XCTAssertEqual(APIKeyStore.value(.gemini), "second")
+    }
+
+    /// `clear()` is what Reset calls; it must take every kind with it.
+    func testClearRemovesEveryKind() {
+        APIKeyStore.save(.anthropic, "a")
+        APIKeyStore.save(.gemini, "g")
+        APIKeyStore.clear()
+        for kind in APIKeyStore.Kind.allCases {
+            XCTAssertFalse(APIKeyStore.has(kind), "\(kind.rawValue) survived clear()")
+        }
+    }
+}

@@ -173,3 +173,26 @@ final class WorkerRegistry {
         storage.saveWorkers(data)
     }
 }
+
+
+/// What one worker is doing, for the Browser-watch strip.
+///
+/// ⚠ **Precedence is BUSY > RESTING > IDLE, and the order is the whole point.** `restingWorkerIds`
+/// is an intent the OWNER expresses; `busyWorkerIds` is what the backend is actually doing. Parking
+/// a worker mid-run does not stop that run — it stops the worker being handed the NEXT one — so
+/// showing a busy-and-parked worker as "resting" tells the owner their work has stopped when it has
+/// not, which is the one reading that could make them intervene wrongly.
+///
+/// Lives in the core rather than in the view because `ios/App` is not a package target and nothing
+/// there is compiled by `swift test` — see `AppLayerBoundaryTests`.
+public enum WorkerActivity: Equatable {
+    case busy
+    case resting
+    case idle
+
+    public static func of(_ id: Int, busy: Set<Int>, resting: Set<Int>) -> WorkerActivity {
+        if busy.contains(id) { return .busy }
+        if resting.contains(id) { return .resting }
+        return .idle
+    }
+}

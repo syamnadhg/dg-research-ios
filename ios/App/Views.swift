@@ -523,6 +523,85 @@ private struct WorkersCard: View {
 /// run card's Watch button — so the browsers were visible only while a run was in flight. The
 /// question this card exists to answer ("is worker 2 still signed in to Claude?") is one you ask
 /// *between* runs, and the answer was unreachable exactly then.
+/// Every worker on this device, with what each is doing, as one row.
+///
+/// The unit of a run is a WORKER, not the device — the backend assigns work by ordinal and two runs
+/// can be in flight at once. So the honest answer to "what is happening" is per-worker, and a
+/// control that surfaces one worker at a time cannot give it.
+///
+/// ⚠ State precedence is BUSY > RESTING > IDLE, and the order matters. `restingWorkerIds` is an
+/// intent the owner expresses; `busyWorkerIds` is what the backend is actually doing. A worker
+/// parked mid-run is still running that run to completion, and showing it as "resting" would tell
+/// the owner their work had stopped when it had not.
+struct WorkerWatchStrip: View {
+    let workers: [WorkerProfile]
+    @Binding var selected: Int
+    var busyWorkerIDs: Set<Int> = []
+    var restingWorkerIDs: Set<Int> = []
+    /// The run on a given worker, so a busy chip can name the phase instead of just saying "busy".
+    var runFor: (Int) -> RunState? = { _ in nil }
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: DS.S.md) {
+                ForEach(workers) { worker in
+                    let isSelected = worker.id == selected
+                    Button { selected = worker.id } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: DS.S.sm) {
+                                Circle().fill(tone(worker.id)).frame(width: 6, height: 6)
+                                Text("Worker \(worker.id)")
+                                    .font(DS.F.label.weight(isSelected ? .semibold : .regular))
+                                    .foregroundStyle(DS.C.textPrimary)
+                            }
+                            Text(caption(worker.id))
+                                .font(DS.F.mono(9))
+                                .foregroundStyle(tone(worker.id))
+                        }
+                        .padding(.horizontal, DS.S.md)
+                        .padding(.vertical, DS.S.sm)
+                        .frame(minHeight: DS.S.touch)
+                        .background(isSelected ? DS.C.accent.opacity(0.12) : DS.C.bg)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(isSelected ? DS.C.accent : DS.C.border, lineWidth: 1)
+                        )
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Worker \(worker.id), \(caption(worker.id))")
+                    .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+                }
+            }
+        }
+    }
+
+    private func activity(_ id: Int) -> WorkerActivity {
+        .of(id, busy: busyWorkerIDs, resting: restingWorkerIDs)
+    }
+
+    func caption(_ id: Int) -> String {
+        switch activity(id) {
+        case .busy:
+            // Name the phase when we have it. "busy" alone is what the People popup already says;
+            // the point of this card is the extra detail.
+            guard let run = runFor(id) else { return "busy" }
+            return "P\(run.phase) · \(run.phaseName)"
+        case .resting: return "resting"
+        case .idle: return "idle"
+        }
+    }
+
+    func tone(_ id: Int) -> Color {
+        switch activity(id) {
+        case .busy: return DS.C.accent
+        case .resting: return DS.C.textTertiary
+        case .idle: return DS.C.ok
+        }
+    }
+}
+
 struct BrowserWatchCard: View {
     let snapshot: DeviceSnapshot
     let workers: [WorkerProfile]
@@ -539,16 +618,21 @@ struct BrowserWatchCard: View {
                 )
             }
 
-            // Only when there is a choice to make. One worker plus a picker offering one option is
-            // furniture that asks a question with a single answer. No Add here — this card is for
-            // looking, not configuring, and a menu row that did nothing read as a broken control.
-            if workers.count > 1 {
-                WorkerPicker(
-                    workers: workers,
-                    selected: $selectedWorker,
-                    busyWorkerIDs: snapshot.busyWorkerIDs
-                )
-            }
+            // ⚠ Every worker, always — this used to be a MENU shown only when `workers.count > 1`.
+            // Two things were wrong with that. A menu shows one worker at a time, so "watch the
+            // browsers" could not answer "what is each worker doing right now" without tapping
+            // through them one by one; and hiding it at one worker meant a device that had just
+            // added a second had no visible sign of it here. A strip shows all of them at once and
+            // still selects, which is what the card is for.
+            //
+            // Still no Add: this card is for looking, not configuring.
+            WorkerWatchStrip(
+                workers: workers,
+                selected: $selectedWorker,
+                busyWorkerIDs: snapshot.busyWorkerIDs,
+                restingWorkerIDs: snapshot.restingWorkerIDs,
+                runFor: { snapshot.run(forWorker: $0) }
+            )
 
             // A grid rather than a list: four platforms read as a set of equals, and the whole point
             // is to compare them at a glance.

@@ -1327,34 +1327,146 @@ enum APIKeyStore {
 
     private static let service = "com.distributedglobal.superresearch.keys"
 
-    static func save(_ kind: Kind, _ value: String) {
-        var attributes = query(kind)
+    /// Save a key, and say whether it actually persisted.
+    ///
+    /// ⚠ **This discarded `SecItemAdd`'s `OSStatus` and it cost the owner both API keys.** Entered
+    /// during pairing, accepted by the UI, and then absent from Settings on the next look — because
+    /// an ad-hoc-signed Simulator build has no keychain access group, so every write fails with
+    /// `errSecMissingEntitlement` while the caller sees nothing. `DeviceIdentityStore` was given a
+    /// read-back check and a container fallback for exactly this failure after it cost a pairing;
+    /// this store was left as it was, so the same bug was still here waiting.
+    ///
+    /// The fallback file holds real credentials, unlike the identity store's ids and booleans, so it
+    /// takes the strongest protection class that still lets a headless backend resume after reboot
+    /// without someone unlocking the phone — and it is written **only** when the Keychain has
+    /// demonstrably refused. On a properly provisioned device the Keychain works and no plaintext
+    /// copy is ever created.
+    /// The Keychain, behind a seam.
+    ///
+    /// ⚠ **Not indirection for its own sake — without it the fallback path is untestable and the
+    /// fix was unproven.** `swift test` runs on a macOS host whose Keychain WORKS, so every test
+    /// took the happy path and five separate mutations of this store — including restoring the
+    /// original discard-the-status bug — all passed. The failure being fixed only happens where the
+    /// Keychain refuses, so a test must be able to make it refuse.
+    static var keychainWrite: (Kind, String) -> OSStatus = { kind, value in
+        var attributes = liveQuery(kind)
         SecItemDelete(attributes as CFDictionary)   // upsert; add alone fails errSecDuplicateItem
         attributes[kSecValueData as String] = Data(value.utf8)
         attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-        SecItemAdd(attributes as CFDictionary, nil)
+        return SecItemAdd(attributes as CFDictionary, nil)
+    }
+
+    static var keychainRead: (Kind) -> String? = { kind in
+        var attributes = liveQuery(kind)
+        attributes[kSecReturnData as String] = true
+        attributes[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(attributes as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static var keychainDelete: (Kind) -> Void = { kind in
+        SecItemDelete(liveQuery(kind) as CFDictionary)
+    }
+
+    /// Restore the real Keychain. Tests that install a stub must call this in tearDown, or every
+    /// later test in the process inherits the stub.
+    static func useRealKeychain() {
+        keychainWrite = { kind, value in
+            var attributes = liveQuery(kind)
+            SecItemDelete(attributes as CFDictionary)
+            attributes[kSecValueData as String] = Data(value.utf8)
+            attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+            return SecItemAdd(attributes as CFDictionary, nil)
+        }
+        keychainRead = { kind in
+            var attributes = liveQuery(kind)
+            attributes[kSecReturnData as String] = true
+            attributes[kSecMatchLimit as String] = kSecMatchLimitOne
+            var item: CFTypeRef?
+            guard SecItemCopyMatching(attributes as CFDictionary, &item) == errSecSuccess,
+                  let data = item as? Data else { return nil }
+            return String(data: data, encoding: .utf8)
+        }
+        keychainDelete = { kind in SecItemDelete(liveQuery(kind) as CFDictionary) }
+    }
+
+    @discardableResult
+    static func save(_ kind: Kind, _ value: String) -> Bool {
+        let status = keychainWrite(kind, value)
+
+        // Not the status alone — whether the query the app will really use can find it again.
+        if status == errSecSuccess, keychainHas(kind) {
+            removeFallback(kind)
+            return true
+        }
+        NSLog("[SR] Keychain unusable for %@ (OSStatus %d) — falling back to a protected file. "
+              + "Expected on an unprovisioned Simulator build.", kind.rawValue, Int(status))
+        return writeFallback(kind, value)
     }
 
     /// Presence only. The value is never returned to the UI — nothing in the app needs to display it,
     /// and a key on screen is a key in a screenshot.
     static func has(_ kind: Kind) -> Bool {
-        var attributes = query(kind)
-        attributes[kSecReturnData as String] = false
-        attributes[kSecMatchLimit as String] = kSecMatchLimitOne
-        return SecItemCopyMatching(attributes as CFDictionary, nil) == errSecSuccess
+        keychainHas(kind) || fallbackValue(kind) != nil
     }
 
+    /// The key itself, for the code that must actually send it somewhere.
+    static func value(_ kind: Kind) -> String? {
+        keychainRead(kind) ?? fallbackValue(kind)
+    }
+
+    private static func keychainHas(_ kind: Kind) -> Bool { keychainRead(kind) != nil }
+
     static func clear() {
-        for kind in Kind.allCases { SecItemDelete(query(kind) as CFDictionary) }
+        for kind in Kind.allCases { remove(kind) }
     }
 
     /// Remove one key. Needed because Settings can now replace or drop a single credential without
     /// the only route being Clear state, which also destroys the pairing and every platform login.
+    ///
+    /// ⚠ Clears BOTH stores. Removing only the Keychain copy would leave the fallback behind, and
+    /// `has()` would keep reporting a key the owner believes they deleted.
     static func remove(_ kind: Kind) {
-        SecItemDelete(query(kind) as CFDictionary)
+        keychainDelete(kind)
+        removeFallback(kind)
     }
 
-    private static func query(_ kind: Kind) -> [String: Any] {
+    // MARK: - The container fallback
+
+    /// Overridable so tests exercise the fallback without touching a real container or the Keychain.
+    static var fallbackDirectory: URL? = DeviceIdentityStore.defaultFallbackDirectory
+
+    private static func fallbackURL(_ kind: Kind) -> URL? {
+        fallbackDirectory?.appendingPathComponent("apikey-\(kind.rawValue).bin")
+    }
+
+    private static func writeFallback(_ kind: Kind, _ value: String) -> Bool {
+        guard let url = fallbackURL(kind) else { return false }
+        do {
+            try Data(value.utf8).write(
+                to: url,
+                options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
+            )
+            return true
+        } catch {
+            NSLog("[SR] API key fallback write FAILED: %@", String(describing: error))
+            return false
+        }
+    }
+
+    private static func fallbackValue(_ kind: Kind) -> String? {
+        guard let url = fallbackURL(kind), let data = try? Data(contentsOf: url) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func removeFallback(_ kind: Kind) {
+        guard let url = fallbackURL(kind) else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    private static func liveQuery(_ kind: Kind) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

@@ -175,3 +175,47 @@ final class WorkerProfileTests: XCTestCase {
         XCTAssertEqual(registry.deviceLogins(), [:])
     }
 }
+
+
+/// The Browser-watch strip's state rule.
+///
+/// ⚠ The owner asked to watch **every** worker's state at once. The card previously rendered a MENU,
+/// shown only when there was more than one worker — so it could not answer "what is each worker
+/// doing right now" without tapping through them, and a device that had just gained a second worker
+/// showed no sign of it here.
+final class WorkerActivityTests: XCTestCase {
+
+    func testABusyWorkerReadsBusy() {
+        XCTAssertEqual(WorkerActivity.of(1, busy: [1], resting: []), .busy)
+    }
+
+    func testAParkedWorkerReadsResting() {
+        XCTAssertEqual(WorkerActivity.of(2, busy: [], resting: [2]), .resting)
+    }
+
+    func testAFreeWorkerReadsIdle() {
+        XCTAssertEqual(WorkerActivity.of(3, busy: [1], resting: [2]), .idle)
+    }
+
+    /// ⭐ The precedence, and the only case where the two sets disagree.
+    ///
+    /// Parking a worker mid-run does NOT stop that run — it stops the worker being handed the next
+    /// one. Reporting "resting" here would tell the owner their work had stopped when it had not.
+    /// Asserted explicitly rather than falling out of statement order, because statement order is
+    /// exactly what a refactor reorders.
+    func testBusyBeatsRestingWhenAWorkerIsParkedMidRun() {
+        XCTAssertEqual(WorkerActivity.of(1, busy: [1], resting: [1]), .busy,
+                       "a worker parked mid-run is still running that run")
+    }
+
+    /// Every worker resolves to exactly one state — no id can be left unclassified.
+    func testEveryWorkerGetsExactlyOneState() {
+        for id in 1...4 {
+            let state = WorkerActivity.of(id, busy: [1, 2], resting: [2, 3])
+            XCTAssertTrue([.busy, .resting, .idle].contains(state))
+        }
+        XCTAssertEqual(WorkerActivity.of(2, busy: [1, 2], resting: [2, 3]), .busy)
+        XCTAssertEqual(WorkerActivity.of(3, busy: [1, 2], resting: [2, 3]), .resting)
+        XCTAssertEqual(WorkerActivity.of(4, busy: [1, 2], resting: [2, 3]), .idle)
+    }
+}
