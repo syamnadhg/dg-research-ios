@@ -1038,3 +1038,33 @@ list was the *Mac CLI's*.
 Keeping it would have meant either deleting the guard (leaving an untested remote-execution surface)
 or forcing two lists to agree that describe different machines. Both are worse than removing dead
 code that git still remembers.
+
+## 2026-08-08 — Gate zero must run IN-APP, measured (and the jar trap caught me first)
+
+⚠ **Simulator Safari is signed OUT of ChatGPT; the app is signed in.** Measured on both pages at
+once through IWDP, which sees them both:
+
+| Surface | UA | `#prompt-textarea` | login wall |
+|---|---|---|---|
+| Simulator Safari | `Version/26.5` | absent | **yes** |
+| The app's `WKWebView` | `Version/17.0` | **present** | no |
+
+I opened `chatgpt.com` with `simctl openurl` — which targets **MobileSafari** — probed it, and got a
+login wall. The owner caught it before I spent anything on the wrong surface. §14's *"say which
+surface you measured on"* is not bookkeeping: the two pages differ in whether the account exists.
+
+**Consequences for the gate-zero run:**
+
+1. **Drive it in the app, not Safari.** `simctl openurl` is the wrong tool here entirely. The app's
+   web view only *exists* once Browser watch has opened that platform — the views are retained by
+   design, the login sheet's is not — so the sequence is: launch app → tap the platform tile in
+   Browser watch → then `iwdp.list_pages` shows it.
+2. **Pick the page by UA, never by URL or title.** Both pages are `https://chatgpt.com/` and their
+   titles differ only by a suffix Safari adds. `Version/17.0` is the app; `Version/26.5` is Safari.
+   ⚠ Appendix B notes this discriminator breaks under `SR_DESKTOP_WEB=1`.
+3. This pulls decision **B5**'s *"in-app before done"* forward to **day one** for gate zero, which
+   §3.2 already anticipated — for a different reason (the jar was empty then; now it is the only
+   jar that is full).
+
+**Tap coordinates are in POINTS.** The screenshot is 1206×2622 at 3x; the screen is 402×874pt.
+Divide by 3. AXe took `tap -x 109 -y 330` for a tile whose pixel centre was (327, 991).
