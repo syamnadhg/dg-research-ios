@@ -143,10 +143,22 @@ def test_the_real_repo_state_is_what_the_report_claims():
     gaps = gate.cleared_platforms(manifest)
     assert set(gaps) == {"chatgpt", "gemini", "claude", "notebooklm"}
     assert not gaps["chatgpt"], "chatgpt is captured 7/7 — it should report no missing selectors"
-    for platform in ("gemini", "claude", "notebooklm"):
+    # ⚠ Gemini joined the captured set on 2026-08-09, from a COMPLETED live deep-research run: its
+    # report container, its scoped source list, its model picker and its plan-confirmation control
+    # were all measured on the finished page. The expectation moves deliberately and once, exactly
+    # as it did for chatgpt — the invariant below is what this test actually protects.
+    assert not gaps["gemini"], "gemini is fully captured — it should report no missing selectors"
+    for platform in ("claude", "notebooklm"):
         assert gaps[platform], f"{platform} still has uncaptured selectors and must report them"
     assert "chatgpt" in gate.c1_covered(), (
         "chatgpt clears C0 and MUST therefore have a real in-app verdict — clause 2 of the goal"
+    )
+    # ⛔ The clause-2 invariant, now live for gemini too: a platform that reports CLEARED must have a
+    # real in-app run behind it. Gemini has been driven live but has NO recorded in-app verdict yet,
+    # so this is the gate doing its job rather than a test to relax.
+    assert "gemini" not in gate.c1_covered(), (
+        "gemini now clears C0 — record its in-app verdict, or this gate is reporting coverage that "
+        "no run has demonstrated"
     )
 
 
@@ -333,3 +345,59 @@ def test_the_on_disk_chatgpt_verdict_is_real_coverage_not_a_wiring_proof():
         "a --url run is a wiring proof and must not be the artifact the repo ships"
     )
     assert "chatgpt" in gate.c1_covered(), "a real passing verdict must be credited"
+
+
+# --------------------------------------------------------------------------------------------
+# Item 13 — the gate runner can point the P0–P3 e2e at a REAL platform.
+#
+# ⚠ Asserted by reading the runner's own text because it is a shell script with no importable
+# surface — but the assertions are on the WIRING (that the flag reaches the e2e together with the
+# real manifest, and that the mock path survives), not on a word appearing somewhere.
+
+
+def _runner_text():
+    from pathlib import Path
+    return (Path(__file__).resolve().parents[2] / "bin" / "all_gates.sh").read_text()
+
+
+def _real_platform_invocation() -> str:
+    """The COMMAND that runs the real-platform e2e, with comments stripped.
+
+    ⛔ Written this way because the first version of this test asserted the manifest filename was
+    somewhere in the file — and it passed with the wiring deleted, because the name also appears in
+    the usage comment at the top. A presence assertion against a string that lives in prose proves
+    nothing about the command that runs. Caught by bin/mutate.py.
+    """
+    lines = [
+        line for line in _runner_text().splitlines() if not line.strip().startswith("#")
+    ]
+    body = "\n".join(lines)
+    start = body.index("--platform")
+    return body[max(0, start - 300):start + 200]
+
+
+def test_a_platform_argument_reaches_the_e2e_with_the_REAL_manifest():
+    invocation = _real_platform_invocation()
+    assert "--platform" in invocation
+    assert "--manifest" in invocation and "selectors_mobile.json" in invocation, (
+        "a platform flag that does not also swap the manifest runs the real platform against the "
+        "MOCK selectors, which fails in a way that reads as selector rot"
+    )
+
+
+def test_the_mock_path_is_still_the_default():
+    # The credential-free path is what runs everywhere; losing it would make the suite depend on a
+    # signed-in Simulator.
+    text = _runner_text()
+    assert 'PLATFORM="${2:-}"' in text, "the argument must be optional"
+    assert "mock platform" in text
+
+
+def test_the_signed_out_SAFARI_limitation_is_written_where_the_operator_will_read_it():
+    """⛔ The real-platform e2e opens a Safari tab and only the APP is signed in.
+
+    Without this warning at the top of the runner, the first person to use the flag reads a P0
+    failure as a broken logged-in selector and goes hunting in the manifest.
+    """
+    head = _runner_text().split("set -uo pipefail")[0]
+    assert "only the APP is signed in" in head

@@ -15,6 +15,7 @@ import SwiftUI
 /// `supervised` flag the frontend's Account toggle reads) and which API keys are present.
 struct SettingsSheet: View {
     @ObservedObject var theme: ThemeManager
+    @ObservedObject var size: AppSizeManager
     @ObservedObject var model: AppModel
     let onClose: () -> Void
 
@@ -120,11 +121,25 @@ struct SettingsSheet: View {
         .overlay(alignment: .bottom) { Rectangle().fill(DS.C.border).frame(height: 1) }
     }
 
-    /// The theme control, in the app's settings — one of the two places the web app offers it.
+    /// The theme control, in the app's settings — one of the two places the web app offers it —
+    /// and the size control beside it.
+    ///
+    /// ⚠ Both live in ONE section rather than a new "Size" group: they answer the same question
+    /// ("how should this app look to me"), and a settings screen that puts them apart makes the
+    /// owner hunt for the second one after finding the first.
     private var appearanceSection: some View {
         Section(title: "Appearance") {
             ThemeToggle(theme: theme)
             Text("Defaults to dark, since the rest of the product's signed-in surface is.")
+                .font(DS.F.label).foregroundStyle(DS.C.textTertiary)
+
+            HStack(spacing: DS.S.md) {
+                Text("Size").font(DS.F.label).foregroundStyle(DS.C.textSecondary)
+                Spacer(minLength: 0)
+                SizeToggle(size: size)
+            }
+            .padding(.top, DS.S.sm)
+            Text("Scales every label in the app. M is the default.")
                 .font(DS.F.label).foregroundStyle(DS.C.textTertiary)
         }
     }

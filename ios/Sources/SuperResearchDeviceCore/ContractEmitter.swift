@@ -72,6 +72,15 @@ public actor ContractEmitter {
         let fields: [String: FirestoreValue] = [
             "status": .string("ongoing"),
             "backendRunId": .string(runId),
+            // ⛔ **Without this every research patch 403s** — and it did, on both halves.
+            //
+            // The rule is `request.resource.data.deviceId == request.auth.token.deviceId` on the
+            // research document itself, so the field must be in the WRITE, not merely present on
+            // the doc from an earlier one. The `deviceId` this repo already carries on every
+            // `pipeline_event` is a different field on a different document, which is exactly why
+            // this looked covered: grep finds it, the events write fine, and the patch is denied.
+            // A 403 that names nothing, on the write that starts the run.
+            "deviceId": .string(deviceId),
         ]
         written.append((op: "patch", path: researchPath, fields: fields,
                         deletePaths: ["pendingDecision"]))
@@ -99,7 +108,11 @@ public actor ContractEmitter {
             "deviceId": .string(deviceId),
             "seq": .integer(seq.next(now: millis)),
             "timestamp": .integer(millis),
-            "expireAt": .string(Self.iso8601(clock().addingTimeInterval(30 * 24 * 3600))),
+            // ⛔ A real TIMESTAMP, not a string. Firestore's TTL only collects
+            // `timestampValue`; as a string this field looks right in the console, passes
+            // any rule that checks it exists, and never expires — so a `pipeline_events`
+            // subcollection meant to age out in 30 days grows forever, silently.
+            "expireAt": .timestamp(Self.iso8601(clock().addingTimeInterval(30 * 24 * 3600))),
         ]
         if let phase { fields["phase"] = .integer(Int64(phase)) }
         if let agent, !agent.isEmpty { fields["agent"] = .string(agent) }
@@ -110,6 +123,71 @@ public actor ContractEmitter {
         // A create, not a patch: events are append-only, and a document id chosen by the client would
         // make two workers racing on the same millisecond overwrite each other.
         try await client.createDocument(path: path, fields: fields)
+    }
+
+    /// The five document types a finished run produces.
+    ///
+    /// ⚠ **Five, not three.** The three platform reports are the obvious ones; the `brief` is P1's
+    /// product and P2's input, and `consolidated` is the three reports concatenated, which is what
+    /// P3 actually uploads. A run that writes only the three reports looks complete on the
+    /// Documents page and has nothing for the podcast to be made from.
+    public enum DocType: String, CaseIterable, Sendable {
+        case brief, chatgpt, claude, gemini, consolidated
+    }
+
+    /// Write one research document — the thing a run exists to produce.
+    ///
+    /// ⚠ **An upsert keyed by the docType**, which is deliberate: a re-extraction or a second run
+    /// against the same research overwrites in place. Auto-ids here would leave the Documents page
+    /// showing two copies of the same report with no way to tell which is current.
+    ///
+    /// ⚠ **Blank content is refused rather than written.** The frontend gates its "Read report"
+    /// button on the document existing, so an empty write earns a button that opens an empty modal
+    /// — a run that looks finished and delivers nothing. The backend learned this and gates its own
+    /// `link_extracted` emit on the write having committed.
+    @discardableResult
+    public func saveDocument(
+        _ docType: DocType, content: String, name: String? = nil
+    ) async throws -> Bool {
+        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            NSLog("[SR] refusing to write an EMPTY %@ document", docType.rawValue)
+            return false
+        }
+        let millis = Int64(clock().timeIntervalSince1970 * 1000)
+        let fields: [String: FirestoreValue] = [
+            "id": .string(docType.rawValue),
+            "name": .string(name ?? "\(docType.rawValue).md"),
+            "type": .string(docType.rawValue),
+            "content": .string(content),
+            // The frontend renders this string as-is; computing it here keeps the two halves
+            // agreeing on the rounding rather than each inventing one.
+            "size": .string("\(Int((Double(content.utf8.count) / 1024.0).rounded())) KB"),
+            "createdAt": .integer(millis),
+            "deviceId": .string(deviceId),
+        ]
+        let path = "\(researchPath)/documents/\(docType.rawValue)"
+        written.append((op: "patch", path: path, fields: fields, deletePaths: []))
+        try await client.patchDocument(path: path, set: fields)
+        return true
+    }
+
+    /// Patch the research document with arbitrary fields — P3's links, and nothing else so far.
+    ///
+    /// ⛔ **`deviceId` is added here rather than left to the caller**, and it is not a convenience.
+    /// The rule is `request.resource.data.deviceId == request.auth.token.deviceId` and it is judged
+    /// on the resource being WRITTEN, so a patch that omits it 403s even though the document already
+    /// carries the right value from `startRun`. Every research patch in this file learned that the
+    /// same way; a public method that lets a caller forget is a 403 waiting to be re-diagnosed.
+    ///
+    /// ⚠ Dotted keys are field PATHS — `links.audio_file` addresses a member of the `links` map, not
+    /// a field with a dot in its name. The REST client nests them for the body; see its own note for
+    /// what happens when it does not.
+    public func patchResearch(_ set: [String: FirestoreValue]) async throws {
+        guard !set.isEmpty else { return }
+        var fields = set
+        fields["deviceId"] = .string(deviceId)
+        written.append((op: "patch", path: researchPath, fields: fields, deletePaths: []))
+        try await client.patchDocument(path: researchPath, set: fields)
     }
 
     /// The run's closing writes: the terminal event, then the status patch.
@@ -129,7 +207,11 @@ public actor ContractEmitter {
     /// for another event.
     public func finishRun(status: String) async throws {
         try await emit(type: "pipeline_complete", phase: nil)
-        let fields: [String: FirestoreValue] = ["status": .string(status)]
+        // Same rule, same reason as `startRun`. Omitting it here is the subtler half: the run works
+        // right up to the moment it tries to finish, and then cannot say that it did.
+        let fields: [String: FirestoreValue] = [
+            "status": .string(status), "deviceId": .string(deviceId),
+        ]
         written.append((op: "patch", path: researchPath, fields: fields, deletePaths: []))
         try await client.patchDocument(path: researchPath, set: fields)
     }
@@ -162,6 +244,11 @@ public actor ContractEmitter {
             return ["seq", "timestamp"].contains(key) ? "<int>" : Int(number)
         case .string(let text):
             return text.count == 20 && text.hasSuffix("Z") ? "<iso8601>" : text
+        // ⚠ Masked to the SAME placeholder a string ISO date produced, so the golden fixture — which
+        // records `<iso8601>` — keeps matching across the string-to-timestamp fix. The fixture is
+        // about shape and ordering; changing a field's wire TYPE must not read as a shape change.
+        case .timestamp:
+            return "<iso8601>"
         case .boolean(let flag): return flag
         case .map: return "<map>"
         case .array: return "<array>"

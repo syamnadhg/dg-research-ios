@@ -1,155 +1,233 @@
 {
-  "version": 1,
-  "surface": "ios-app-webview",
-  "_note": [
-    "Captured 2026-07-29 from REAL signed-in DOM, through the app's own WKWebViews \u2014 the only",
-    "signed-in surface on this device. Simulator Safari is signed out of all four platforms, and the",
-    "two cookie jars are not shared, so a value here is evidence about the APP surface.",
-    "",
-    "Provenance distinguishes two strengths of claim, and the distinction is load-bearing. 'resolved'",
-    "means an element matched. 'DRIVEN' means the pipeline acted on it and the outcome was asserted \u2014",
-    "the only claim that rules out the P1 failure, where every click resolves and lands and the harvest",
-    "returns nothing. DRIVEN so far: ChatGPT's composer, and send on all three chat platforms.",
-    "",
-    "isTrusted, settled by driving send on ChatGPT, Claude and Gemini: every dispatched event reported",
-    "isTrusted === false on all three, and all three sent the message regardless. No send control gates",
-    "on trust, so the app can drive them with evaluateJavaScript. HID taps remain the fallback for a",
-    "control that does gate, rather than the default path.",
-    "",
-    "The 12 absent keys are absent on purpose, in four groups:",
-    "  * needs a response WITH CITATIONS, which a one-word reply does not produce (4): sources on",
-    "    chatgpt/claude/gemini, and claude.artifact_panel.",
-    "  * needs a DEEP RESEARCH run in flight (1): chatgpt.activity_panel.",
-    "  * needs a menu or a notebook open (5): chatgpt.deep_research_toggle and claude.research_toggle",
-    "    live in the composer's overflow menu; gemini.start_research appears only after submitting in",
-    "    research mode; notebooklm.add_source and generate_audio are inside a notebook, not on the list.",
-    "  * a CONTRACT MISMATCH rather than a missing value (1): gemini.deep_research_toggle. Deep Research",
-    "    there is a mode picked from a menu, while phases.py taps once and judges aria-pressed \u2014 see the",
-    "    note in bin/capture_selectors.py for why capturing the picker would run P0-P3 with deep",
-    "    research OFF while reporting success.",
-    "  * notebooklm.audio_ready_marker follows from generate_audio.",
-    "",
-    "surface is ios-app-webview, not ios-mobile-safari: the app pins an iPhone Safari 17 user agent",
-    "while Simulator Safari reports 26.5, so the two surfaces are not proven to render the same DOM."
-  ],
-  "platforms": {
-    "chatgpt": {
-      "logged_in_marker": {
-        "css": [
-          "[data-testid=\"composer-plus-btn\"]",
-          "#prompt-textarea"
-        ],
-        "provenance": "resolved@ios-app-webview:data-testid; both absent from the signed-out shell"
-      },
-      "composer": {
-        "css": [
-          "#prompt-textarea"
-        ],
-        "provenance": "DRIVEN@ios-app-webview: insertText filled it (execCommand path) and the text was read back"
-      },
-      "send": {
-        "css": [
-          "[data-testid=\"send-button\"]",
-          "#composer-submit-button"
-        ],
-        "provenance": "DRIVEN@ios-app-webview: a JS click sent the message \u2014 composer cleared, user turn 0->1, assistant replied. Exists ONLY while the composer is non-empty."
-      },
-      "response_container": {
-        "css": [
-          "[data-turn=assistant]",
-          "[data-message-author-role=assistant]"
-        ],
-        "provenance": "resolved@ios-app-webview: [data-turn=assistant] on the turn <section>. MEASURED CORRECTION \u2014 [data-message-author-role=assistant] was verified on a web-search answer and returns ZERO during a deep-research run, where the only author-role on the page is 'user'. A selector that resolves on one response type and not on the type P2 needs is the P1 shape. data-turn carries 'user' or 'assistant' on both turns and is not index-bound, unlike conversation-turn-N."
-      },
-      "deep_research_toggle": {
-        "css": [],
-        "text_contains": "Deep research",
-        "provenance": "DRIVEN@ios-app-webview: opened the plus menu by HID tap, clicked this item by TEXT among menu roles (the same path resolve() takes, aria-checked=false before), and the ported predicate flipped OFF->ON via pillVisible. NOTE pressed stayed FALSE throughout \u2014 an aria-pressed reader sees no change across an activation that plainly happened. TWO steps: open [data-testid=composer-plus-btn] first. NO css on purpose \u2014 resolve() tries css before text and a broad [role=menuitem] would match 'Camera', the first of 19 items. OPENER=[data-testid=\"composer-plus-btn\"]; dismissed with Escape and verified closed; composer readiness re-established after the tap (it navigates); and the confirm now uses the PAGE-level predicate ported from Python, not a handle the activation destroys.",
-        "opener": "[data-testid=\"composer-plus-btn\"]"
-      },
-      "sources": {
-        "css": [
-          "[data-turn=assistant] [data-testid*=source]",
-          "[data-turn=assistant] a[href^=http]"
-        ],
-        "provenance": "resolved@ios-app-webview: SCOPED to the response turn \u2014 unscoped a[href^=http] matches ChatGPT's nav chrome and would harvest the sidebar as sources. Re-scoped from [data-message-author-role=assistant] for the same reason as response_container: that attribute is absent during a deep-research run. Anchor form measured on a web-search answer ('github.com' -> github.com/swiftlang/swift/releases); the testid form is listed first and is UNVERIFIED, because the known P1 failure is that DR sources render as non-anchor nodes."
-      },
-      "activity_panel": {
-        "css": [
-          "[data-turn=assistant] button[aria-expanded]:not([aria-label])"
-        ],
-        "text_contains": "Worked for",
-        "provenance": "DRIVEN@ios-app-webview: clicked it, aria-expanded went false->true and the turn text grew from 'Worked for 23s' to 'Worked for 23s Searched 7 websites' \u2014 the activity content revealed. UNIQUE (1 match): the :not([aria-label]) excludes the three sibling action buttons (Pro feedback / Switch model / More actions), which all carry aria-label. NOT positional \u2014 index 0 happens to be right today, and an nth-child would break the moment a button is added. text_contains covers the label family; measured on a REASONING reply ('Worked for Ns'), and a deep-research run may say 'Researched for\u2026' instead, so re-verify the label there."
-      }
-    },
-    "gemini": {
-      "logged_in_marker": {
-        "css": [
-          "[data-test-id=\"new-chat-button\"]",
-          "[data-test-id=\"all-conversations\"]",
-          "[data-test-id=\"my-stuff-side-nav-entry-button\"]"
-        ],
-        "provenance": "resolved@ios-app-webview:data-test-id (HYPHENATED \u2014 [data-testid] matches 0 on this platform); present-but-collapsed, absent when signed out"
-      },
-      "composer": {
-        "css": [
-          "[role=\"textbox\"][aria-label=\"Enter a prompt for Gemini\"]"
-        ],
-        "provenance": "resolved@ios-app-webview:role + accessible name"
-      },
-      "send": {
-        "css": [
-          "button[aria-label=\"Send message\"]"
-        ],
-        "provenance": "DRIVEN@ios-app-webview: a JS click sent the message (isTrusted false throughout). NOT [data-test-id=send-button-container] \u2014 that is the wrapper div, which is what rank alone preferred because Gemini puts the testid on the box and only an aria-label on the button."
-      },
-      "response_container": {
-        "css": [
-          "model-response"
-        ],
-        "provenance": "resolved@ios-app-webview:custom element \u2014 the platform's own component name"
-      },
-      "deep_research_toggle": {
-        "css": [
-          "toolbox-drawer-item"
-        ],
-        "text_contains": "Deep Research",
-        "provenance": "resolved@ios-app-webview:custom element + text, inside the 'Upload and tools' drawer (TWO steps: tap button[aria-label=\"Upload and tools\"], then this). Verified unique: 6 toolbox-drawer-items on the page, exactly 1 matching 'Deep Research', visible. NOT [data-test-id=bard-mode-menu-button] \u2014 that is the MODEL picker (3.5 Flash-Lite / 3.6 Flash / 3.1 Pro / Extended thinking), which contains no Deep Research at all."
-      }
-    },
-    "claude": {
-      "logged_in_marker": {
-        "css": [
-          "[data-testid=\"user-menu-button\"]"
-        ],
-        "provenance": "resolved@ios-app-webview:data-testid; an account menu cannot exist without an account"
-      },
-      "composer": {
-        "css": [
-          "[data-testid=\"chat-input\"]"
-        ],
-        "provenance": "resolved@ios-app-webview:data-testid"
-      },
-      "send": {
-        "css": [
-          "button[aria-label=\"Send message\"]"
-        ],
-        "provenance": "DRIVEN@ios-app-webview: a JS click sent the message (isTrusted false throughout). Present even when the composer is empty, unlike ChatGPT's."
-      },
-      "response_container": {
-        "css": [
-          "div[data-is-streaming]"
-        ],
-        "provenance": "resolved@ios-app-webview:attribute marker. Claude's assistant turn carries no testid, no id and no accessible name \u2014 16 testids on the page, none on the response. NOT [data-testid=user-message], which is the user's own prompt."
-      }
-    },
-    "notebooklm": {
-      "logged_in_marker": {
-        "css": [
-          "button[aria-label=\"Create new notebook\"]"
-        ],
-        "provenance": "resolved@ios-app-webview:accessible name; this platform ships NO testids at all (Angular Material). NOT #mat-button-toggle-1-button, which means 'the second toggle' rather than 'My notebooks'."
-      }
-    }
+ "version": 1,
+ "surface": "ios-app-webview",
+ "_note": [
+  "Captured 2026-07-29 from REAL signed-in DOM, through the app's own WKWebViews — the only",
+  "signed-in surface on this device. Simulator Safari is signed out of all four platforms, and the",
+  "two cookie jars are not shared, so a value here is evidence about the APP surface.",
+  "",
+  "Provenance distinguishes two strengths of claim, and the distinction is load-bearing. 'resolved'",
+  "means an element matched. 'DRIVEN' means the pipeline acted on it and the outcome was asserted —",
+  "the only claim that rules out the P1 failure, where every click resolves and lands and the harvest",
+  "returns nothing. DRIVEN so far: ChatGPT's composer, and send on all three chat platforms.",
+  "",
+  "isTrusted, settled by driving send on ChatGPT, Claude and Gemini: every dispatched event reported",
+  "isTrusted === false on all three, and all three sent the message regardless. No send control gates",
+  "on trust, so the app can drive them with evaluateJavaScript. HID taps remain the fallback for a",
+  "control that does gate, rather than the default path.",
+  "",
+  "The 12 absent keys are absent on purpose, in four groups:",
+  "  * needs a response WITH CITATIONS, which a one-word reply does not produce (4): sources on",
+  "    chatgpt/claude/gemini, and claude.artifact_panel.",
+  "  * needs a DEEP RESEARCH run in flight (1): chatgpt.activity_panel.",
+  "  * needs a menu or a notebook open (5): chatgpt.deep_research_toggle and claude.research_toggle",
+  "    live in the composer's overflow menu; gemini.start_research appears only after submitting in",
+  "    research mode; notebooklm.add_source and generate_audio are inside a notebook, not on the list.",
+  "  * a CONTRACT MISMATCH rather than a missing value (1): gemini.deep_research_toggle. Deep Research",
+  "    there is a mode picked from a menu, while phases.py taps once and judges aria-pressed — see the",
+  "    note in bin/capture_selectors.py for why capturing the picker would run P0-P3 with deep",
+  "    research OFF while reporting success.",
+  "  * notebooklm.audio_ready_marker follows from generate_audio.",
+  "",
+  "surface is ios-app-webview, not ios-mobile-safari: the app pins an iPhone Safari 17 user agent",
+  "while Simulator Safari reports 26.5, so the two surfaces are not proven to render the same DOM."
+ ],
+ "platforms": {
+  "chatgpt": {
+   "logged_in_marker": {
+    "css": [
+     "[data-testid=\"composer-plus-btn\"]",
+     "#prompt-textarea"
+    ],
+    "provenance": "resolved@ios-app-webview:data-testid; both absent from the signed-out shell"
+   },
+   "composer": {
+    "css": [
+     "#prompt-textarea"
+    ],
+    "provenance": "DRIVEN@ios-app-webview: insertText filled it (execCommand path) and the text was read back"
+   },
+   "send": {
+    "css": [
+     "[data-testid=\"send-button\"]",
+     "#composer-submit-button"
+    ],
+    "provenance": "DRIVEN@ios-app-webview: a JS click sent the message — composer cleared, user turn 0->1, assistant replied. Exists ONLY while the composer is non-empty."
+   },
+   "response_container": {
+    "css": [
+     "[data-turn=assistant]",
+     "[data-message-author-role=assistant]"
+    ],
+    "provenance": "resolved@ios-app-webview: [data-turn=assistant] on the turn <section>. MEASURED CORRECTION — [data-message-author-role=assistant] was verified on a web-search answer and returns ZERO during a deep-research run, where the only author-role on the page is 'user'. A selector that resolves on one response type and not on the type P2 needs is the P1 shape. data-turn carries 'user' or 'assistant' on both turns and is not index-bound, unlike conversation-turn-N."
+   },
+   "deep_research_toggle": {
+    "css": [],
+    "text_contains": "Deep research",
+    "provenance": "DRIVEN@ios-app-webview: opened the plus menu by HID tap, clicked this item by TEXT among menu roles (the same path resolve() takes, aria-checked=false before), and the ported predicate flipped OFF->ON via pillVisible. NOTE pressed stayed FALSE throughout — an aria-pressed reader sees no change across an activation that plainly happened. TWO steps: open [data-testid=composer-plus-btn] first. NO css on purpose — resolve() tries css before text and a broad [role=menuitem] would match 'Camera', the first of 19 items. OPENER=[data-testid=\"composer-plus-btn\"]; dismissed with Escape and verified closed; composer readiness re-established after the tap (it navigates); and the confirm now uses the PAGE-level predicate ported from Python, not a handle the activation destroys.",
+    "opener": "[data-testid=\"composer-plus-btn\"]"
+   },
+   "sources": {
+    "css": [
+     "[data-turn=assistant] [data-testid*=source]",
+     "[data-turn=assistant] a[href^=http]"
+    ],
+    "provenance": "resolved@ios-app-webview: SCOPED to the response turn — unscoped a[href^=http] matches ChatGPT's nav chrome and would harvest the sidebar as sources. Re-scoped from [data-message-author-role=assistant] for the same reason as response_container: that attribute is absent during a deep-research run. Anchor form measured on a web-search answer ('github.com' -> github.com/swiftlang/swift/releases); the testid form is listed first and is UNVERIFIED, because the known P1 failure is that DR sources render as non-anchor nodes."
+   },
+   "activity_panel": {
+    "css": [
+     "[data-turn=assistant] button[aria-expanded]:not([aria-label])"
+    ],
+    "text_contains": "Worked for",
+    "provenance": "DRIVEN@ios-app-webview: clicked it, aria-expanded went false->true and the turn text grew from 'Worked for 23s' to 'Worked for 23s Searched 7 websites' — the activity content revealed. UNIQUE (1 match): the :not([aria-label]) excludes the three sibling action buttons (Pro feedback / Switch model / More actions), which all carry aria-label. NOT positional — index 0 happens to be right today, and an nth-child would break the moment a button is added. text_contains covers the label family; measured on a REASONING reply ('Worked for Ns'), and a deep-research run may say 'Researched for…' instead, so re-verify the label there."
+   }
+  },
+  "gemini": {
+   "logged_in_marker": {
+    "css": [
+     "[data-test-id=\"new-chat-button\"]",
+     "[data-test-id=\"all-conversations\"]",
+     "[data-test-id=\"my-stuff-side-nav-entry-button\"]"
+    ],
+    "provenance": "resolved@ios-app-webview:data-test-id (HYPHENATED — [data-testid] matches 0 on this platform); present-but-collapsed, absent when signed out"
+   },
+   "composer": {
+    "css": [
+     "[role=\"textbox\"][aria-label=\"Enter a prompt for Gemini\"]"
+    ],
+    "provenance": "resolved@ios-app-webview:role + accessible name"
+   },
+   "send": {
+    "css": [
+     "button[aria-label=\"Send message\"]"
+    ],
+    "provenance": "DRIVEN@ios-app-webview: a JS click sent the message (isTrusted false throughout). NOT [data-test-id=send-button-container] — that is the wrapper div, which is what rank alone preferred because Gemini puts the testid on the box and only an aria-label on the button."
+   },
+   "response_container": {
+    "css": [
+     "message-content",
+     "model-response"
+    ],
+    "provenance": "MEASURED@ios-app-webview 2026-08-09 on a COMPLETED deep-research run. ⛔ THE DEEP-RESEARCH REPORT IS NOT IN model-response. The three model-response nodes measured 1086 / 145 / 23273 chars — the last is a message-content descendant; model-response alone yields the 156-char completion notice ('I've completed your research') plus a title card. A run reading only model-response harvests that notice, which is short enough to be rejected but reads as an extraction failure rather than a wrong container. message-content is listed FIRST for that reason; model-response is kept as the chat-mode fallback for P1, which has no immersive panel. Related: the report also renders in deep-research-immersive-panel."
+   },
+   "deep_research_toggle": {
+    "css": [
+     "toolbox-drawer-item"
+    ],
+    "text_contains": "Deep Research",
+    "provenance": "resolved@ios-app-webview:custom element + text, inside the 'Upload and tools' drawer (TWO steps: tap button[aria-label=\"Upload and tools\"], then this). Verified unique: 6 toolbox-drawer-items on the page, exactly 1 matching 'Deep Research', visible. NOT [data-test-id=bard-mode-menu-button] — that is the MODEL picker (3.5 Flash-Lite / 3.6 Flash / 3.1 Pro / Extended thinking), which contains no Deep Research at all. ⛔ 2026-08-09: the two-step path was described in this prose but the machine-readable `opener` field was EMPTY, so the resolver never tapped the drawer and could only find the item if it happened to be open already. Measured live: zero toolbox-drawer-items are present with the drawer shut. Prose the code cannot read is not wiring.",
+    "opener": "button[aria-label=\"Upload and tools\"]"
+   },
+   "model_selector": {
+    "css": [
+     "button[aria-label^=\"Open mode picker\"]"
+    ],
+    "provenance": "MEASURED@ios-app-webview 2026-08-09, unique (1 match). ⭐ Its accessible name carries the CURRENT selection — measured 'Open mode picker, currently Gemini Flash' — so the family+highest-offered pick can READ the state before deciding, exactly like Claude's. ⚠ Matched on the aria-label PREFIX, never the whole string: the label ends with the current model, so an exact match breaks the moment the model changes — which is every time this control does its job. ⚠ The BUTTON shows the family ('Gemini Flash'); the version lives on the MENU ROWS ('3.5 Flash-Lite', '3.6 Flash', '3.1 Pro', 'Extended thinking'). No version literal belongs anywhere in code — read what is offered and take the highest of the family. Flash-Lite is a DIFFERENT family that a substring match happily mistakes for Flash. ⛔ WAS MISSING ENTIRELY until now: the pick logic and its tests existed with no selector to drive, so 'latest Flash + extended thinking' could not actually be applied on this platform."
+   },
+   "start_research": {
+    "css": [
+     "button[aria-label=\"Start research\"]"
+    ],
+    "text_contains": "Start research",
+    "provenance": "MEASURED@ios-app-webview 2026-08-09 on a LIVE deep-research run, unique (1 match). ⛔ THE STEP NOBODY KNEW WAS THERE. Gemini's Deep Research does NOT start on send: it returns a research PLAN (~1200 chars) and STOPS, waiting for this button. Measured on the live page — generating went false, the text was stable and entirely plausible, and the run looked finished. Without this press the wait completes, the extractor harvests THE PLAN AS THE REPORT, and the run ships a document describing what it was going to research. Nothing fails. ⚠ Pressing it NAVIGATES (the URL gains a conversation id) and tears down the inspector connection — that is expected, not an error; re-attach after. Sibling controls on the same screen are 'Edit plan' and 'Try again without Deep Research'; neither is this one."
+   },
+   "sources": {
+    "css": [
+     "deep-research-source-lists a[href^=http]"
+    ],
+    "provenance": "MEASURED@ios-app-webview 2026-08-09 on a COMPLETED deep-research run. One deep-research-source-lists element holding 50 anchors, headed 'Sources used in the report'. ⚠ SCOPED to that element: an unscoped a[href^=http] matches 106 anchors document-wide, most of them the research-progress chrome, and would harvest the sidebar as sources."
+   }
+  },
+  "claude": {
+   "logged_in_marker": {
+    "css": [
+     "[data-testid=\"chat-input\"]",
+     "[data-testid=\"user-menu-button\"]"
+    ],
+    "provenance": "resolved@ios-app-webview 2026-08-08 by ACCESSIBLE NAME / test id, not by text. ⚠ Claude's visible buttons are icon-font ligatures with NO text at all (the inventory is private-use code points), so the text matching that finds ChatGPT's Deep research item and NotebookLM's Copied text cannot work on this platform. Both are absent from the signed-out shell."
+   },
+   "composer": {
+    "css": [
+     "[data-testid=\"chat-input\"]",
+     "div[contenteditable=\"true\"][aria-label^=\"Write your prompt\"]"
+    ],
+    "provenance": "resolved@ios-app-webview 2026-08-08 by ACCESSIBLE NAME / test id, not by text. ⚠ Claude's visible buttons are icon-font ligatures with NO text at all (the inventory is private-use code points), so the text matching that finds ChatGPT's Deep research item and NotebookLM's Copied text cannot work on this platform. Its accessible name is 'Write your prompt to Claude' — which is ALSO the string that had to be added to the chat-mode placeholder list, because without it Claude could never report a positive deep-research OFF."
+   },
+   "send": {
+    "css": [
+     "button[aria-label=\"Send message\"]"
+    ],
+    "provenance": "resolved@ios-app-webview 2026-08-08 by ACCESSIBLE NAME / test id, not by text. ⚠ Claude's visible buttons are icon-font ligatures with NO text at all (the inventory is private-use code points), so the text matching that finds ChatGPT's Deep research item and NotebookLM's Copied text cannot work on this platform. Unlike ChatGPT's, this control is mounted at rest rather than appearing once the composer has text, so an appeared-controls diff finds nothing here and reads as 'this platform has no send button'."
+   },
+   "response_container": {
+    "css": [
+     "div[data-is-streaming]"
+    ],
+    "provenance": "resolved@ios-app-webview:attribute marker. Claude's assistant turn carries no testid, no id and no accessible name — 16 testids on the page, none on the response. NOT [data-testid=user-message], which is the user's own prompt."
+   },
+   "model_selector": {
+    "css": [
+     "[data-testid=\"model-selector-dropdown\"]"
+    ],
+    "provenance": "resolved@ios-app-webview 2026-08-08 by ACCESSIBLE NAME / test id, not by text. ⚠ Claude's visible buttons are icon-font ligatures with NO text at all (the inventory is private-use code points), so the text matching that finds ChatGPT's Deep research item and NotebookLM's Copied text cannot work on this platform. Its accessible name carries the CURRENT model ('Model: Sonnet 5 Medium'), so the family+highest-offered pick can read the state without opening the menu. ⚠ No version literal belongs in code — read what is offered."
+   },
+   "research_toggle": {
+    "css": [],
+    "text_contains": "Research",
+    "opener": "button[aria-label=\"Add files, connectors, and more\"]",
+    "provenance": "MEASURED@ios-app-webview 2026-08-08 — VERIFIED, superseding the earlier 'uncaptured' note and the retracted 'Claude has no Research mode'. With Chat aria-checked=true and Model: Opus 5 Max, the '+' menu enumerates SEVEN items: Add files or photos / Add to project / Skills / Add connector / Add plugins... / Research / Web search. ⛔ Research is role=menuitemcheckbox with aria-checked (measured false at rest) — a TOGGLE like ChatGPT's, so its state is READABLE and must be read, never assumed. Its id ('base-ui-_r_5k_') is generated per render and must NEVER be used as a handle; text on the role is the stable one. ⚠ THE REASON THIS TOOK FOUR ATTEMPTS: every earlier read used a hardcoded calibration (scale 1.0, offset 151.9pt) while the surface actually renders at zoom ~1.067, so the tap landed ~25 CSS px ABOVE the '+' and the menu never opened. isTrusted was true every time. A trusted event is NOT evidence the intended element was hit — assert the target."
+   },
+   "mode_chat": {
+    "css": [],
+    "text_contains": "Chat",
+    "provenance": "MEASURED@ios-app-webview 2026-08-08. Claude's composer carries a two-segment mode control rendered as ICONS — a speech bubble (Chat) and a checklist (Cowork). The segments carry aria-checked: measured Chat=true, Cowork=false, and the text nodes are EMPTY in some renders (a text-only match found nothing twice), so aria-checked is the reliable handle. ⚠ Chat is the owner's REQUIREMENT and is asserted before P2 — but note it is NOT the reason the earlier 'Claude has no Research' reading happened. That was measured to be a role filter omitting menuitemcheckbox; the mode was Chat=true the whole time. See research_toggle."
+   },
+   "mode_cowork": {
+    "css": [],
+    "text_contains": "Cowork",
+    "provenance": "MEASURED@ios-app-webview 2026-08-08, aria-checked=false alongside Chat=true. Recorded so the wrong mode is nameable and assertable. ⚠ HONEST LIMIT: Cowork's composer menu has NEVER been enumerated. An earlier note here claimed it offers no Research — that was inference standing in for a measurement and has been removed."
+   }
+  },
+  "notebooklm": {
+   "logged_in_marker": {
+    "css": [
+     "button[aria-label=\"Create new notebook\"]"
+    ],
+    "provenance": "resolved@ios-app-webview:accessible name; this platform ships NO testids at all (Angular Material). NOT #mat-button-toggle-1-button, which means 'the second toggle' rather than 'My notebooks'."
+   },
+   "create_notebook": {
+    "css": [
+     "button[aria-label=\"Create new notebook\"]"
+    ],
+    "text_contains": "Create notebook",
+    "provenance": "DRIVEN@ios-app-webview 2026-08-08: the landing page's Create control. This platform ships NO test ids at all (Angular Material), so everything here is an accessible name or a text match. ⚠ The product renders as 'Gemini Notebook', not 'NotebookLM' — a selector matching the old visible name matches nothing."
+   },
+   "add_source": {
+    "css": [],
+    "text_contains": "Copied text",
+    "opener": "__url:?addSource=true",
+    "provenance": "DRIVEN@ios-app-webview 2026-08-08: HID-tapped, isTrusted=true, and the paste sheet opened (a 'Pasted text' textarea plus an Insert button appeared). ⭐ THE ANSWER TO ITEM 16: this is a first-class source type, so the iOS document picker is not needed — and the page carries ZERO input[type=file] on mobile, so the file route is CLOSED here rather than merely harder. NO css on purpose: the sheet's controls carry icon-font ligatures in their text ('content_paste\\nCopied text') and no stable id. ⚠ TWO TRAPS: the sheet is reached by navigating to ?addSource=true (the opener above), and the control sits BELOW the fold at client y=709 against a 644px visible region — it must be scrolled into view or the tap guard correctly refuses."
+   },
+   "source_textarea": {
+    "css": [
+     "textarea[aria-label=\"Pasted text\"]",
+     "textarea[placeholder=\"Paste text here\"]"
+    ],
+    "provenance": "resolved@ios-app-webview 2026-08-08: appeared after activating 'Copied text'. ⚠ Its id is `mat-input-2` — a GENERATED Angular Material id that counts inputs on the page, so it moves the moment another input mounts. The accessible name is stable; the id is not."
+   },
+   "share": {
+    "css": [
+     "button[aria-label=\"Share\"]",
+     "button[aria-label^=\"Share\"]",
+     "button[aria-label*=\"hare notebook\"]"
+    ],
+    "provenance": "PORTED@backend, UNVERIFIED on this surface — the desktop reaches this control through a vision agent, so it has no pinned selector to copy and these are accessible-name guesses. ⛔ NO text_contains ON PURPOSE: the audio card's overflow menu contains a row reading 'share Share', and a text match would open that menu instead of the notebook's share dialog — which is a click on a card that must never be clicked. Failing to resolve is the SAFE outcome here: the share step degrades to the plain notebook URL with verified=false rather than failing the run, so a wrong selector costs a public link while a wrong CLICK costs a duplicate podcast."
+   },
+   "insert_source": {
+    "css": [],
+    "text_contains": "Insert",
+    "provenance": "resolved@ios-app-webview 2026-08-08: the paste sheet's commit control, captured in the same diff that produced the textarea."
+   }
   }
+ }
 }

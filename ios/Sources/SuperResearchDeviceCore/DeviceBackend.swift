@@ -34,6 +34,22 @@ protocol DeviceTransport: PairingBackend {
     func listDocuments(collectionPath: String) async throws -> [FirestoreREST.ListedDocument]
     func deleteDocument(path: String) async throws
     func patchDocument(path: String, set: [String: FirestoreValue]) async throws
+    /// A **conditional** patch: applies only if the document is still at `ifUpdateTime`.
+    ///
+    /// Separate from the unconditional one rather than an optional parameter on it, so that every
+    /// existing caller keeps the unconditional semantics it was written for and a claim cannot be
+    /// written by accident without its precondition.
+    func patchDocument(
+        path: String, set: [String: FirestoreValue], ifUpdateTime: String
+    ) async throws
+    /// A patch that also REMOVES fields.
+    ///
+    /// ⚠ Its own method rather than a defaulted parameter, and deliberately not defaulted in a
+    /// protocol extension either: a default that quietly dropped the deletions would leave a stale
+    /// "queued behind <a run that finished an hour ago>" on screen and report success.
+    func patchDocument(
+        path: String, set: [String: FirestoreValue], delete: [String]
+    ) async throws
     /// The persisted half of the auth session.
     func sessionRefreshToken() async -> String?
     func restoreSession(refreshToken: String) async
@@ -56,6 +72,18 @@ extension RESTPairingBackend: DeviceTransport {
     func patchDocument(path: String, set: [String: FirestoreValue]) async throws {
         try await firestore.patchDocument(path: path, set: set)
     }
+
+    func patchDocument(
+        path: String, set: [String: FirestoreValue], ifUpdateTime: String
+    ) async throws {
+        try await firestore.patchDocument(path: path, set: set, ifUpdateTime: ifUpdateTime)
+    }
+
+    func patchDocument(
+        path: String, set: [String: FirestoreValue], delete: [String]
+    ) async throws {
+        try await firestore.patchDocument(path: path, set: set, delete: delete)
+    }
 }
 
 final class DeviceBackend: AppBackend {
@@ -77,6 +105,95 @@ final class DeviceBackend: AppBackend {
     /// Retained so the heartbeat keeps using the same claim clock the confirm used.
     private var coordinator: PairingCoordinator?
     private var heartbeatTask: Task<Void, Never>?
+    /// Pushed a fresh device snapshot, once per beat.
+    ///
+    /// ⛔ **This is the FE→device direction, and without it that direction does not exist.** The web
+    /// app's Shared-with popup parks a worker by writing `restingWorkerIds` straight onto
+    /// `devices/{id}` — no command document, nothing addressed to this device — so the ONLY way the
+    /// phone can learn about it is by looking at the document again. It never did: `refresh()` runs
+    /// on explicit actions only, so a worker parked from the web app stayed awake on the phone until
+    /// the owner happened to tap something. The reverse direction always worked, which is what made
+    /// it look like a one-way bug rather than a missing read.
+    ///
+    /// ⚠ Modelled on `LiveRunActivity.onChange`, the one existing core→UI channel, rather than
+    /// inventing a second shape.
+    var onSnapshot: ((DeviceSnapshot) -> Void)?
+
+    /// Where the once-per-beat state line goes. `NSLog` in the app; a collector in the suite.
+    ///
+    /// ⛔ **A line only on change is not a liveness signal.** The first version of the beat push
+    /// logged the resting set only when it differed, which reads well and is useless in exactly the
+    /// situation it was built for: when the owner toggles a pill on the laptop and nothing happens
+    /// on the phone, silence is ambiguous — the beat may be dead, the read may be failing, or the
+    /// document may genuinely be unchanged, and all three look identical. One line per tick makes
+    /// the beat's own heartbeat visible and turns "nothing arrived" into a statement about the
+    /// document rather than about the app.
+    var beatLogger: ((String) -> Void)? = { NSLog("[SR] %@", $0) }
+
+    /// Who runs a claimed research. Nil until one is installed — intake still claims, sweeps and
+    /// reports correctly without one, which is what makes it verifiable on its own.
+    ///
+    /// ⚠ **Held STRONGLY, and it was weak.** A weak reference is right for a delegate the caller
+    /// keeps alive, and wrong here: the executor is a collaborator the backend owns for the life of
+    /// the pairing, and nothing else retains it. Weak, it deallocated the moment the caller's local
+    /// went out of scope — so `pollQueue` claimed a run, called through an already-nil reference,
+    /// and the run silently never started. The claim would still be stamped on the queue document,
+    /// so the next backend to look would treat it as someone else's work.
+    var launcher: (any RunLauncher)?
+
+    /// Builds the launcher once the device id exists.
+    ///
+    /// ⛔ **Deferred rather than injected at init, because at init there is no device id.** The app
+    /// constructs this backend before pairing; the launcher needs the id to stamp every research
+    /// write (`request.resource.data.deviceId == request.auth.token.deviceId`), so attaching a
+    /// launcher at construction would bake in `nil` and every write would 403.
+    private var makeLauncher: ((String) -> any RunLauncher)?
+
+    /// Give this backend the ability to actually RUN what it claims.
+    ///
+    /// ⛔ **Nothing called this, because it did not exist — and `launcher` was never assigned by
+    /// anything.** Every piece downstream of a claim was built and tested (the pipeline, the
+    /// emitter, P3, the handoff) and the line joining them was missing, so `pollQueue` claimed a
+    /// run — stamping the queue document so no sibling backend would take it — and then called
+    /// through a nil reference. The run sat `ongoing` for ever and the owner's next run queued
+    /// behind it.
+    func attachRunLauncher(
+        apiBaseURL: URL,
+        storageBucket: String,
+        pages: @escaping InAppRunLauncher.PageProvider,
+        releasePages: @escaping @Sendable () -> Void = {},
+        manifest: [String: [String: [String]]],
+        texts: [String: [String: String]],
+        openers: [String: [String: String]]
+    ) {
+        guard let rest = pairing as? RESTPairingBackend else {
+            // ⚠ Stated rather than silent. The preview backend has no Firestore session, so a run
+            // could not be driven anyway — but a device that quietly cannot run is exactly the
+            // failure this whole method exists to end.
+            NSLog("[SR] run launcher NOT attached: this backend has no REST session (preview mode)")
+            return
+        }
+        makeLauncher = { deviceID in
+            InAppRunLauncher(
+                client: rest.firestore, deviceID: deviceID, apiBaseURL: apiBaseURL,
+                storageBucket: storageBucket, pages: pages, releasePages: releasePages,
+                manifest: manifest, texts: texts, openers: openers
+            )
+        }
+    }
+
+    /// The launcher for *deviceID*, built on first use.
+    ///
+    /// ⚠ Cached, because a launcher per claim would be harmless but a new `FirebaseStorage` and a
+    /// new token closure per run are not free — and the id cannot change without a re-pair, which
+    /// rebuilds this object anyway.
+    func launcher(for deviceID: String) -> (any RunLauncher)? {
+        if let launcher { return launcher }
+        guard let makeLauncher else { return nil }
+        let built = makeLauncher(deviceID)
+        launcher = built
+        return built
+    }
 
     convenience init(
         config: FirebaseProjectConfig,
@@ -99,21 +216,60 @@ final class DeviceBackend: AppBackend {
 
     // MARK: - Snapshot
 
+    /// Hands out the ordering stamp. Lock-guarded because the beat task and the main actor both
+    /// call `loadSnapshot()`, and a torn read of the counter would hand two loads the same number —
+    /// at which point the newer one is indistinguishable from the older and gets dropped.
+    private let sequenceLock = NSLock()
+    private var snapshotSequence: UInt64 = 0
+
+    private func nextSnapshotSequence() -> UInt64 {
+        sequenceLock.lock()
+        defer { sequenceLock.unlock() }
+        snapshotSequence += 1
+        return snapshotSequence
+    }
+
     func loadSnapshot() async -> DeviceSnapshot {
+        // ⚠ Taken BEFORE the await, not after. The whole point is to record when this read was
+        // ISSUED — a stamp taken on completion would be in completion order, which is the order the
+        // guard exists to stop trusting.
+        let sequence = nextSnapshotSequence()
         guard let deviceID else {
             var snapshot = DeviceSnapshot.unpaired
             snapshot.platforms = Self.unknownPlatforms
+            snapshot.sequence = sequence
             return snapshot
         }
 
         var snapshot = DeviceSnapshot()
+        snapshot.sequence = sequence
         snapshot.deviceID = deviceID
         snapshot.pairCode = pairCode
         snapshot.platforms = Self.unknownPlatforms
+        // ⛔ **The comment below used to claim this, and the code did the OPPOSITE.** `paired` is
+        // false on a fresh `DeviceSnapshot`, so every non-404 read failure returned an UNPAIRED
+        // snapshot — and an unpaired snapshot is destructive rather than cosmetic: it swaps the root
+        // screen to "No user paired" and force-closes every open sheet (Views.swift's
+        // `onChange(of: snapshot.paired)`). It was survivable only because nothing refreshed on a
+        // timer. The moment a beat pushes a snapshot every 20s, one dropped read — a tunnel, a
+        // token mid-refresh — throws the owner out of whatever they were doing.
+        //
+        // Having a device id at all IS the pairing evidence: it is only ever set by a completed
+        // pairing and only ever cleared by unpair/reset. So say so up front, and let the document
+        // downgrade it (404 ⇒ genuinely unpaired), never a transport error.
+        snapshot.paired = true
+        // ⚠ Re-arm the session first, as `doctor` and `versionAndUpdate` already do and this did
+        // not. A refresh issued before `restoreSession` lands throws `notAuthenticated`, which is
+        // exactly the "read failure" branch above — so on a timer this produced a periodic, entirely
+        // spurious unpair.
+        await restoreSessionIfNeeded()
 
         guard let fields = try? await pairing.readDocument(path: "devices/\(deviceID)")
         else {
-            return snapshot   // unreadable is not the same as unpaired; leave it offline and paired
+            // Unreadable is NOT unpaired. Offline, and paired.
+            NSLog("[SR] snapshot: devices/%@ unreadable this tick — reporting offline, still paired",
+                  String(deviceID.prefix(8)))
+            return snapshot
         }
 
         snapshot.paired = fields["pairConfirmedAt"] != nil
@@ -142,6 +298,7 @@ final class DeviceBackend: AppBackend {
         // the owner parked from the web app was invisible on the phone — the pill rendered awake
         // and tapping it "woke" an already-awake worker.
         snapshot.restingWorkerIDs = Self.workerIDs(from: fields["restingWorkerIds"])
+        if case .string(let owner)? = fields["ownerUid"] { snapshot.ownerUID = owner }
         snapshot.users = Self.users(from: fields)
         if let logins = Self.platforms(from: fields) { snapshot.platforms = logins }
         return snapshot
@@ -224,7 +381,9 @@ final class DeviceBackend: AppBackend {
                     uid: string(run["uid"]),
                     title: string(run["title"]),
                     phase: integer(run["phase"]).map(Int.init),
-                    totalPhases: integer(run["totalPhases"]).map(Int.init)
+                    totalPhases: integer(run["totalPhases"]).map(Int.init),
+                    startedAtMillis: integer(run["startedAt"]) ?? 0,
+                    platformPhase: integer(run["platformPhase"]).map(Int.init)
                 )
             }
         }
@@ -349,6 +508,47 @@ final class DeviceBackend: AppBackend {
         return OpResult(ok: true, message: "Serving — this device is online and accepting runs")
     }
 
+    /// Publish the truth about what this device is running: at boot, nothing.
+    ///
+    /// ⛔ **Without this a killed run BRICKS the device for every future run.** `markBusy` publishes
+    /// `busyWorkerIds` when a run is claimed and clears it when the run ends — so a process that
+    /// dies in between (crash, force-quit, iOS reclaiming a backgrounded app, or the owner stopping
+    /// a run that this build could not stop) leaves the field saying "worker 1 is busy" for ever.
+    /// `workerState` unions that stale set into the live one, `firstFreeWorker` then finds no free
+    /// worker, and every subsequent claim is declined — silently, because declining to claim is
+    /// also what a legitimately busy device does. Measured on 2026-08-14.
+    ///
+    /// ⚠ Safe precisely because ONE process drives one device's workers. Nothing else can be
+    /// running this device's runs at the moment this process starts, so "nothing is busy" is not an
+    /// assumption — it is the only thing that can be true.
+    private func reconcileBusyWorkers() async {
+        guard let deviceID else { return }
+        // ⛔ **Publishes what this process IS running — NOT an empty set.** At boot that is nothing,
+        // which is the whole point. But this also runs from `startHeartbeat()`, and `bounceForReset`
+        // calls that after its pause — potentially while a run is still in flight. Publishing empty
+        // there would tell the device every worker is free, and `firstFreeWorker` would hand a
+        // second run to the worker already driving one: two runs, one set of web views. That is the
+        // exact hazard `workerState` unions `locallyBusyWorkers` in to avoid, and clearing the set
+        // here would have defeated it from the other end.
+        // Best-effort, like `markBusy`: a failed publish costs a stale pill, and refusing to serve
+        // over it would turn a cosmetic problem into an outage.
+        try? await pairing.patchDocument(
+            path: "devices/\(deviceID)",
+            set: ["busyWorkerIds": .array(Self.busyIDsToPublish(locallyBusy: locallyBusyWorkers))]
+        )
+    }
+
+    /// What the device should say it is running.
+    ///
+    /// Extracted as a pure function for the reason the rest of this codebase extracts them: the
+    /// surrounding method needs a paired device and a live session, so the DECISION would otherwise
+    /// only be reachable through an integration test that cannot construct the busy case at all.
+    static func busyIDsToPublish(locallyBusy: Set<Int>) -> [FirestoreValue] {
+        // ⚠ Sorted, so the wire form is stable and a no-op reconciliation does not look like a
+        // change to anything diffing the document.
+        locallyBusy.sorted().map { FirestoreValue.integer(Int64($0)) }
+    }
+
     private func restartServing() async -> OpResult {
         guard deviceID != nil else { return OpResult(ok: false, message: "Not paired") }
         stopHeartbeat()
@@ -417,13 +617,32 @@ final class DeviceBackend: AppBackend {
             // Already handled. The desktop sweeps these at startup; here the delete below is the
             // normal path and this is the guard for one that failed to delete.
             if case .boolean(true)? = doc.fields["processed"] { continue }
+            // ⛔ **And already handled BY THIS PROCESS**, which the line above cannot answer.
+            //
+            // Measured 2026-08-14: one Online-pill reset bounced the device SEVEN times, in two
+            // bursts eleven seconds apart — the length of the bounce's own pause — and stopped only
+            // when the command aged past the staleness window. Every remote marker here is written
+            // with `try?`, so if the ack does not land the device re-reads the same command on
+            // every poll and bounces again, and each bounce restarts the loop that re-reads it.
+            //
+            // A LOCAL memory breaks that cycle without depending on a write succeeding. Firestore
+            // is the shared record; this is the thing this process actually knows.
+            if seenDeviceCommands.contains(doc.id) {
+                NSLog("[SR] command %@ was already handled by this process — not running it again",
+                      doc.id)
+                continue
+            }
             guard case .string(let action)? = doc.fields["action"] else { continue }
 
             let issued: Int64
             if case .integer(let millis)? = doc.fields["timestamp"] { issued = millis } else { issued = 0 }
             let age = Int64(Date().timeIntervalSince1970 * 1000) - issued
             if issued > 0, age > Self.commandStaleMillis {
-                NSLog("[SR] command %@ is %dms old — skipping as stale", action, Int32(age))
+                // ⛔ `Int32(age)` was a TRAPPING conversion on an Int64 millisecond age — it kills
+                // the process for any command older than ~24.8 days, and for any whose `timestamp`
+                // was written in seconds rather than milliseconds (which makes `age` enormous). A
+                // diagnostic that can crash the thing it is diagnosing is worse than no diagnostic.
+                NSLog("[SR] command %@ is %@ms old — skipping as stale", action, String(age))
                 try? await pairing.patchDocument(
                     path: "\(path)/\(doc.id)",
                     set: ["processed": .boolean(true), "staleSkipped": .boolean(true)]
@@ -431,16 +650,558 @@ final class DeviceBackend: AppBackend {
                 continue
             }
 
+            // ⛔ Remembered BEFORE anything else can fail. The handler stops the heartbeat — the
+            // very task this loop runs in — so everything after it executes under cancellation and
+            // may not complete. Recording the id first is the one step guaranteed to happen.
+            seenDeviceCommands.append(doc.id)
+            if seenDeviceCommands.count > 50 { seenDeviceCommands.removeFirst() }
+
             // ⚠ Marked processed BEFORE running it, as the desktop does for hard_reset. The handler
             // stops the heartbeat, and a crash mid-handler must not leave a command that re-runs on
             // every poll forever — a reset loop would be far worse than a reset that half-ran.
-            try? await pairing.patchDocument(
-                path: "\(path)/\(doc.id)", set: ["processed": .boolean(true)]
-            )
+            //
+            // ⚠ And the outcome is REPORTED. Both of these were `try?` with no else, so a denied or
+            // cancelled ack was perfectly silent — which is why a seven-times reset could only be
+            // diagnosed by counting log lines from the handler.
+            do {
+                try await pairing.patchDocument(
+                    path: "\(path)/\(doc.id)", set: ["processed": .boolean(true)]
+                )
+            } catch {
+                NSLog("[SR] command %@: could not mark it processed (%@) — the local guard is now "
+                      + "the only thing stopping a re-run", doc.id, String(describing: error))
+            }
             await handle(command: action, deviceID: deviceID)
             // Deleting is the ACK. `/api/devices/reset-pair-code` polls 5s for exactly this.
-            try? await pairing.deleteDocument(path: "\(path)/\(doc.id)")
+            //
+            // ⛔ **Handed to an UNSTRUCTURED task, because by this line the current one is already
+            // cancelled.** `handle` for `hard_reset` calls `stopHeartbeat()`, which cancels the very
+            // task `pollCommands` runs in — and an inline `await` inherits that cancellation, so
+            // URLSession kills the request. Measured live on 2026-08-14, the moment the failure was
+            // finally logged rather than swallowed: `NSURLErrorDomain Code=-999 "cancelled"` on
+            // every single reset. The ack never landed and nothing said so.
+            //
+            // ⚠ The load-bearing part is STRUCTURED vs UNSTRUCTURED, not `Task` vs `Task.detached`:
+            // an unstructured task does not inherit cancellation either way. `detached` is chosen
+            // only to avoid hopping back onto an actor that is being torn down. Swapping the two
+            // therefore changes nothing, which is why no mutation guards this line — it is verified
+            // by the live log above, and it is honest to say so rather than to claim a test.
+            //
+            // ⭐ Order matches the desktop exactly (`research.py`: mark `processed` upfront, delete
+            // at the END so "the route's ack lands only after sharedWith-dependent writes are
+            // done"). The command is already marked processed, so a failure here costs a leftover
+            // document rather than a re-run.
+            let ackPath = "\(path)/\(doc.id)"
+            Task.detached { [pairing] in
+                do {
+                    try await pairing.deleteDocument(path: ackPath)
+                } catch {
+                    NSLog("[SR] command ack delete failed for %@ (%@) — it is marked processed, so "
+                          + "it will not re-run, but the document is left behind",
+                          ackPath, String(describing: error))
+                }
+            }
         }
+    }
+
+    // MARK: - Run intake (the owner presses go in the web app)
+
+    /// Poll `devices/{id}/queue` and claim what belongs to this device.
+    ///
+    /// ⛔ **Not `commands`.** `pollCommands` above reads `devices/{id}/commands`, which is device
+    /// *operations* — restart, update, ping. This reads the *research lifecycle* channel, which
+    /// nothing on this phone has ever read, and which is the only way a topic submitted in the web
+    /// app becomes work here.
+    ///
+    /// A poll rather than a listener because Firestore's `Listen` is gRPC-only and this client is
+    /// REST — the desktop's `on_snapshot` start-listener has no equivalent. Folded into the same
+    /// 20-second beat as the commands poll, so there is still one timer: a run may wait up to a
+    /// beat, which is invisible next to a pipeline measured in tens of minutes, and a second timer
+    /// would cost battery for nothing.
+    func pollQueue() async {
+        guard let deviceID else { return }
+        let path = "devices/\(deviceID)/queue"
+        // ⛔ The failure is NAMED now. This was `try?` with no else, so a 403 on the queue listing —
+        // the classic missing-`deviceId`-custom-claim failure — presented as a healthy device that
+        // simply never picked anything up. There is no other symptom to go on: the heartbeat keeps
+        // beating, the pills stay green, and the owner's run sits queued forever.
+        let docs: [FirestoreREST.ListedDocument]
+        do {
+            docs = try await pairing.listDocuments(collectionPath: path)
+        } catch {
+            NSLog("[SR] queue: could not list %@ — %@", path, String(describing: error))
+            return
+        }
+        // ⛔ Publish the EMPTY queue rather than returning. The last run leaving is exactly when the
+        // badges have to disappear, and an early return here left the previous `queueOwners` array
+        // on the device document for ever — the owner's popup kept showing a run that had finished.
+        if docs.isEmpty {
+            await publishDeferredQueue(
+                deviceID: deviceID, queuePath: path, workersResting: false, deferred: []
+            )
+            return
+        }
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let state = await workerState(deviceID: deviceID)
+
+        // ⛔ **FIFO, because a listing is not a queue.** `listDocuments` returns documents ordered
+        // by document NAME, which has nothing to do with submission order — so with two runs
+        // waiting and one worker free, the device claimed whichever id happened to sort first. From
+        // the outside that is indistinguishable from the queue being ignored, and it is the same
+        // ordering the desktop backend applies before it claims.
+        let entries = RunQueuePolicy.fifoOrdered(docs.compactMap(QueueEntry.decode))
+
+        // ⛔ **Workers claimed during THIS pass.** `state` is read once, so it cannot see a claim
+        // made moments ago in this same loop — and a one-worker device with two queued documents
+        // claimed both onto worker 1, which made the FIFO order above irrelevant because the queue
+        // was not being respected at all. Pass-local rather than published: a claim reserves the
+        // worker immediately, while `busyWorkerIds` should only ever say a run is actually running.
+        var reserved: Set<Int> = []
+        // ⛔ Everything this pass took off the queue — claimed or deleted. A document claimed a
+        // moment ago still carries no `assignedWorker` in the copy held here (the claim went to the
+        // server, not to this array), so without this the run that just STARTED would be published
+        // as the one waiting at position 1.
+        var settled: Set<String> = []
+
+        for entry in entries {
+            // ⛔ **Never sweep the run THIS process is executing.** The zombie grace is 30 seconds
+            // and a run takes 30 to 90 minutes, so from the second beat onwards our own claim looks
+            // exactly like a dead sibling's — and the sweep would delete the queue entry of a run
+            // that is progressing perfectly well, then say "stale-skip ZOMBIE" about ourselves in
+            // the log. Now that the run is detached this is reachable on every single run.
+            if activeRuns.values.contains(where: { $0.researchID == entry.researchId }) {
+                continue
+            }
+            switch RunQueuePolicy.decide(entry, now: now, workerIsResting: !state.resting.isEmpty) {
+            case .ignore, .waitOutGrace:
+                continue
+            case .unsupported(let raw):
+                NSLog("[SR] queue action %@ is not supported on an iOS backend — skipped", raw)
+                continue
+            case .sweepZombie:
+                NSLog("[SR] queue: stale-skip ZOMBIE %@ — deleting", entry.researchId.prefix(8).description)
+                try? await pairing.deleteDocument(path: "\(path)/\(entry.id)")
+                settled.insert(entry.id)
+            case .sweepAbandoned(let needsHealthCheck):
+                if needsHealthCheck, await runIsStillWanted(entry) {
+                    NSLog("[SR] queue: stale-skip ABANDONED exempt — research doc still queued")
+                    continue
+                }
+                NSLog("[SR] queue: stale-skip ABANDONED %@ — deleting", entry.researchId.prefix(8).description)
+                try? await pairing.deleteDocument(path: "\(path)/\(entry.id)")
+                settled.insert(entry.id)
+            case .claim:
+                if let worker = await claimAndRun(
+                    entry, queuePath: path, state: state, reserved: reserved
+                ) {
+                    reserved.insert(worker)
+                    settled.insert(entry.id)
+                }
+            }
+        }
+
+        // ⭐ **LAST, and it happens on every pass including the ones that claimed nothing.** This is
+        // where a parked worker becomes visible: the runs it is not taking are published as a queue
+        // with positions, which is what the desktop backend does and what both apps already draw.
+        await publishDeferredQueue(
+            deviceID: deviceID,
+            queuePath: path,
+            workersResting: !state.resting.isEmpty,
+            deferred: RunQueuePolicy.deferredRuns(entries.filter { !settled.contains($0.id) })
+        )
+    }
+
+    /// The waiting queue as of the last publish, so an unchanged queue costs no writes.
+    private var lastPublishedDeferred: [DeferredRun] = []
+    /// What each waiting run was last told about its own position, keyed by research id.
+    private var lastPublishedPosition: [String: DeferredRun] = [:]
+
+    /// Publish the waiting queue to the two places the apps read it from.
+    ///
+    /// ⚠ **On change only, and the change is compared against what was actually accepted.** A queue
+    /// that has not moved is the normal state of a parked device — republishing it every 20 seconds
+    /// would cost a write per beat per waiting run, for ever, to say nothing. The cache is updated
+    /// only after the write succeeds, so a failed publish is retried on the next beat rather than
+    /// remembered as done.
+    private func publishDeferredQueue(
+        deviceID: String, queuePath: String, workersResting: Bool, deferred: [DeferredRun]
+    ) async {
+        if deferred != lastPublishedDeferred {
+            let owners: [FirestoreValue] = deferred.map { run in
+                .map([
+                    "uid": .string(run.uid),
+                    "runId": .string(run.researchID),
+                    "title": .string(run.title),
+                    "position": .integer(Int64(run.position)),
+                ])
+            }
+            do {
+                // A full-array overwrite, like the desktop's. Positions shift as the queue drains,
+                // so merging entries would leave a stale position behind every time one leaves.
+                try await pairing.patchDocument(
+                    path: "devices/\(deviceID)", set: ["queueOwners": .array(owners)]
+                )
+                NSLog("[SR] queue: published %@ waiting run(s) — %@",
+                      String(deferred.count),
+                      String(describing: deferred.map { "#\($0.position) \($0.researchID.prefix(8))" }))
+                lastPublishedDeferred = deferred
+            } catch {
+                NSLog("[SR] queue: queueOwners publish FAILED (no queue badge anywhere) — %@",
+                      String(describing: error))
+            }
+        }
+        // ⚠ Pruned to the runs still waiting, or a device that has served a hundred runs carries a
+        // hundred remembered positions for the life of the process.
+        lastPublishedPosition = lastPublishedPosition.filter { key, _ in
+            deferred.contains { $0.researchID == key }
+        }
+        for run in deferred where lastPublishedPosition[run.researchID] != run {
+            await publishQueuePosition(run, deviceID: deviceID)
+        }
+        // ⭐ The keep-alive stamp, and it is what makes parking a worker over a weekend safe. See
+        // `RunQueuePolicy.needsRestStamp`: the sweep ages a rest-deferred document from this field
+        // once the workers are awake again, and nothing here had ever written it.
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        for run in deferred
+        where RunQueuePolicy.needsRestStamp(run, workersResting: workersResting, now: now) {
+            // Best-effort, like every other beat write: the next pass re-stamps.
+            try? await pairing.patchDocument(
+                path: "\(queuePath)/\(run.queueDocID)", set: ["restDeferredAt": .integer(now)]
+            )
+        }
+    }
+
+    /// Tell one waiting run where it stands, on its own research document.
+    ///
+    /// ⛔ **`deviceId` travels in the same patch, and without it this is a 403.** The rule is
+    /// `request.resource.data.deviceId == request.auth.token.deviceId`, judged on the PAYLOAD — a
+    /// patch that names only the queue fields is refused however long the document has carried this
+    /// device's stamp. Same trap the finish patch hit.
+    ///
+    /// ⚠ No ETA. The desktop estimates one from the head run's phase and the moment that phase
+    /// started, neither of which this backend publishes; a number derived from nothing would be
+    /// worse than the FE's own "no estimate yet", which is what an absent field already means.
+    private func publishQueuePosition(_ run: DeferredRun, deviceID: String) async {
+        var set: [String: FirestoreValue] = [
+            "deviceId": .string(deviceID),
+            "queuePosition": .integer(Int64(run.position)),
+            "queueTotalAhead": .integer(Int64(run.position - 1)),
+            "queueAheadFromSelf": .integer(Int64(run.aheadFromSelf)),
+            "queueAheadFromOthers": .integer(Int64(run.aheadFromOthers)),
+        ]
+        var delete: [String] = []
+        if run.behindRunID.isEmpty {
+            // ⚠ Cleared rather than left. At the head of the queue the run ahead is the one
+            // RUNNING, and a stale "behind <finished run>" renders as waiting on something that
+            // ended an hour ago.
+            delete = ["queuedBehindRunId", "queuedBehindTitle"]
+        } else {
+            set["queuedBehindRunId"] = .string(run.behindRunID)
+            set["queuedBehindTitle"] = .string(run.behindTitle)
+        }
+        do {
+            try await pairing.patchDocument(
+                path: "users/\(run.uid)/researches/\(run.researchID)", set: set, delete: delete
+            )
+            lastPublishedPosition[run.researchID] = run
+        } catch {
+            NSLog("[SR] queue: position publish FAILED for %@ (its banner will show no place in "
+                  + "the queue) — %@", run.researchID.prefix(8).description,
+                  String(describing: error))
+        }
+    }
+
+    // MARK: - Run control (the owner presses Stop in the web app)
+
+    /// The runs this device is executing, **keyed by worker** — set when a claimed run is launched.
+    /// Run control is scoped to these: there is no point polling a research nobody here is running.
+    ///
+    /// ⛔ **This was a single optional, and that made the second worker a lie.** The device
+    /// advertises one worker per browser profile and the owner can add profiles, so a second run
+    /// could be claimed onto worker 2 — at which point it overwrote the one field naming the active
+    /// run. The first run kept going, invisibly: `pollRunCommands` polled only the survivor, so the
+    /// owner's Stop on run 1 reached nothing, and the reset path could only ever kill one of them.
+    /// Advertising capacity you cannot track is the same defect the desktop backend fixed by
+    /// publishing what it can actually run; the answer here is to make the capacity true instead.
+    var activeRuns: [Int: (uid: String, researchID: String)] = [:]
+
+    /// Who can actually stop a run. Held strongly for the same reason as `launcher` — a weakly
+    /// held controller deallocates and the owner's Stop then reaches nothing, silently.
+    ///
+    /// ⛔ **This was never set, and `RunController`'s only conformer in the whole repository was a
+    /// TEST SPY.** So `pollRunCommands` read the owner's Stop, classified it correctly, acked it,
+    /// and called `stopRun` on nil. Measured 2026-08-14: Stop was pressed, the run continued into a
+    /// 40-minute `awaitResponse`, and the worker pill kept pulsing because it was genuinely still
+    /// busy. Exactly the shape of the missing `launcher` join — built, unit-tested against a
+    /// double, never connected to anything real.
+    var controller: (any RunController)?
+
+    /// Make this backend its own run controller.
+    ///
+    /// ⚠ Assigned where the run loop starts rather than at init: `self` cannot be handed out during
+    /// initialisation, and a controller attached later is a controller that is absent for exactly
+    /// the window in which the first run can be claimed.
+    private func attachRunController() {
+        if controller == nil { controller = InAppRunController() }
+    }
+
+    /// Stop a run this device is executing, from the app's own UI.
+    ///
+    /// ⚠ Goes through the SAME controller the web app's Stop reaches, rather than poking the signal
+    /// directly. One path means the two cannot behave differently — and the phone's Stop is the one
+    /// that gets exercised most, so it is the one most likely to hide a divergence.
+    func stopActiveRun(researchID: String) async {
+        attachRunController()
+        await controller?.stopRun(researchID: researchID)
+    }
+
+    /// Device commands this PROCESS has already acted on.
+    ///
+    /// ⛔ Separate from the document's own `processed` marker, and not a duplicate of it. That
+    /// marker is a remote write that can fail — and when it does, the device re-reads the same
+    /// command on every poll. For `hard_reset` each re-read bounces the loop that does the
+    /// re-reading, which is a self-feeding cycle: measured at seven bounces from one press.
+    private var seenDeviceCommands: [String] = []
+
+    private var seenRunCommands: [String] = []
+    /// Researches whose command subcollection this process has already attached to, so "first poll"
+    /// is a fact about a RUN rather than about the process.
+    private var runCommandsAttached: Set<String> = []
+
+    /// Poll `users/{uid}/researches/{rid}/commands` for the run in flight.
+    ///
+    /// ⛔ **The third channel.** `pollCommands` reads device operations, `pollQueue` reads the
+    /// research lifecycle, and this reads **run control** — Stop, Pause, Resume. The web app's Stop
+    /// button writes here and nowhere else, so without this the owner has a run they cannot stop,
+    /// which is the one thing they said explicitly is not parity.
+    func pollRunCommands() async {
+        // ⛔ EVERY active run, not one. Polling a single run meant that the moment a second was
+        // claimed, the first became unstoppable — the owner's Stop wrote to a subcollection nobody
+        // was reading. Snapshotted first: a `stop` handled below can clear the dictionary.
+        for (_, active) in activeRuns { await pollRunCommands(for: active) }
+    }
+
+    private func pollRunCommands(for active: (uid: String, researchID: String)) async {
+        let path = "users/\(active.uid)/researches/\(active.researchID)/commands"
+        guard let docs = try? await pairing.listDocuments(collectionPath: path) else { return }
+
+        // ⚠ Per RUN, not per process. "First poll" is what decides whether a command predates this
+        // session and must be acked rather than obeyed — and a second run's first poll is its own
+        // moment. A process-wide flag made every later run skip the stale check entirely, so a
+        // command left over from a previous session would execute against a brand-new run.
+        let isFirstPoll = !runCommandsAttached.contains(active.researchID)
+        runCommandsAttached.insert(active.researchID)
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+
+        for doc in docs {
+            guard let entry = RunCommandEntry.decode(doc) else { continue }
+            // ⚠ Scoped by research. `dedupeKey` falls back to the DOCUMENT id, which is only unique
+            // inside one research's subcollection — unscoped, one run's handled command can mark a
+            // different run's command as already-seen, and that one is then silently never obeyed.
+            let key = "\(active.researchID)/\(entry.dedupeKey)"
+            let decision = RunControlPolicy.decide(
+                entry, now: now, isFirstPoll: isFirstPoll,
+                alreadySeen: Set(seenRunCommands), key: key
+            )
+            switch decision {
+            case .ignore:
+                continue
+            case .skipStale:
+                NSLog("[SR] run command %@ is from a previous session — acking without running it",
+                      String(describing: entry.command))
+                await ack(path: path, id: entry.id, staleSkipped: true)
+            case .unsupported(let raw):
+                NSLog("[SR] run command %@ is not supported on an iOS backend — skipped", raw)
+                await ack(path: path, id: entry.id, staleSkipped: false)
+            case .execute:
+                RunControlPolicy.remember(key, in: &seenRunCommands)
+                // Acked BEFORE running, as the desktop does for its terminal commands: `stop` tears
+                // down the very loop this code is running in, and a crash mid-handler must not leave
+                // a command that re-executes on every poll for the life of the run.
+                await ack(path: path, id: entry.id, staleSkipped: false)
+                switch entry.command {
+                case .stop: await controller?.stopRun(researchID: active.researchID)
+                case .pause: await controller?.pauseRun(researchID: active.researchID)
+                case .resume: await controller?.resumeRun(researchID: active.researchID)
+                default: break
+                }
+            }
+        }
+    }
+
+    private func ack(path: String, id: String, staleSkipped: Bool) async {
+        var fields: [String: FirestoreValue] = ["processed": .boolean(true)]
+        if staleSkipped { fields["staleSkipped"] = .boolean(true) }
+        try? await pairing.patchDocument(path: "\(path)/\(id)", set: fields)
+        // Deleting is the ack the frontend's own catch-up looks for; `processed` alone leaves the
+        // subcollection growing across runs, and every later attach replays the lot.
+        try? await pairing.deleteDocument(path: "\(path)/\(id)")
+    }
+
+    /// Which worker ordinals are busy and which are resting, read fresh from the device document.
+    ///
+    /// Fresh rather than from a cached snapshot, and read **once per poll** rather than per entry.
+    /// Fresh because placing a run on a worker that another backend marked busy a moment ago is the
+    /// same defect the claim protocol exists to prevent, one level down. Once because a queue with
+    /// five documents should not cost five reads.
+    ///
+    /// ⚠ A read failure reports **every** worker busy, so nothing is placed. The safe direction is
+    /// to do no work, never to assume a worker is free.
+    private func workerState(deviceID: String) async -> (busy: Set<Int>, resting: Set<Int>) {
+        do {
+            guard let fields = try await pairing.readDocument(path: "devices/\(deviceID)") else {
+                return (Set(1...max(workers.count, 1)), [])
+            }
+            // ⛔ UNIONED with what this process is actually running. The document's `busyWorkerIds`
+            // is the only busy signal there was, and **nothing on this device ever wrote it** — so
+            // with the run now detached, the very next beat would see every worker free and claim a
+            // second entry onto the worker already driving one. Two runs, one set of web views.
+            return (Self.busyWorkerIDs(from: fields).union(locallyBusyWorkers),
+                    Self.workerIDs(from: fields["restingWorkerIds"]))
+        } catch {
+            return (Set(1...max(workers.count, 1)), [])
+        }
+    }
+
+    /// Workers this process is driving a run on, right now.
+    private(set) var locallyBusyWorkers: Set<Int> = []
+
+    /// The detached runs, keyed by worker, held so the loop can tell whether any is in flight.
+    private var runTasks: [Int: Task<Void, Never>] = [:]
+
+    /// Wait for every run in flight.
+    ///
+    /// ⚠ Exists because the runs are now DETACHED: without a way to join them, a caller — a test, or
+    /// an orderly shutdown — cannot tell "the run has not started" from "the run has not finished".
+    /// ⛔ Snapshotted before awaiting: each task clears its own entry on completion, so iterating the
+    /// live dictionary mutates it mid-await.
+    func awaitRunInFlight() async {
+        for task in runTasks.values { await task.value }
+    }
+
+    /// Mark a worker busy or free, locally AND on the device document.
+    ///
+    /// ⚠ Published as well as tracked: the web app's worker pills read `busyWorkerIds`, so a device
+    /// that knows it is busy and never says so shows an idle worker for the whole run — which is
+    /// exactly the "did my run even start" question this wave exists to answer.
+    private func markBusy(_ worker: Int, running: Bool) {
+        if running { locallyBusyWorkers.insert(worker) } else { locallyBusyWorkers.remove(worker) }
+        guard let deviceID else { return }
+        let ids = locallyBusyWorkers.sorted().map { FirestoreValue.integer(Int64($0)) }
+        Task { [pairing] in
+            // Best-effort: a failed publish costs a stale pill, and failing the run over it would
+            // trade a cosmetic problem for a real one. ⚠ But SAID OUT LOUD — this was a bare `try?`
+            // with no else, so a denied write left the web app showing an idle worker for a live run
+            // with nothing anywhere to explain it.
+            do {
+                try await pairing.patchDocument(
+                    path: "devices/\(deviceID)", set: ["busyWorkerIds": .array(ids)]
+                )
+                NSLog("[SR] workers: published busy=%@", String(describing: ids.count))
+            } catch {
+                NSLog("[SR] workers: busy publish FAILED (the web app will show a stale pill) — %@",
+                      String(describing: error))
+            }
+        }
+    }
+
+    /// Is an abandoned-looking `start` still wanted? The research document is the authority.
+    ///
+    /// ⚠ **A read failure means KEEP.** Deleting queued work because a read blipped destroys the
+    /// only claim ticket a parked run has. Never destroy work on a transient.
+    private func runIsStillWanted(_ entry: QueueEntry) async -> Bool {
+        let path = "users/\(entry.uid)/researches/\(entry.researchId)"
+        do {
+            guard let fields = try await pairing.readDocument(path: path) else { return false }
+            if case .string(let status)? = fields["status"] { return status == "queued" }
+            return false
+        } catch {
+            return true
+        }
+    }
+
+    /// The conditional claim, ported from the desktop's `_try_claim_queue_doc`.
+    ///
+    /// Four steps and the order matters: early-out on a sibling's claim, route to a free worker,
+    /// write the claim **with a precondition**, and treat a lost precondition as the expected
+    /// race-loss — returning quietly, never retrying. Retrying a lost precondition reads the
+    /// sibling's claim as the new base version and turns a clean loss into a stolen run.
+    /// Claim one queue document and place its run. Returns the worker it was placed on, so the
+    /// caller can keep the rest of this pass off it.
+    ///
+    /// ⚠ Returns the worker on the no-launcher path too. That branch leaves a CLAIMED document that
+    /// will never run — bad enough on its own — and handing the next document the same worker on top
+    /// of it turns one stuck run into two.
+    @discardableResult
+    private func claimAndRun(
+        _ entry: QueueEntry, queuePath: String, state: (busy: Set<Int>, resting: Set<Int>),
+        reserved: Set<Int> = []
+    ) async -> Int? {
+        // No base version, no claim. Claiming blind is worse than not claiming: two backends run
+        // the same research and both write to the same documents.
+        guard let updateTime = entry.updateTime else {
+            NSLog("[SR] queue: %@ has no updateTime — cannot claim safely, skipping",
+                  entry.id)
+            return nil
+        }
+        // ⛔ **`state` is read ONCE per poll, so it cannot see a claim this same pass just made.**
+        // With one worker and two queued documents that meant both were claimed onto worker 1 —
+        // FIFO order was then irrelevant, because the queue had not actually been respected at all.
+        // `locallyBusyWorkers` is updated synchronously by `markBusy` below, so unioning it here is
+        // what makes the second iteration see the first one's claim.
+        guard let worker = RunQueuePolicy.freeWorker(
+            count: workers.count,
+            busy: state.busy.union(locallyBusyWorkers).union(reserved),
+            resting: state.resting
+        ) else { return nil }   // every worker is busy or resting; the next beat retries
+
+        do {
+            try await pairing.patchDocument(
+                path: "\(queuePath)/\(entry.id)",
+                set: ["assignedWorker": .integer(Int64(worker)),
+                      "claimedAt": .integer(Int64(Date().timeIntervalSince1970 * 1000))],
+                ifUpdateTime: updateTime
+            )
+        } catch FirestoreRESTError.preconditionFailed {
+            // The expected path when a Mac backend and this phone watch one account. Not an error.
+            NSLog("[SR] queue: %@ was claimed by a sibling first — standing down", entry.id)
+            return nil
+        } catch {
+            NSLog("[SR] queue: claim of %@ failed: %@", entry.id, String(describing: error))
+            return nil
+        }
+        // ⛔ Resolved AFTER the claim rather than at startup, and reported when it is absent. A nil
+        // launcher here means the entry has been claimed and will never run — the single worst state
+        // this loop can leave behind, because the stamp tells every other backend to keep away.
+        guard let deviceID, let launcher = launcher(for: deviceID) else {
+            NSLog("[SR] queue: %@ was CLAIMED but no run launcher is attached — the run cannot "
+                  + "start, and the claim stamp keeps other backends away from it", entry.id)
+            return worker
+        }
+
+        // ⛔ **DETACHED, and this is not an optimisation — it is the difference between a run the
+        // owner can watch and a device that appears to die.** `beat()` awaits this whole chain, so
+        // awaiting a 30-to-90-minute run here means: no heartbeat (the web app shows the device
+        // OFFLINE within the beat window), no device commands, and — worst — **no run-command
+        // polling, so Stop and Pause from the web app reach nothing at all**. Everything the owner
+        // does during the run silently fails, on a run that is in fact progressing normally.
+        markBusy(worker, running: true)
+        activeRuns[worker] = (uid: entry.uid, researchID: entry.researchId)
+        runTasks[worker] = Task { [weak self] in
+            await launcher.launch(entry, worker: worker)
+            guard let self else { return }
+            // ⭐ **Consumption is by DELETE.** The contract says so in as many words, and the device
+            // has delete permission on its own queue. Without it our OWN 30-second zombie sweep is
+            // what eventually removes the document — deciding that the claimer is dead when the
+            // claimer is us — which is the right outcome reached by a reason that would mislead
+            // anyone reading the log.
+            try? await self.pairing.deleteDocument(path: "\(queuePath)/\(entry.id)")
+            self.markBusy(worker, running: false)
+            self.activeRuns[worker] = nil
+            self.runTasks[worker] = nil
+            NSLog("[SR] queue: %@ finished and its queue entry was consumed", entry.id)
+        }
+        return worker
     }
 
     private func handle(command: String, deviceID: String) async {
@@ -486,8 +1247,23 @@ final class DeviceBackend: AppBackend {
     /// app's own signal is too weak to be evidence either way.
     private func bounceForReset() {
         stopHeartbeat()
+        // ⛔ **"Kills any active run" is what the web app's own modal promises**, and until the stop
+        // channel existed this could not keep it: the run is a DETACHED task, so stopping the
+        // heartbeat and clearing the device document left it driving the platforms exactly as
+        // before. The owner reset the backend and the run carried on — and worse, the reset cleared
+        // `busyWorkerIds`, so the device would happily claim a second run onto the same worker.
+        let running = Array(activeRuns.values)
         Task.detached { [weak self] in
             guard let self else { return }
+            if !running.isEmpty {
+                // ⛔ EVERY run, not the one that happened to be last. The modal promises to kill
+                // active runs; leaving a sibling driving the platforms after a reset is the exact
+                // shape of the bug that made this per-worker in the first place.
+                for run in running { await self.stopActiveRun(researchID: run.researchID) }
+                // Give the run a moment to notice at its next check, so the reset does not race
+                // ahead and clear state the run is still writing.
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
             _ = await self.resetState()
             try? await Task.sleep(nanoseconds: 10_000_000_000)
             _ = await self.restartServing()
@@ -773,6 +1549,10 @@ final class DeviceBackend: AppBackend {
     private func startServingIfPaired() {
         guard deviceID != nil else { return }
         if coordinator == nil { coordinator = PairingCoordinator(backend: pairing) }
+        // ⛔ The AUTO-START path, and the one that matters most for the stale-busy fix: a device
+        // whose previous process was killed mid-run comes back through HERE, not through the
+        // Settings button. Reconciling only in `startServing` would leave the exact case the
+        // reconciliation exists for uncovered.
         startHeartbeat()
     }
 
@@ -1010,11 +1790,20 @@ final class DeviceBackend: AppBackend {
         // seconds and wrote nothing — a device that looked like it was serving and never reported
         // anything. Found by a test that called this directly, which is exactly what any future
         // caller would do.
-        if coordinator == nil, deviceID != nil {
-            coordinator = PairingCoordinator(backend: pairing)
-        }
+        ensureCoordinator()
+        // ⭐ **Both of these live HERE, at the one choke point every start path calls**, rather than
+        // at each of the four (`startServing`, `restartServing`, `runDaemonLoop`,
+        // `startServingIfPaired`). A join that has to be remembered at four call sites is a join
+        // that will be missing from the fifth — which is precisely how `controller` came to be nil
+        // in the first place, and how the owner's Stop reached nothing for so long.
+        attachRunController()
         heartbeatTask?.cancel()
         heartbeatTask = Task { [weak self] in
+            // ⚠ Inside the heartbeat task and BEFORE the first beat, rather than in a `Task` of its
+            // own. A stray task is unordered with respect to the beats and cancelled by nothing, so
+            // a restart could race its own reconciliation — and no caller could await it, which is
+            // also what made it untestable.
+            await self?.reconcileBusyWorkers()
             while !Task.isCancelled {
                 await self?.beat()
                 // 20s: comfortably inside any staleness window the frontend applies, and cheap. The
@@ -1024,9 +1813,68 @@ final class DeviceBackend: AppBackend {
         }
     }
 
+    /// The resting set as of the last beat, so a change can be named rather than merely happening.
+    private var lastPublishedResting: Set<Int> = []
+
+    /// The one-line state of the device, as the document just reported it.
+    ///
+    /// ⚠ Reports what the DOCUMENT said, not what the app believes, with the single exception of
+    /// `workers=` — the registry is the only writer of the worker count, so the document's copy lags
+    /// by a beat. Everything else is deliberately server truth: when the owner parks a worker from
+    /// the web app and the phone does not move, the question being asked is "did the document
+    /// change", and a line rendering the phone's own idea of the resting set would answer it with
+    /// the phone's own idea and look like a confirmation.
+    ///
+    /// `doc=` distinguishes an unreadable tick from an empty one. `loadSnapshot` returns
+    /// `online: false` and leaves the sets empty when the read throws, which is otherwise
+    /// indistinguishable from a device the server says is quiet.
+    static func beatSummary(snapshot: DeviceSnapshot, workerCount: Int) -> String {
+        let doc = snapshot.online ? "ok" : "unreadable-or-offline"
+        // ⭐ **`runMap` is a DIFFERENT field from `busy`, and the web app believes the map.** `busy`
+        // is `busyWorkerIds`; the Shared-with popup builds its pills from the `workers` MAP, and a
+        // worker listed there renders as a busy pill — which the web app makes UNCLICKABLE. A stale
+        // entry left by a crashed run therefore disables the owner's rest toggle in the browser
+        // while the phone, which reads the other field, shows the same worker idle and toggles
+        // fine. That asymmetry is invisible unless both fields are on the same line.
+        let runMap = snapshot.workers.filter(\.isBusy).map(\.id).sorted()
+        // ⚠ Truncated: this is a real account identifier and the log is a file the owner shares.
+        let owner = snapshot.ownerUID.isEmpty ? "none" : String(snapshot.ownerUID.prefix(8))
+        // ⚠ WHICH document this is. A re-pair leaves the previous device's tile on the Account page
+        // under the SAME name — `UIDevice.name` for both — so two tiles can be indistinguishable in
+        // the browser while only one of them is the device that is running. A toggle on the dead
+        // tile writes a document nothing reads, which looks exactly like a broken sync.
+        let device = snapshot.deviceID.isEmpty ? "none" : String(snapshot.deviceID.prefix(8))
+        return "beat: device=\(device) doc=\(doc) workers=\(workerCount)"
+            + " busy=\(snapshot.busyWorkerIDs.sorted())"
+            + " runMap=\(runMap)"
+            + " resting=\(snapshot.restingWorkerIDs.sorted())"
+            + " queued=\(snapshot.queue.count)"
+            + " owner=\(owner)"
+    }
+
+    /// The coordinator every beat guards on. One definition, called by both start paths.
+    private func ensureCoordinator() {
+        if coordinator == nil, deviceID != nil {
+            coordinator = PairingCoordinator(backend: pairing)
+        }
+    }
+
     func stopHeartbeat() {
         heartbeatTask?.cancel()
         heartbeatTask = nil
+    }
+
+    /// Run exactly one beat, for tests.
+    ///
+    /// ⚠ Exists because `startHeartbeat()` spawns an unstructured 20-second loop that no test can
+    /// await or bound — a test that started it would either race the first tick or wait 20 seconds
+    /// for the second. The loop's body is the thing worth asserting on, so it is reachable directly.
+    func beatOnceForTesting() async {
+        // ⚠ Ensures the coordinator EXACTLY as `startHeartbeat()` does. Without it `beat()` returns
+        // on its first guard and the helper silently exercises nothing — which is how the first
+        // version of this passed while asserting on an empty array.
+        ensureCoordinator()
+        await beat()
     }
 
     private func beat() async {
@@ -1037,9 +1885,78 @@ final class DeviceBackend: AppBackend {
         // Re-read every tick rather than captured once: Add worker must take effect on the next beat
         // instead of on the next relaunch.
         try? await coordinator.heartbeat(deviceId: deviceID, workerCount: workers.count)
+        await publishWorkerRuns(deviceID: deviceID)
         // One timer, not two. The web app's reset budget is ~8-15s and the beat is 20s, so a
         // command can wait up to a beat — acceptable, and far better than the previous "never".
         await pollCommands()
+        // ⚠ Run CONTROL before intake. A Stop for the run in flight must be honoured before this
+        // device claims another one — reversed, an owner stopping a run watches the phone pick up
+        // the next queued topic in the same tick, which reads as the Stop having done nothing.
+        await pollRunCommands()
+        // Then the research lifecycle. Device commands came first because a `restart` that arrived
+        // alongside a queued run should bounce the loop before the run is claimed, not after —
+        // claiming and then immediately bouncing leaves the claim stamped on a run nobody executes.
+        await pollQueue()
+
+        // ⭐ LAST, and after the polls on purpose: a claim made moments ago should be reflected in
+        // the snapshot this tick publishes rather than in the next one.
+        //
+        // ⚠ Costs one extra document read per 20s. `beat()` reads `devices/{id}` ZERO times on an
+        // idle tick today — `workerState` is the only reader and `pollQueue` returns before it
+        // whenever the queue is empty — so this is a real addition rather than a free ride, and it
+        // is the price of the web app's rest toggle reaching the phone at all.
+        if let onSnapshot {
+            let snapshot = await loadSnapshot()
+            // ⭐ EVERY tick, unconditionally — see `beatLogger`. This is the one line that says the
+            // beat ran, the document was readable, and what it said; without it "the web app's
+            // toggle never arrived" cannot be told apart from "the beat stopped".
+            beatLogger?(Self.beatSummary(snapshot: snapshot, workerCount: workers.count))
+            // ⚠ Logged ON CHANGE, not every tick. A line every 20 seconds saying the same thing is
+            // noise that hides the one tick where it differs — and the change is the whole event:
+            // it is the web app's toggle arriving. Silence here would make the fix unverifiable
+            // during an e2e, which is how it stayed broken this long.
+            if snapshot.restingWorkerIDs != lastPublishedResting {
+                NSLog("[SR] workers: resting set changed %@ -> %@ (from the device document)",
+                      String(describing: lastPublishedResting.sorted()),
+                      String(describing: snapshot.restingWorkerIDs.sorted()))
+                lastPublishedResting = snapshot.restingWorkerIDs
+            }
+            onSnapshot(snapshot)
+        }
+    }
+
+    /// Say WHOSE run each busy worker is running.
+    ///
+    /// ⛔ **`devices/{id}.workers` was read and cleared by this device and never written.** It is the
+    /// map that carries `{uid, title, phase, totalPhases}` per worker, and it is what puts a busy
+    /// pill on the right PERSON — in the phone's People popup and in the web app's "Shared with"
+    /// popup alike. Without it every run showed only as an anonymous `busyWorkerIds` entry, so a
+    /// run always looked like it belonged to nobody.
+    ///
+    /// ⚠ Published from the BEAT rather than at each phase change, and the whole map is rewritten
+    /// each time. A per-phase patch would need dotted-path merges and a delete for the worker that
+    /// just finished; rewriting the map makes "this worker is no longer running" the same operation
+    /// as "this worker moved to phase 2", so a finished run cannot leave a pill behind.
+    private func publishWorkerRuns(deviceID: String) async {
+        let runs = LiveRunActivity.shared.runs
+        var map: [String: FirestoreValue] = [:]
+        for (worker, facts) in runs {
+            map[String(worker)] = .map([
+                "uid": .string(facts.uid),
+                "title": .string(facts.title),
+                "phase": .integer(Int64(facts.phase)),
+                "totalPhases": .integer(Int64(facts.totalPhases)),
+                // ⛔ Published so the ELAPSED TIMER has something to count from. Browser watch
+                // built its per-worker snapshot with `elapsedSeconds: 0` because this map carried
+                // no start time — so every live run showed 00:00, which reads as a frozen app.
+                "startedAt": .integer(facts.startedAtMillis),
+                // The PLATFORM's own phase, published beside the run-wide one rather than over it.
+                "platformPhase": .integer(Int64(facts.platformPhase)),
+            ])
+        }
+        // Best-effort, like every other beat write: a dropped publish costs one stale tick, and the
+        // next beat corrects it. Failing the beat over it would take the device offline.
+        try? await pairing.patchDocument(path: "devices/\(deviceID)", set: ["workers": .map(map)])
     }
 
     /// Unpair: what `superresearch --unpair` does, from the phone.

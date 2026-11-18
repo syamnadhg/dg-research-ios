@@ -624,6 +624,27 @@ def test_the_build_script_still_installs_over_the_top():
     assert "simctl install" in code
 
 
+def test_EVERY_launch_terminates_the_previous_instance_first():
+    """⛔ `simctl launch` on an app that is ALREADY RUNNING is a no-op returning the existing pid —
+    it does not reload the bundle. Without a terminate, this script installs new code, prints
+    "launched", and leaves the OLD process serving, so every later observation is made against a
+    build that no longer exists on disk. Measured 2026-08-14: the installed bundle carried the new
+    symbols while the running process was two hours old.
+
+    ⚠ Structural, not a keyword check. `"terminate" in code` would pass on the version that had the
+    hole — the `--shots` branch always terminated, and the bug was the OTHER branch. This asserts
+    the pairing: every launch has a terminate somewhere above it.
+    """
+    code = _shell_code_only((REPO / "bin" / "build_app.sh").read_text())
+    segments = code.split("simctl launch")
+    assert len(segments) > 1, "the build script no longer launches the app at all"
+    for i, before in enumerate(segments[:-1]):
+        assert "simctl terminate" in before, (
+            f"launch #{i + 1} is not preceded by a terminate — it would silently keep an older "
+            f"process running against a newly installed bundle"
+        )
+
+
 # --- the shipped manifest's own invariants ----------------------------------------------------
 
 
@@ -883,4 +904,82 @@ def test_the_restart_button_documents_the_cost_it_carries():
     doc = source[: source.index("func restart() async")]
     assert "seven" in doc.lower() or "7 " in doc, (
         "the measured cost (seven documents in one evening) belongs next to the call that caused it"
+    )
+
+
+def test_the_run_log_reader_uses_no_bash4_builtins():
+    """⛔ macOS ships **bash 3.2**, and the failure shape is the worst one this tool could have.
+
+    `mapfile`/`readarray` do not exist there. The array comes back EMPTY and the script reports
+    "no run traces" at exactly the moment there ARE some — which reads as "the run never started",
+    on the one tool whose whole job is answering that question after a 90-minute run.
+
+    ⚠ Asserted on the SOURCE because the alternative is running it on a box that happens to have
+    bash 5 on `PATH`, where the bug is invisible.
+    """
+    from pathlib import Path
+
+    script = (Path(__file__).resolve().parents[2] / "bin" / "run_log.sh").read_text()
+    for builtin in ("mapfile", "readarray"):
+        assert f"{builtin} -t" not in script, (
+            f"bin/run_log.sh uses `{builtin}`, which macOS bash 3.2 does not have — it will report "
+            f"no traces when traces exist"
+        )
+
+
+# ── the page a run owns is never orphaned, and never shown at 1% ──────────────────────────────
+
+def _live_run_view() -> str:
+    return (REPO / "ios/App/LiveRunView.swift").read_text()
+
+
+def _swift_code_only(source: str) -> str:
+    """Swift with its `//` comment lines removed.
+
+    ⚠ Needed, and the need is instructive: the first version of the guard below asserted against
+    the raw file and failed on the COMMENT that quotes the very guard it forbids. A rule that reads
+    prose as code cannot tell a fixed bug from one described in a sentence.
+    """
+    return "\n".join(
+        line for line in source.splitlines() if not line.strip().startswith("//")
+    )
+
+
+def test_parking_a_page_does_not_REFUSE_one_that_has_somewhere_to_leave():
+    """⛔⛔ **Three crashes came from one inert guard.** `attachOffscreen` began with
+    `guard web.superview == nil` — and every caller asks it to rescue a page FROM somewhere: the
+    Browser-watch container on a tab switch, and again when that screen is torn down. Such a page
+    always has a superview, so every rescue was silently refused, the page was orphaned by the
+    container's own removal, and WebKit began suspending its WebContent process while the run's
+    JavaScript was still in flight — `ProcessThrottlerActivity::invalidate`, RELEASE_ASSERT, dead
+    app, twice on 2026-08-17 alone.
+
+    ⚠ Structural, because `UIApplication.shared` cannot be reached from `swift test` — the DECISION
+    is unit-tested as `BrowserWatchHandoff.parking`, and this stops the UIKit call from quietly
+    growing the refusal back around it.
+    """
+    code = _swift_code_only(_live_run_view())
+    body = code.split("static func attachOffscreen", 1)[1].split("\n    }", 1)[0]
+
+    assert "superview == nil" not in body, (
+        "attachOffscreen refuses a view that has a superview again — which is every caller that "
+        "had a page to rescue"
+    )
+    assert "insertSubview" in body, "the re-parent itself vanished"
+
+
+def test_the_watched_page_is_restored_to_FULL_opacity():
+    """⭐ The black screen. The same view is parked at `parkedAlpha` while it waits, so the screen
+    that presents it must put the alpha back — reported three times as "all dark, nothing loaded",
+    with the app's own log correctly insisting the page was live and loaded."""
+    source = _swift_code_only(_live_run_view())
+    presented = source.split("func updateUIView", 1)[1].split("\n    }", 1)[0]
+
+    assert "presentedAlpha" in presented, (
+        "the watched page is never restored to full opacity — it renders at the parked alpha, "
+        "which is a black rectangle over a live page"
+    )
+    # ⚠ And the pair lives in the core, where both halves are one edit apart.
+    assert "BrowserWatchHandoff.parkedAlpha" in source, (
+        "parking uses a bare literal again — the two alphas drifted apart in exactly that shape"
     )

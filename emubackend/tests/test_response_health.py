@@ -109,6 +109,12 @@ class _Handle:
     async def inner_text(self):
         return self.text
 
+    async def get_attribute(self, name):
+        # ⚠ Deliberately never "complete". `data-state=complete` is a short-circuit that returns
+        # done before the text is ever classified, so a fixture answering it would make the
+        # emptiness guard unreachable — the wait would pass for a reason the test did not intend.
+        return None
+
 
 class _Page:
     """Response container and sources both resolve; only the CONTENT differs per test."""
@@ -179,3 +185,161 @@ def test_a_healthy_response_still_harvests_normally():
         _driver("ChatGPT said: A real answer with plenty of substance to it.").harvest_sources()
     )
     assert verdict is not None
+
+
+# --------------------------------------------------------------------------------------------
+# Item 3 — the `empty` verdict had NO CONSUMER.
+#
+# ⛔ `classify_response` has always been able to say "empty", and nothing ever asked it. The wait's
+# own guard was a bare `text.strip()`, which catches whitespace and nothing else — but the shape
+# measured on the live page is a SPEAKER PREFIX ("ChatGPT said:"), which is non-empty text that is
+# perfectly stable. So it passed the stability gate, was accepted as the answer, and became the
+# brief that three deep-research agents were handed. Meanwhile the harvest read it, found zero
+# sources, and reported READ DRIFT — sending the next session to repair selectors that were working.
+#
+# Both ends are fixed here, and the tests assert the MECHANISM: whether completion happens and
+# whether extraction is refused, not whether a string appears somewhere.
+
+
+class _StablePrefixPage(_Page):
+    """A container whose text never changes and is only a speaker prefix.
+
+    The point of the fixture is that it is STABLE — the old guard's other condition — so the only
+    thing that can refuse it is the emptiness verdict.
+    """
+
+    def __init__(self, text="ChatGPT said:"):
+        super().__init__(text)
+
+
+def test_a_stable_SPEAKER_PREFIX_is_never_accepted_as_a_finished_response():
+    """It is stable, generation has stopped, and it is still not an answer."""
+    driver = _driver("ChatGPT said:")
+    verdict = asyncio.run(driver.await_response(timeout=0.6, stable_for=0.05, poll=0.02))
+    assert verdict["done"] is False, (
+        "a speaker prefix that never grew was accepted as the response — this is the exact shape "
+        "that became the brief for three deep-research runs"
+    )
+
+
+def test_the_timeout_reason_NAMES_the_stall_rather_than_blaming_the_clock():
+    # "still not complete after 0.6s" invites a longer timeout. The container being empty is a
+    # platform-side stall and no amount of waiting fixes it.
+    verdict = asyncio.run(_driver("ChatGPT said:").await_response(timeout=0.6, stable_for=0.05, poll=0.02))
+    assert "EMPTY" in verdict["reason"] or "stall" in verdict["reason"], verdict["reason"]
+
+
+def test_real_content_STILL_completes_so_the_guard_is_not_the_outage():
+    # The other half of every guard: it must not refuse healthy pages.
+    driver = _driver("ChatGPT said: A genuine answer with real substance in it, at length.")
+    verdict = asyncio.run(driver.await_response(timeout=2.0, stable_for=0.05, poll=0.02))
+    assert verdict["done"] is True
+
+
+def test_a_clarifying_QUESTION_still_completes_the_wait_so_its_own_diagnosis_survives():
+    """⚠ Only `empty` is refused, and this is why.
+
+    A question passes the wait and is then raised BY NAME at the harvest — "the platform asked a
+    clarifying question and is waiting". Refusing it here would replace that specific, actionable
+    report with a generic timeout.
+    """
+    driver = _driver("ChatGPT said: Could you clarify which aspect you want me to focus on?")
+    verdict = asyncio.run(driver.await_response(timeout=2.0, stable_for=0.05, poll=0.02))
+    assert verdict["done"] is True
+
+
+def test_harvest_REFUSES_an_empty_turn_rather_than_reporting_zero_sources():
+    """Zero sources reads as read drift and sends the next session to repair healthy selectors."""
+    with pytest.raises(phases.PlatformStateError) as exc:
+        asyncio.run(_driver("ChatGPT said:").harvest_sources())
+    assert "EMPTY" in str(exc.value)
+    assert "not a selector failure" in str(exc.value)
+
+
+# --------------------------------------------------------------------------------------------
+# The in-flight probe must test VISIBILITY, not mere presence.
+#
+# ⛔ Measured on a COMPLETED Gemini deep-research run, 2026-08-09: the page said "I've completed
+# your research", the 23,000-character report was in the DOM — and a `Stop response` button was
+# still present at HEIGHT 0. A selector-only check reports "still generating" forever, so the wait
+# can never finish, the run burns its whole timeout on a report already sitting there, and it then
+# reports a timeout — which invites raising the budget for something no waiting fixes.
+#
+# ⚠ These EXECUTE the probe's JavaScript against stub elements rather than asserting on its source.
+# A presence assertion ("the source mentions getBoundingClientRect") passes against a check that is
+# never consulted, which is the failure mode this repo keeps re-learning.
+
+
+def _run_generating_js(elements):
+    """Execute the real in-flight expression against a stub document."""
+    import json as _json
+    import subprocess
+
+    from emubackend.tests.test_gate_zero_surface import _node
+
+    captured = {}
+
+    class _Recorder(_Page):
+        def __init__(self):
+            super().__init__("x")
+
+        async def evaluate(self, js, *a):
+            captured["js"] = js
+            return False
+
+    manifest = SelectorManifest(
+        platforms={"chatgpt": {k: SelectorEntry(css=("#x",), provenance="t")
+                               for k in ("logged_in_marker", "composer", "send",
+                                         "sources", "response_container")}},
+        source="test",
+    )
+    driver = phases.PlatformDriver(
+        "chatgpt",
+        phases.PhaseDeps(
+            manifest=manifest,
+            registry=intents.IntentRegistry(),
+            history=harvest.HarvestHistory(),
+            pages={"chatgpt": _Recorder()},
+            topic="t",
+        ),
+    )
+    asyncio.run(driver.is_generating())
+    assert "js" in captured, "the probe never evaluated anything — nothing was measured"
+
+    harness = """
+const els = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const mk = e => ({
+  getBoundingClientRect: () => ({ width: e.w, height: e.h }),
+});
+const document = { querySelectorAll: () => els.map(mk) };
+const getComputedStyle = e => ({ visibility: 'visible', display: 'block' });
+console.log(JSON.stringify(%s));
+""" % captured["js"]
+    out = subprocess.run(
+        [_node(), "-e", harness], input=_json.dumps(elements),
+        capture_output=True, text=True, timeout=30,
+    )
+    assert out.returncode == 0, out.stderr
+    return _json.loads(out.stdout)
+
+
+def test_a_RETIRED_stop_control_at_zero_height_does_not_mean_generating():
+    """The measured shape: the control is still in the DOM, rendered at nothing."""
+    assert _run_generating_js([{"w": 0, "h": 0}]) is False, (
+        "a zero-height stop button read as in-flight — the wait can then never complete and the "
+        "run times out on a report that is already finished"
+    )
+
+
+def test_a_REAL_visible_stop_control_still_means_generating():
+    # The other half: the guard must not declare every run finished the moment it starts.
+    assert _run_generating_js([{"w": 32, "h": 32}]) is True
+
+
+def test_a_visible_control_wins_when_a_retired_one_is_also_present():
+    # Both in the DOM at once is the realistic mid-run state on a page that has run twice.
+    assert _run_generating_js([{"w": 0, "h": 0}, {"w": 24, "h": 24}]) is True
+
+
+def test_no_matching_control_at_all_means_not_generating():
+    assert _run_generating_js([]) is False

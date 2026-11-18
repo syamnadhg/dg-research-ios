@@ -65,19 +65,71 @@ final class FakeTransport: DeviceTransport, @unchecked Sendable {
     }
 
     var commands: [FirestoreREST.ListedDocument] = []
+    /// The RESEARCH LIFECYCLE collection, which is a different one from `commands`.
+    ///
+    /// ⚠ Kept separate on purpose. A fake that returned one array for every path would let a queue
+    /// test pass while the code polled `devices/{id}/commands` — the precise confusion §8b.1 warns
+    /// about, reproduced inside the test that was meant to rule it out.
+    var queue: [FirestoreREST.ListedDocument] = []
     private(set) var listedPaths: [String] = []
     private(set) var docPatches: [(path: String, set: [String: FirestoreValue])] = []
     private(set) var deletedPaths: [String] = []
+    /// Paths whose CONDITIONAL patch loses its race, so the sibling-claimed path is exercisable.
+    var preconditionLosers: Set<String> = []
+    private(set) var conditionalPatches: [(path: String, set: [String: FirestoreValue], ifUpdateTime: String)] = []
+
+    /// Commands for a SPECIFIC subcollection path, when a test drives more than one run.
+    ///
+    /// ⚠ Falls back to `commands` so every existing test keeps its meaning. Without a per-path map a
+    /// two-run test hands both runs the same documents, and "run 1's Stop went to run 1" cannot be
+    /// distinguished from "both runs saw the same Stop".
+    var commandsByPath: [String: [FirestoreREST.ListedDocument]] = [:]
 
     func listDocuments(collectionPath: String) async throws -> [FirestoreREST.ListedDocument] {
         listedPaths.append(collectionPath)
-        return commands
+        if collectionPath.hasSuffix("/queue") { return queue }
+        if let scoped = commandsByPath[collectionPath] { return scoped }
+        return commandsByPath.isEmpty ? commands : []
     }
 
     func deleteDocument(path: String) async throws { deletedPaths.append(path) }
 
     func patchDocument(path: String, set: [String: FirestoreValue]) async throws {
+        // ⛔ **The injection has to live on the method the code actually calls.** It was on the
+        // delete-taking overload only, so a test that set `patchFailures` for the device document
+        // and asserted the failure was RETRIED passed without a single write ever failing — and it
+        // went on passing with the retry deliberately broken. A double that cannot produce the
+        // condition proves nothing about the code that handles it.
+        if patchFailures.contains(path) { throw Boom() }
         docPatches.append((path, set))
+    }
+
+    func patchDocument(
+        path: String, set: [String: FirestoreValue], ifUpdateTime: String
+    ) async throws {
+        conditionalPatches.append((path, set, ifUpdateTime))
+        if preconditionLosers.contains(path) {
+            throw FirestoreRESTError.preconditionFailed("the stored version does not match")
+        }
+        docPatches.append((path, set))
+    }
+
+    /// Field DELETIONS, recorded separately from the sets.
+    ///
+    /// ⚠ Recorded rather than folded into `docPatches`: "wrote queuedBehindRunId" and "removed
+    /// queuedBehindRunId" are opposite outcomes, and a fake that logged both as a patch of that
+    /// path would let a test asserting the head of the queue clears its stale predecessor pass
+    /// against code that wrote one instead.
+    private(set) var docDeletes: [(path: String, delete: [String])] = []
+    /// Paths whose patch throws, so the publish-failure branches are reachable.
+    var patchFailures: Set<String> = []
+
+    func patchDocument(
+        path: String, set: [String: FirestoreValue], delete: [String]
+    ) async throws {
+        if patchFailures.contains(path) { throw Boom() }
+        docPatches.append((path, set))
+        docDeletes.append((path, delete))
     }
 
     func sessionRefreshToken() async -> String? { refreshToken }
@@ -127,6 +179,23 @@ final class DeviceBackendBehaviourTests: XCTestCase {
             DeviceBackend(transport: transport, store: s, workers: registry(workers: workers)),
             s
         )
+    }
+
+    /// Wait for the command ack, which lands on a DETACHED task.
+    ///
+    /// ⚠ Detached on purpose, and the tests have to meet it there. `handle` for `hard_reset` calls
+    /// `stopHeartbeat()`, which cancels the task `pollCommands` runs in — and URLSession cancels
+    /// the in-flight delete with it (`NSURLErrorDomain -999`, measured live 2026-08-14). The
+    /// desktop deletes at the tail too (`research.py`: "the route's ack lands only after
+    /// sharedWith-dependent writes are done"); iOS just needs the delete to outlive the bounce.
+    ///
+    /// Polled rather than slept: a fixed sleep is either flaky or slow, usually both.
+    private func awaitAck(_ transport: FakeTransport, count: Int = 1) async {
+        var waited = 0
+        while transport.deletedPaths.count < count, waited < 200 {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+            waited += 1
+        }
     }
 
     // MARK: - ⭐ Unpair actually removes the device
@@ -374,6 +443,50 @@ final class DeviceBackendBehaviourTests: XCTestCase {
         XCTAssertEqual(written, [1])
     }
 
+    /// ⛔ **The unwedge.** `markBusy` published `busyWorkerIds` at claim and cleared it at
+    /// completion, and nothing cleared it at boot — so a process that died mid-run left the field
+    /// saying "worker 1 is busy" for ever. `workerState` unions that into the live set, no worker
+    /// is ever free again, and every later claim is declined *silently*, because declining is also
+    /// what a genuinely busy device does.
+    ///
+    /// ⚠ Asserted against the REAL write. A first draft compared a local mirror of
+    /// `locallyBusyWorkers.sorted()`, which asserts the mirror and nothing about the product.
+    func testStartingToServePublishesAnEmptyBusySetOnAnIdleDevice() async {
+        let transport = FakeTransport()
+        transport.document = [
+            "pairConfirmedAt": .boolean(true), "busyWorkerIds": .array([.integer(1)]),
+        ]
+        let (backend, _) = paired(transport, workers: 1)
+
+        _ = await backend.perform(try! XCTUnwrap(Operations.byID("serve")))
+
+        // ⚠ `docPatches`, not `patches`: this write goes through `patchDocument(path:set:)`, and
+        // the two ledgers are separate. Reading the wrong one made this test report "nothing was
+        // published" about a publish that happened.
+        func publishedSets() -> [[Int]] {
+            transport.docPatches.compactMap { patch in
+                guard case .array(let ids)? = patch.set["busyWorkerIds"] else { return nil }
+                return ids.compactMap {
+                    if case .integer(let n) = $0 { return Int(n) } else { return nil }
+                }
+            }
+        }
+        // The reconciliation runs at the head of the heartbeat task, so it lands a moment after
+        // `serve` returns. Polled rather than slept for a fixed time: a fixed sleep is either flaky
+        // or slow, and usually both.
+        var waited = 0
+        while publishedSets().isEmpty, waited < 100 {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            waited += 1
+        }
+        let published = publishedSets()
+        XCTAssertEqual(
+            published.last, [],
+            "a device running nothing must say so, or a worker wedged by a killed run is never "
+                + "claimable again — published: \(published)"
+        )
+    }
+
     func testWakingAWorkerRemovesItFromTheList() async {
         let transport = FakeTransport()
         transport.document = ["pairConfirmedAt": .boolean(true)]
@@ -560,6 +673,7 @@ final class DeviceBackendBehaviourTests: XCTestCase {
             "marked processed BEFORE running: the handler stops the heartbeat, and a crash "
             + "mid-handler must not leave a command that re-runs on every poll forever"
         )
+        await awaitAck(transport)
         XCTAssertEqual(transport.deletedPaths, ["devices/dev-1/commands/cmd-1"],
                        "deleting IS the ack — reset-pair-code polls 5s for exactly this")
         backend.stopHeartbeat()
@@ -572,6 +686,37 @@ final class DeviceBackendBehaviourTests: XCTestCase {
     /// immediately, so the deliberate pause silently did not happen: the device stopped serving and
     /// resumed within the same tick. Asserting the mechanism (the poll returns promptly, rather than
     /// blocking for the pause) rather than the outcome, because the outcome looked identical.
+    /// ⛔ **One press bounced the device SEVEN times, 2026-08-14.** Two bursts eleven seconds
+    /// apart — the length of the bounce's own pause — ending only when the command aged past the
+    /// 30-second staleness window.
+    ///
+    /// Every ack here is a REMOTE write, and both were `try?` with no else. When they do not land,
+    /// the device re-reads the same command on the next poll and bounces again — and the bounce is
+    /// what restarts the loop that re-reads it. A self-feeding cycle whose only brake was the
+    /// command growing old.
+    ///
+    /// The fake reproduces the condition exactly: `deleteDocument` records the path and does NOT
+    /// remove the document, so the second poll sees the same command still sitting there.
+    func testACommandIsRunONCEEvenWhenTheAckNeverLands() async {
+        let transport = FakeTransport()
+        transport.document = ["pairConfirmedAt": .boolean(true)]
+        transport.commands = [command("hard_reset")]
+        let (backend, _) = paired(transport)
+
+        await backend.pollCommands()
+        await backend.pollCommands()
+        await backend.pollCommands()
+
+        let handled = transport.docPatches.filter {
+            $0.path == "devices/dev-1/commands/cmd-1" && $0.set["processed"] == .boolean(true)
+        }
+        XCTAssertEqual(
+            handled.count, 1,
+            "a command must be acted on once per process however many times it is re-read — "
+                + "otherwise each hard_reset bounce restarts the loop that re-reads it"
+        )
+    }
+
     func testTheResetPauseDoesNotRunInsideTheCancelledHeartbeatTask() async {
         let transport = FakeTransport()
         transport.document = ["pairConfirmedAt": .boolean(true)]
@@ -587,6 +732,7 @@ final class DeviceBackendBehaviourTests: XCTestCase {
             "pollCommands must hand the bounce off and return — if it awaited it inline, the whole "
             + "heartbeat tick would block for the 10s pause"
         )
+        await awaitAck(transport)
         XCTAssertEqual(transport.deletedPaths.count, 1, "the command is still acked")
         backend.stopHeartbeat()
     }
@@ -628,6 +774,7 @@ final class DeviceBackendBehaviourTests: XCTestCase {
         await backend.pollCommands()
 
         XCTAssertTrue(transport.docPatches.contains { $0.set["processed"] == .boolean(true) })
+        await awaitAck(transport)
         XCTAssertEqual(transport.deletedPaths.count, 1)
     }
 

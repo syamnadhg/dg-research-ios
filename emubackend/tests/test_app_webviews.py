@@ -175,11 +175,28 @@ def test_the_web_view_cache_is_a_cache_and_not_a_factory():
     )
 
 
-def test_the_live_view_is_read_only_until_the_user_takes_over():
-    """A stray tap during a run is trusted input competing with the automation for the composer."""
+def test_the_live_view_is_read_only_until_the_owner_takes_over_OR_the_run_needs_it():
+    """Who may send input to a watched page.
+
+    ⚠ **This test changed, and the old assertion was right about the danger and wrong about the
+    remedy.** It required `allowsHitTesting(interactive)` — hit-testing off unless the owner tapped
+    Take over — to stop a stray tap competing with the automation for the composer. But hit-testing
+    cannot tell an automated tap from a finger, so the same modifier blocked **the automation
+    itself**: calibration failed with "fewer than two probe taps produced a trusted event", which
+    reads as a broken input channel and is a SwiftUI modifier two files away. ChatGPT's composer
+    menu does not open for a scripted click, so the run genuinely needs real taps.
+
+    The policy now: input is live when the owner took over **or** the run is driving THIS platform,
+    and the bar says which. What is still asserted is that the gate is applied and that it defaults
+    to off — a page nobody is driving must not take stray taps.
+    """
     text = LIVE.read_text(encoding="utf-8")
-    assert "@State private var interactive = false" in text, "must default to read-only"
-    assert "allowsHitTesting(interactive)" in text, "the gate must actually be applied"
+    assert "@State private var interactive = false" in text, "must still DEFAULT to read-only"
+    assert "BrowserWatchInput.hitTestingEnabled(" in text, "the gate must actually be applied"
+    assert "runIsDriving: runIsDrivingThisPlatform" in text, (
+        "the run's permission must be scoped to the platform it is actually driving — a run in P2 "
+        "on ChatGPT is not driving the Claude tab"
+    )
 
 
 # ======================================================================================

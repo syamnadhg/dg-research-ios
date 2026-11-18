@@ -415,3 +415,83 @@ final class StubTransport: HTTPTransport, @unchecked Sendable {
         return json
     }
 }
+
+
+/// A dotted key is a field PATH, and the body speaks NAMES.
+///
+/// ⛔ The failure this prevents is silent and destructive: `updateMask.fieldPaths=links.audio_file`
+/// addresses the `audio_file` member of the `links` map, while the body's `fields` map has no dot
+/// interpretation at all. Passing the dotted key straight through declares a top-level field
+/// literally called `links.audio_file`, which the mask never mentions — and a masked path absent
+/// from the body is Firestore's DELETE mechanism. The write returns 200, and the field the caller
+/// meant to set is removed.
+final class FirestoreDottedFieldPathTests: XCTestCase {
+
+    private let config = FirebaseProjectConfig(
+        projectID: "p", apiKey: "k", apiBaseURL: URL(string: "https://x.test")!, emulatorHost: nil
+    )
+
+    private func client(_ transport: StubTransport) async throws -> FirestoreREST {
+        transport.prepend(.ok("{\"idToken\":\"i\",\"refreshToken\":\"r\",\"expiresIn\":\"3600\"}"))
+        let rest = FirestoreREST(config: config, transport: transport)
+        try await rest.signIn(customToken: "ct")
+        return rest
+    }
+
+    func testADottedKeyBecomesANESTEDMapInTheBody() throws {
+        let body = try FirestoreREST.nestedFields([
+            "links.audio_file": .map(["url": .string("https://s.test/a.mp3")])
+        ])
+        XCTAssertNil(body["links.audio_file"], "the dotted name was written as a top-level field")
+        let links = try XCTUnwrap(body["links"] as? [String: Any])
+        let fields = try XCTUnwrap((links["mapValue"] as? [String: Any])?["fields"] as? [String: Any])
+        XCTAssertNotNil(fields["audio_file"])
+    }
+
+    func testTWOKEYSSHARINGAPrefixMERGEIntoOneMap() throws {
+        // ⛔ P3 writes exactly this pair. Built naively the second overwrites the first's subtree
+        // and one of the two links is silently dropped — the notebook row or the audio row, at
+        // random, depending on dictionary order.
+        let body = try FirestoreREST.nestedFields([
+            "links.audio": .map(["url": .string("page")]),
+            "links.notebooklm": .map(["url": .string("nb")]),
+        ])
+        let links = try XCTUnwrap(body["links"] as? [String: Any])
+        let fields = try XCTUnwrap((links["mapValue"] as? [String: Any])?["fields"] as? [String: Any])
+        XCTAssertNotNil(fields["audio"])
+        XCTAssertNotNil(fields["notebooklm"])
+    }
+
+    func testUNDOTTEDFieldsAreUntouched() throws {
+        let body = try FirestoreREST.nestedFields(["status": .string("ongoing")])
+        XCTAssertEqual((body["status"] as? [String: Any])?["stringValue"] as? String, "ongoing")
+    }
+
+    func testAKeyThatIsBOTHALeafAndAMapIsRefusedRatherThanResolved() {
+        // Either resolution silently discards a write the caller asked for, and the discarded one
+        // is invisible: the patch returns 200 and the field is simply not there.
+        XCTAssertThrowsError(
+            try FirestoreREST.nestedFields(["links": .string("x"), "links.audio": .string("y")])
+        ) { error in
+            guard case FirestoreRESTError.conflictingFieldPaths = error else {
+                return XCTFail("wrong error: \(error)")
+            }
+        }
+    }
+
+    func testTheMASKKeepsTheDOTTEDPathWhileTheBodyNests() async throws {
+        // Both halves in one assertion, because they are only correct together: a nested body with
+        // an un-dotted mask replaces the WHOLE links map and wipes every sibling link.
+        let transport = StubTransport(responses: [.ok("{}")])
+        let rest = try await client(transport)
+        try await rest.patchDocument(
+            path: "users/u/researches/r",
+            set: ["links.audio_file": .map(["url": .string("https://s.test/a.mp3")])]
+        )
+        let url = try XCTUnwrap(transport.lastRequest().url?.absoluteString)
+        XCTAssertTrue(url.contains("updateMask.fieldPaths=links.audio_file"), url)
+        let body = try transport.lastBodyJSON()
+        let fields = try XCTUnwrap(body["fields"] as? [String: Any])
+        XCTAssertNotNil(fields["links"], "the body did not nest — the masked path would be DELETED")
+    }
+}

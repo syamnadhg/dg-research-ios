@@ -21,8 +21,13 @@ SDK="$(xcrun --sdk iphonesimulator --show-sdk-path)"
 # The generated constants are compile-time inputs (SR_C1 mode reads them), so a type-check needs
 # them present. Regenerated every run for the same reason build_app.sh does: a stale SRManifest is
 # a difference between what this gate checks and what actually ships.
+# ⛔ **`--all-out` too, and its absence made this gate DECORATIVE.** `build_app.sh` compiles
+# `SRAllManifests.swift` and this did not generate it, so the type-check failed on
+# "cannot find 'SRAllManifests' in scope" — three errors in `main.swift` that have nothing to do
+# with whatever is being checked. A gate whose baseline is red teaches everyone to ignore it, which
+# is worse than not having one. The file lists are kept adjacent for exactly this reason.
 "$REPO/.venv/bin/python" "$REPO/bin/c1_gen_manifest.py" "${SR_C1_PLATFORM:-mockplatform}" \
-  "$BUILD/SRManifest.swift" >/dev/null
+  "$BUILD/SRManifest.swift" --all-out "$BUILD/SRAllManifests.swift" >/dev/null
 "$REPO/.venv/bin/python" - "$BUILD/SRRuntime.swift" <<'GENPY'
 import sys
 from pathlib import Path
@@ -45,6 +50,7 @@ exec xcrun swiftc \
   -framework UIKit -framework WebKit -framework SwiftUI -framework CoreImage \
   "$BUILD/SRRuntime.swift" \
   "$BUILD/SRManifest.swift" \
+  "$BUILD/SRAllManifests.swift" \
   "$REPO"/ios/Sources/SuperResearchDeviceCore/*.swift \
   "$REPO"/ios/Shared/*.swift \
   "$REPO"/ios/App/*.swift

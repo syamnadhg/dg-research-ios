@@ -237,6 +237,12 @@ extension FirebaseProjectConfig {
                 "GoogleService-Info.plist has no API_KEY"
             )
         }
-        self.init(projectID: projectID, apiKey: apiKey, apiBaseURL: apiBaseURL)
+        // ⚠ Absent rather than guessed when the key is missing: the upload then fails with a named
+        // `noBucket`, which points at the plist, instead of 404ing against a plausible-looking
+        // bucket name that was never this project's.
+        self.init(
+            projectID: projectID, apiKey: apiKey, apiBaseURL: apiBaseURL,
+            storageBucket: (plist["STORAGE_BUCKET"] as? String) ?? ""
+        )
     }
 }

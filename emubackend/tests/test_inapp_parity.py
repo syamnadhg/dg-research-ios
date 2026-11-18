@@ -132,7 +132,10 @@ def test_phase_start_is_emitted_after_the_pause_gate_in_swift_too():
     """A paused run that already announced phase_start shows progress that is not happening."""
     body = _body_of(_code(SWIFT_PIPELINE), "public mutating func run(", after="-> Outcome {")
     gate = body.index("await awaitResume()")
-    start = body.index('events.append((phase, "phase_start"))')
+    # ⚠ `record(...)` since the events gained a LIVE sink alongside the buffer — phase events are
+    # now written to the durable trace the moment they happen rather than flushed when the run ends,
+    # because a crash mid-run used to lose the lot. The ordering rule this guards is unchanged.
+    start = body.index('record(phase, "phase_start")')
     assert gate < start, "the pause gate must precede the phase_start emission"
 
 

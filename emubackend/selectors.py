@@ -54,6 +54,12 @@ BASELINE: dict[str, Any] = {
             "logged_in_marker": None,
             "composer": None,
             "send": None,
+            # ⭐ The model picker. Added 2026-08-08 for the owner's P2 setup instruction —
+            # "the latest Flash model and also the extended thinking" on Gemini, and the same
+            # family+highest-offered rule everywhere else. ⛔ NO version literal belongs in the
+            # manifest OR the code: a pin rots in both directions, and Flash-Lite is a DIFFERENT
+            # family that a substring match happily mistakes for Flash.
+            "model_selector": None,
             "deep_research_toggle": None,
             "activity_panel": None,
             "sources": None,
@@ -63,6 +69,12 @@ BASELINE: dict[str, Any] = {
             "logged_in_marker": None,
             "composer": None,
             "send": None,
+            # ⭐ The model picker. Added 2026-08-08 for the owner's P2 setup instruction —
+            # "the latest Flash model and also the extended thinking" on Gemini, and the same
+            # family+highest-offered rule everywhere else. ⛔ NO version literal belongs in the
+            # manifest OR the code: a pin rots in both directions, and Flash-Lite is a DIFFERENT
+            # family that a substring match happily mistakes for Flash.
+            "model_selector": None,
             "deep_research_toggle": None,
             "start_research": None,
             "sources": None,
@@ -70,8 +82,19 @@ BASELINE: dict[str, Any] = {
         },
         "claude": {
             "logged_in_marker": None,
+            # ⭐ Claude's Chat / Cowork segments. Their aria-checked state is what an earlier
+            # measurement failed to consult — it read Cowork's composer menu and concluded Claude
+            # had no Research mode at all.
+            "mode_chat": None,
+            "mode_cowork": None,
             "composer": None,
             "send": None,
+            # ⭐ The model picker. Added 2026-08-08 for the owner's P2 setup instruction —
+            # "the latest Flash model and also the extended thinking" on Gemini, and the same
+            # family+highest-offered rule everywhere else. ⛔ NO version literal belongs in the
+            # manifest OR the code: a pin rots in both directions, and Flash-Lite is a DIFFERENT
+            # family that a substring match happily mistakes for Flash.
+            "model_selector": None,
             "research_toggle": None,
             "artifact_panel": None,
             "sources": None,
@@ -79,7 +102,19 @@ BASELINE: dict[str, Any] = {
         },
         "notebooklm": {
             "logged_in_marker": None,
+            # ⭐ The paste route, measured 2026-08-08. `add_source` is the "Copied text" control;
+            # the picker-driven upload item 16 was blocked on is not needed and is in fact closed
+            # on this surface (zero `input[type=file]` on mobile).
+            "create_notebook": None,
             "add_source": None,
+            "source_textarea": None,
+            "insert_source": None,
+            # ⚠ The ONLY manifest-resolved control in the share flow. Everything after it — the
+            # access dropdown, the option list, the link field, Save — is reached by page-level JS
+            # ported from the backend, because those controls are Angular Material with icon-font
+            # ligatures for text and generated ids that change per render. A selector key for them
+            # would be a key nothing could ever fill in honestly.
+            "share": None,
             "generate_audio": None,
             "audio_ready_marker": None,
         },

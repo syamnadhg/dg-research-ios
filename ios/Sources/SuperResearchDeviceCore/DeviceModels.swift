@@ -55,7 +55,7 @@ extension DeviceSnapshot {
     /// the contract says only worker-1 maintains. With several workers busy it therefore describes
     /// one of them and silently mislabels the rest. The `workers` map is written by ALL workers, so
     /// it is the only honest source once more than one is running.
-    func run(forWorker id: Int) -> RunState? {
+    func run(forWorker id: Int, now: Date = Date()) -> RunState? {
         guard let worker = workers.first(where: { Int($0.id) == id }), worker.isBusy else {
             // Worker 1 falls back to the document's own view, which carries the phase name and
             // elapsed time the per-worker map does not.
@@ -63,10 +63,17 @@ extension DeviceSnapshot {
         }
         return RunState(
             researchTitle: worker.title ?? "a run",
-            phase: worker.phase ?? 0,
-            phaseName: Self.phaseName(worker.phase),
-            elapsedSeconds: 0,
-            agents: [:]
+            phase: worker.platformPhase ?? worker.phase ?? 0,
+            // ⛔ The PLATFORM's phase when the device published one. The executor's counter cannot
+            // move while a platform is inside its own P1→P2→P3, so reading it here is what made the
+            // strip say "Research brief" through forty minutes of deep research.
+            phaseName: Self.phaseName(worker.platformPhase ?? worker.phase),
+            // ⛔ **This was the literal `0`, and it is why the timer never moved.** The map had no
+            // start time to derive from, so the one number the screen exists to count was hard-coded
+            // to nothing — and a clock stuck at 00:00 beside a live run reads as a frozen app.
+            elapsedSeconds: RunState.elapsed(since: worker.startedAtMillis, now: now),
+            agents: [:],
+            startedAtMillis: worker.startedAtMillis
         )
     }
 
@@ -109,6 +116,23 @@ struct ConnectedUser: Identifiable, Hashable {
     /// False when `label` is a shortened uid. The UI renders that case differently — a partial
     /// identity that looks like a confirmed one is worse than one that looks partial.
     var isResolved: Bool = false
+
+    /// The single character an avatar shows for this person.
+    ///
+    /// ⛔ **A `?` when the identity is unresolved, never a letter.** `label` is a truncated uid in
+    /// that case, so taking its first character puts a confident-looking initial — pulled out of a
+    /// hex string — on a person the device could not actually identify. This file already warns
+    /// that "a partial identity that looks like a confirmed one is worse than one that looks
+    /// partial"; an avatar is exactly where that goes wrong, because a glyph carries no caveat.
+    ///
+    /// ⚠ The first LETTER OR DIGIT, not the first character: a label may lead with a quote, an
+    /// accent-stripping artefact, or an emoji, and a punctuation mark in a circle reads as a
+    /// rendering fault rather than as a person.
+    var avatarGlyph: String {
+        guard isResolved, let first = label.first(where: { $0.isLetter || $0.isNumber })
+        else { return "?" }
+        return String(first).uppercased()
+    }
 }
 
 struct PlatformState: Identifiable, Hashable {
@@ -130,6 +154,11 @@ struct WorkerState: Identifiable, Hashable {
     let title: String?
     let phase: Int?
     let totalPhases: Int?
+    /// When the run on this worker was claimed, epoch millis. Zero when unknown — an older document,
+    /// or a worker that is idle.
+    var startedAtMillis: Int64 = 0
+    /// The phase the PLATFORM is in, when the device published one. Nil on an older document.
+    var platformPhase: Int? = nil
 
     var isBusy: Bool { uid != nil }
 }
@@ -149,6 +178,35 @@ struct RunState: Hashable {
     let elapsedSeconds: Int
     /// platform id -> one of "done" | "active" | "pending" | "skipped"
     let agents: [String: String]
+
+    /// When the run started, epoch millis — 0 when the document does not say.
+    ///
+    /// ⚠ Carried IN ADDITION to `elapsedSeconds` so the screen can tick locally. The snapshot
+    /// arrives once per 20-second beat; a timer redrawn only when it lands would jump in
+    /// twenty-second steps, which looks broken in a different way from being stuck.
+    var startedAtMillis: Int64 = 0
+
+    /// Seconds between a start stamp and now, floored at zero.
+    ///
+    /// ⚠ Zero for an unknown or future stamp, never a negative or a huge number: a device whose
+    /// clock disagrees with the server's by a few seconds would otherwise render "-3" or a count
+    /// since 1970, and both read as a bug in something else entirely.
+    static func elapsed(since startedAtMillis: Int64, now: Date = Date()) -> Int {
+        guard startedAtMillis > 0 else { return 0 }
+        let seconds = Int(now.timeIntervalSince1970) - Int(startedAtMillis / 1000)
+        return max(0, seconds)
+    }
+
+    /// Which platform the run is driving right now, if any.
+    ///
+    /// ⚠ Exactly one, and nil when the answer is ambiguous. Two platforms reporting "active" means
+    /// the device state is mid-update or genuinely wrong, and the caller uses this to decide
+    /// whether to hand INPUT to the automation — so guessing between them is the one thing it must
+    /// not do.
+    var activePlatform: String? {
+        let active = agents.filter { $0.value == "active" }.map(\.key)
+        return active.count == 1 ? active[0] : nil
+    }
 }
 
 struct DeviceSnapshot {
@@ -188,6 +246,27 @@ struct DeviceSnapshot {
     /// the worker for real while the web app showed full capacity: the device would silently stop
     /// taking work and nothing on screen would explain why.
     var restingWorkerIDs: Set<Int> = []
+
+    /// The account that owns this device, as the document states it.
+    ///
+    /// ⚠ Carried for DIAGNOSIS rather than for display. Every owner-only control in the web app is
+    /// gated on `device.ownerUid === user.uid`, and when that comparison is false the controls are
+    /// not disabled or explained — they are rendered without a click handler at all. A pill that
+    /// does nothing, silently, is indistinguishable from a pill whose write is being rejected, and
+    /// the phone is the only place both sides of that comparison can be seen at once.
+    var ownerUID: String = ""
+
+    /// Which READ produced this snapshot — monotonically increasing, stamped when the load STARTS.
+    ///
+    /// ⛔ **Completion order is not issue order, and the difference is now visible.** Two things
+    /// load snapshots: the owner's own actions and the 20-second beat. A beat load that started a
+    /// second before the owner parked a worker can finish a second AFTER the toggle's own refresh,
+    /// and a bare `snapshot = await load()` would then put the stale value back — the pill flips,
+    /// then flips back, for a whole beat. Stamping at issue time lets the consumer drop anything
+    /// older than what it has already shown.
+    ///
+    /// 0 means "unsequenced" — only the hand-built `.unpaired` and test fixtures carry that.
+    var sequence: UInt64 = 0
 
     static let unpaired = DeviceSnapshot()
 }

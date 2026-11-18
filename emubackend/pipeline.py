@@ -178,6 +178,17 @@ def start_patch(ctx: RunContext, *, queued: bool) -> dict:
     fields = {
         "status": "queued" if queued else "ongoing",
         "backendRunId": ctx.run_id,
+        # ⛔ REQUIRED BY THE RULES, and its absence 403s every research patch.
+        #
+        # The rule is `request.resource.data.deviceId == request.auth.token.deviceId`, evaluated on
+        # the resource being WRITTEN — so a patch that omits the field fails even when the stored
+        # document already carries it from an earlier write.
+        #
+        # ⚠ The trap this repo already fell into once: the `deviceId` on the pipeline EVENT is a
+        # different write, and both halves have always had it. Seeing it there and concluding "the
+        # patch is covered" is how the Swift half got fixed while THIS one stayed broken — a run
+        # would then 403 on the very first status write with everything looking correct in review.
+        "deviceId": ctx.device_id,
     }
     deletes = ["pendingDecision"] if pd.startup_clear_field(queued=queued) else None
     ctx.client.patch(ctx.research_path, fields, delete_paths=deletes)
@@ -273,8 +284,12 @@ async def run_pipeline(
             # claim look like a live sibling and wedges the device until the age guard expires.
             claim_mod.release_lock(worker_id, lock_dir)
 
+    # ⚠ The TERMINAL patches carry `deviceId` for the same reason the start patch does — the rule
+    # judges the resource being written, not the one already stored. Fixing only the start patch
+    # produces a run that begins correctly and then 403s at the finish, leaving the document stuck
+    # on `ongoing` forever while the run itself succeeded.
     if result.status == "complete":
-        ctx.client.patch(ctx.research_path, {"status": "complete"})
+        ctx.client.patch(ctx.research_path, {"status": "complete", "deviceId": ctx.device_id})
     elif result.status == "stopped":
-        ctx.client.patch(ctx.research_path, {"status": "stopped"})
+        ctx.client.patch(ctx.research_path, {"status": "stopped", "deviceId": ctx.device_id})
     return result

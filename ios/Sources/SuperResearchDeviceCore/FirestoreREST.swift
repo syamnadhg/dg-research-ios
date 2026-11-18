@@ -42,13 +42,27 @@ public struct FirebaseProjectConfig: Sendable, Equatable {
     /// be redirected by anything that can set an environment variable.
     public let emulatorHost: String?
 
+    /// The Firebase **Storage** bucket, where P3's podcast goes.
+    ///
+    /// ⛔ **Read from the plist's `STORAGE_BUCKET`, never derived from the project id.** Firebase
+    /// changed its default bucket name — older projects are `<project>.appspot.com`, newer ones
+    /// `<project>.firebasestorage.app` — and this project is the NEWER form (measured in its own
+    /// plist). A derived guess uploads to a bucket that does not exist, and the failure is a 404 on
+    /// a URL that looks perfectly well formed.
+    ///
+    /// ⚠ Empty by default rather than optional, so a config built without one fails at the upload
+    /// with `noBucket` — a named error — instead of silently addressing the wrong bucket.
+    public let storageBucket: String
+
     public init(
-        projectID: String, apiKey: String, apiBaseURL: URL, emulatorHost: String? = nil
+        projectID: String, apiKey: String, apiBaseURL: URL, emulatorHost: String? = nil,
+        storageBucket: String = ""
     ) {
         self.projectID = projectID
         self.apiKey = apiKey
         self.apiBaseURL = apiBaseURL
         self.emulatorHost = emulatorHost
+        self.storageBucket = storageBucket
     }
 
     var documentsRoot: String {
@@ -94,6 +108,14 @@ public enum FirestoreValue: Sendable, Equatable {
     case double(Double)
     case boolean(Bool)
     case null
+    /// A real Firestore **timestamp**, carried as RFC-3339.
+    ///
+    /// ⛔ **Firestore's TTL only reads `timestampValue`.** `expireAt` written as a `stringValue`
+    /// looks identical in the console, satisfies any rule that checks the field exists, and is
+    /// simply never collected — so a document that was supposed to disappear in five minutes stays
+    /// forever. Nothing errors, which is why this survived: the Python half writes a real timestamp
+    /// and the Swift half wrote a string, and only one of them actually expires.
+    case timestamp(String)
     case array([FirestoreValue])
     case map([String: FirestoreValue])
 
@@ -104,6 +126,7 @@ public enum FirestoreValue: Sendable, Equatable {
         case .double(let v): return ["doubleValue": v]
         case .boolean(let v): return ["booleanValue": v]
         case .null: return ["nullValue": NSNull()]
+        case .timestamp(let v): return ["timestampValue": v]
         case .array(let items):
             return ["arrayValue": ["values": items.map(\.json)]]
         case .map(let fields):
@@ -115,6 +138,10 @@ public enum FirestoreValue: Sendable, Equatable {
     /// this device never writes (`geoPointValue`, `referenceValue`, `bytesValue`), and a document that
     /// happens to carry one should not fail the whole read.
     public static func decode(_ tagged: [String: Any]) -> FirestoreValue? {
+        // ⚠ Checked BEFORE `stringValue`: a timestamp arrives as its own tag, and reading it as a
+        // string would round-trip a real timestamp back out as one — quietly disarming a TTL that
+        // was working.
+        if let v = tagged["timestampValue"] as? String { return .timestamp(v) }
         if let v = tagged["stringValue"] as? String { return .string(v) }
         if let v = tagged["integerValue"] {
             // Accepted as either, because that is what the API actually returns: a value written as a
@@ -188,6 +215,32 @@ public enum FirestoreRESTError: Error, Equatable {
     case http(status: Int, body: String)
     case malformedResponse(String)
     case notAuthenticated
+    /// A conditional write lost its race: the document changed between the read and the write.
+    ///
+    /// ⚠ Its own case, and that is the point. This is the **expected** outcome when two backends
+    /// watch one queue, not an error — the caller must return "someone else claimed it" without
+    /// raising and, above all, **without retrying**. Retrying a lost precondition is how a clean
+    /// race-loss becomes a stolen run: the second attempt reads the sibling's claim as the new base
+    /// version and overwrites it. Folded into `.http` it is indistinguishable from a genuine 400,
+    /// which the transient-retry policy *does* retry.
+    case preconditionFailed(String)
+    /// Two keys in one patch disagree about whether a name is a leaf or a map — `links` alongside
+    /// `links.audio`, say.
+    ///
+    /// ⛔ Raised rather than resolved by a rule, because either resolution silently discards a write
+    /// the caller asked for, and the discarded one is invisible: the patch returns 200 and the field
+    /// is simply not there.
+    case conflictingFieldPaths(String)
+}
+
+/// Does this Firestore error body describe a lost `currentDocument.updateTime` precondition?
+///
+/// Firestore's REST surface reports it as **HTTP 400 with `"status": "FAILED_PRECONDITION"`**, not
+/// as a 409 — so a status-code-only check either misses it (treating a race-loss as a hard failure)
+/// or over-matches every 400. The body is the discriminator, which is why `.http` carries it.
+func isFailedPrecondition(status: Int, body: String) -> Bool {
+    guard status == 400 || status == 409 else { return false }
+    return body.contains("FAILED_PRECONDITION")
 }
 
 // MARK: - The client
@@ -246,6 +299,19 @@ public actor FirestoreREST {
     /// document any other way: `match /devices/{deviceId}` has no `allow delete`, so that route is
     /// the only one. Exposed here rather than duplicating token handling in a second place, because
     /// two token stores would drift and only one of them would be refreshed.
+    /// The current ID token, refreshed first if it is close to expiry.
+    ///
+    /// ⚠ Exposed because Firebase **Storage** uses `Authorization: Firebase <idToken>` while
+    /// Firestore uses `Bearer <idToken>` — different schemes, so the header cannot be built by this
+    /// type's own `authorize` and the token has to cross the boundary. Refreshed HERE rather than by
+    /// the caller: a second token store would drift, and only one of the two would ever be renewed —
+    /// so the podcast upload would start 401ing an hour into every long run.
+    public func freshIDToken() async throws -> String {
+        try await refreshIfNeeded()
+        guard let idToken else { throw FirestoreRESTError.notAuthenticated }
+        return idToken
+    }
+
     public func authorizedPOST(url: URL, body: [String: Any]) async throws -> (Int, Data) {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -354,6 +420,26 @@ public actor FirestoreREST {
         /// The document id — the last path segment of the REST `name`.
         public let id: String
         public let fields: [String: FirestoreValue]
+        /// The server's version stamp for this document, RFC-3339 with nanoseconds.
+        ///
+        /// ⚠ **This is the whole claim protocol.** It is the base version a conditional write is
+        /// asserted against, so dropping it — as this struct did — leaves no way to express "claim
+        /// this only if nobody else has touched it since I read it", and a claim that cannot
+        /// express that is not a weaker claim, it is **no claim at all**: a Mac backend and this
+        /// phone paired to one account would both run the same research.
+        ///
+        /// Optional because a listing that omits it must fail the claim rather than claim
+        /// unconditionally.
+        public let updateTime: String?
+
+        /// Defaulted to `nil` so the existing device-command callers, which have no use for a base
+        /// version, are unchanged — and so that the fail-safe direction is the default one: a
+        /// document with no known version cannot be claimed, rather than being claimed blind.
+        public init(id: String, fields: [String: FirestoreValue], updateTime: String? = nil) {
+            self.id = id
+            self.fields = fields
+            self.updateTime = updateTime
+        }
     }
 
     /// List a collection.
@@ -385,7 +471,8 @@ public actor FirestoreREST {
                 let fields = doc["fields"] as? [String: [String: Any]] ?? [:]
                 return ListedDocument(
                     id: String(name.split(separator: "/").last ?? ""),
-                    fields: fields.compactMapValues(FirestoreValue.decode)
+                    fields: fields.compactMapValues(FirestoreValue.decode),
+                    updateTime: doc["updateTime"] as? String
                 )
             }
         } catch FirestoreRESTError.http(status: 404, _) {
@@ -414,23 +501,104 @@ public actor FirestoreREST {
     /// present-but-null — so a null `expireAt` reports success while leaving the TTL armed, and the
     /// device document evaporates five minutes later. That is the failure where pairing appears to
     /// work and then silently undoes itself.
+    /// - Parameter ifUpdateTime: when non-nil, the write is **conditional** on the document still
+    ///   being at this exact server version, and throws `.preconditionFailed` if it is not.
+    ///   Firestore linearizes single-document writes server-side, so this gives the same guarantee
+    ///   as a transaction without needing one — which is precisely why the desktop backend
+    ///   abandoned its transactional claim for this shape.
     public func patchDocument(
-        path: String, set: [String: FirestoreValue], delete: [String] = []
+        path: String, set: [String: FirestoreValue], delete: [String] = [],
+        ifUpdateTime: String? = nil
     ) async throws {
         var components = URLComponents(string: "\(config.documentsRoot)/\(path)")!
         // Every touched path goes in the mask — the set ones and the deleted ones alike. A mask
         // listing only the set fields would leave the deletions silently unapplied.
-        components.queryItems = (Array(set.keys) + delete).map {
+        var query = (Array(set.keys) + delete).map {
             URLQueryItem(name: "updateMask.fieldPaths", value: $0)
         }
+        if let ifUpdateTime {
+            query.append(URLQueryItem(name: "currentDocument.updateTime", value: ifUpdateTime))
+        }
+        components.queryItems = query
         var request = URLRequest(url: components.url!)
         request.httpMethod = "PATCH"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         try await authorize(&request)
         request.httpBody = try JSONSerialization.data(
-            withJSONObject: ["fields": set.mapValues(\.json)]
+            withJSONObject: ["fields": try Self.nestedFields(set)]
         )
-        _ = try await send(request)
+        do {
+            _ = try await send(request)
+        } catch FirestoreRESTError.http(let status, let body)
+                    where ifUpdateTime != nil && isFailedPrecondition(status: status, body: body) {
+            // Only when a precondition was actually ASKED FOR. Without that guard an unconditional
+            // patch that happens to 400 with a FAILED_PRECONDITION body (a rules evaluation error,
+            // say) would be reported to the caller as a lost race it never entered — and the caller's
+            // response to a lost race is to move on quietly.
+            throw FirestoreRESTError.preconditionFailed(body)
+        }
+    }
+
+    /// Build the request BODY for a patch whose keys may be **dotted field paths**.
+    ///
+    /// ⛔ **The mask speaks paths; the body speaks names.** `updateMask.fieldPaths=links.audio_file`
+    /// means *the `audio_file` member of the `links` map*, but the body's `fields` map is keyed by
+    /// plain field NAMES with no dot interpretation at all. So passing the dotted key straight
+    /// through produces a body declaring a top-level field literally called `links.audio_file`,
+    /// which the mask does not mention — and a masked path that the body does not carry is
+    /// Firestore's **delete** mechanism. The write returns 200, the stray field is ignored, and the
+    /// field the caller meant to set is removed instead. Measured against the contract, not
+    /// theorised: the frontend reads `links.audio_file.url`, so this is the difference between the
+    /// cloud finding the podcast and skipping it.
+    ///
+    /// ⚠ Siblings MERGE. `links.audio` and `links.audio_file` in one patch have to become a single
+    /// `links` map with two members; built naively the second overwrites the first's subtree and one
+    /// of the two links is silently dropped — and P3 writes exactly that pair.
+    static func nestedFields(_ set: [String: FirestoreValue]) throws -> [String: Any] {
+        var tree: [String: Any] = [:]
+        // Sorted so a conflict is reported the same way every time rather than depending on the
+        // dictionary's hash order — an error that names a different key on each run is one nobody
+        // can act on.
+        for key in set.keys.sorted() {
+            try insert(key.split(separator: ".").map(String.init)[...], set[key]!, into: &tree, at: key)
+        }
+        return render(tree)
+    }
+
+    private static func insert(
+        _ path: ArraySlice<String>, _ value: FirestoreValue, into node: inout [String: Any],
+        at whole: String
+    ) throws {
+        guard let head = path.first else { return }
+        if path.count == 1 {
+            if node[head] is [String: Any] {
+                throw FirestoreRESTError.conflictingFieldPaths(
+                    "'\(whole)' is written as a value while another key writes into it as a map"
+                )
+            }
+            node[head] = value
+            return
+        }
+        if node[head] is FirestoreValue {
+            throw FirestoreRESTError.conflictingFieldPaths(
+                "'\(whole)' writes into '\(head)' as a map while another key writes it as a value"
+            )
+        }
+        var child = node[head] as? [String: Any] ?? [:]
+        try insert(path.dropFirst(), value, into: &child, at: whole)
+        node[head] = child
+    }
+
+    private static func render(_ node: [String: Any]) -> [String: Any] {
+        var out: [String: Any] = [:]
+        for (name, entry) in node {
+            if let leaf = entry as? FirestoreValue {
+                out[name] = leaf.json
+            } else if let subtree = entry as? [String: Any] {
+                out[name] = ["mapValue": ["fields": render(subtree)]]
+            }
+        }
+        return out
     }
 
     /// Create a document with a server-assigned id in *path* (a collection).

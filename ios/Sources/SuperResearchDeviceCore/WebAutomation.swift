@@ -124,6 +124,36 @@ public final class WebAutomationBridge {
     /// `Decodable` type per shape would be more ceremony than the shapes are worth. Same string
     /// round-trip, for the same reason.
     func evaluateDecoded(_ expression: String) async throws -> Any? {
+        do {
+            return try await decodedOnce(expression)
+        } catch {
+            // ⛔ **A NAVIGATION WIPES THE INJECTED RUNTIME, and a run navigates several times.**
+            // `window.__sr` lives in the page's JS context, which is destroyed and rebuilt on every
+            // document load — and enabling deep research navigates (the URL gains a conversation
+            // id), as does confirming Gemini's research plan. The runtime was injected exactly once,
+            // at the top, so every call after the first navigation threw
+            // "undefined is not an object" — which surfaces as a WebKit error on a selector that is
+            // perfectly correct, at a point that looks like the platform's fault.
+            //
+            // ⚠ Re-injected only on FAILURE, so the healthy path pays nothing: no probe, no extra
+            // round trip. And only for expressions that actually need the runtime — a genuine page
+            // error in someone else's JS must still be reported as itself rather than being retried
+            // behind an unrelated injection.
+            guard Self.shouldReinject(expression: expression) else { throw error }
+            _ = try? await injectRuntime()
+            return try await decodedOnce(expression)
+        }
+    }
+
+    /// Is this expression one whose failure could be a lost runtime?
+    ///
+    /// Extracted as a pure function because the surrounding plumbing needs a real `WKWebView` and so
+    /// cannot be unit-tested at all — this is the part of the decision that can be.
+    static func shouldReinject(expression: String) -> Bool {
+        expression.contains("window.__sr")
+    }
+
+    private func decodedOnce(_ expression: String) async throws -> Any? {
         let wrapped = "JSON.stringify((function(){ return (\(expression)); })())"
         guard let text = try await evaluate(wrapped) as? String,
               let data = text.data(using: .utf8)
@@ -219,12 +249,58 @@ extension WebAutomationBridge: WebPage {
         )
     }
 
+    /// Press a named key at the focused element.
+    ///
+    /// ⚠ Dispatched in-page rather than through the HID channel, and that is forced rather than
+    /// chosen: while Browser watch is showing a platform the app sets `allowsHitTesting(false)`, so
+    /// AXe keystrokes never reach the web view. An in-page `keydown` cannot be `isTrusted`, and for
+    /// this one caller that is acceptable — the composer's Backspace handler is its own code
+    /// reacting to its own model, not a browser-gated control.
+    public func key(_ name: String) async throws {
+        _ = try await evaluateDecoded(
+            "(function(){ var el = document.activeElement || document.body;"
+                + " var opts = {key: \(Self.jsString(name)), bubbles: true, cancelable: true};"
+                + " el.dispatchEvent(new KeyboardEvent('keydown', opts));"
+                + " el.dispatchEvent(new KeyboardEvent('keyup', opts));"
+                + " return {ok: true}; })()"
+        )
+    }
+
     public func insertText(_ handle: Int, _ text: String) async throws -> String? {
         let result = try await evaluateDecoded(
             "window.__sr.insertText(\(handle), \(Self.jsString(text)))"
         ) as? [String: Any]
-        if result?["err"] != nil { return "not-a-text-target" }
-        return result?["path"] as? String
+        return Self.readInsertResult(result)
+    }
+
+    /// Turn the runtime's insert envelope into the caller's answer.
+    ///
+    /// ⛔ **`ok` used to be read by nothing at all.** The runtime returned `{ok, path}`, this method
+    /// consulted only `err` and `path`, and so `execCommand` returning **false** — the editor
+    /// refusing the text outright — was byte-for-byte indistinguishable from success. The composer
+    /// stayed empty, and ChatGPT's send button, which exists only while the composer is non-empty,
+    /// was then reported as an `unresolved` selector. A whole run lost to a status nobody read.
+    ///
+    /// Extracted as a pure function because the surrounding plumbing needs a real `WKWebView` and
+    /// cannot be unit-tested — this is the part of the decision that can be.
+    static func readInsertResult(_ result: [String: Any]?) -> String? {
+        guard let result else { return nil }
+        if let err = result["err"] as? String, result["ok"] == nil {
+            // A structural miss — not a text target, or a stale handle.
+            return err == "not-a-text-target" ? "not-a-text-target" : "refused: \(err)"
+        }
+        // ⚠ Absent `ok` is treated as REFUSED, not as success. A runtime that changed shape must
+        // fail loudly here rather than resume reporting every fill as fine.
+        guard let ok = result["ok"] as? Bool, ok else {
+            let why = (result["err"] as? String) ?? "the editor did not take the text"
+            let after = (result["after"] as? String).map { " (composer now: \"\($0)\")" } ?? ""
+            // ⚠ `no-caret` is kept as its own word. "No range inside an editable root" and "the
+            // editor took the selection and refused the text" are different faults with different
+            // fixes, and reporting both as `refused` is what made the last run ambiguous.
+            let kind = (result["path"] as? String) == "no-caret" ? "no-caret" : "refused"
+            return "\(kind): \(why)\(after)"
+        }
+        return result["path"] as? String
     }
 
     /// JSON-encode a string for embedding in JS source.

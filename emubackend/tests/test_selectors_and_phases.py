@@ -136,7 +136,7 @@ def test_coverage_counts_every_key_of_a_named_platform_not_just_the_supplied_one
         json.dumps({"platforms": {"chatgpt": {"composer": "#c", "send": "#s"}}})
     )
     manifest = selectors.load_manifest(path)
-    assert manifest.coverage() == (2, 7)
+    assert manifest.coverage() == (2, 8)
     assert "chatgpt.sources" in manifest.missing()
 
 
@@ -196,7 +196,7 @@ class FakeHandle:
                     FakeHandle(
                         self.page,
                         self.page.response_css,
-                        "answer",
+                        FAKE_BRIEF,
                         attrs={"data-state": "complete"},
                     )
                 ],
@@ -248,6 +248,12 @@ class FakePage:
         self.on_query = None
         #: key combo -> callable, and the log of what was pressed.
         self.on_key: dict = {}
+        #: What the ChatGPT conversation-fetch extractor finds, and what it reports finding.
+        #: Separate from `#resp` because P2's ChatGPT path does NOT read the DOM — gate zero
+        #: measured the report into a cross-origin frame — so a fixture that only fills the
+        #: response container would test a path production does not take.
+        self.report_text: str = ""
+        self.report_state: dict | None = None
         self.keys: list[str] = []
         self.keyboard = _FakeKeyboard(self)
         #: What the opener reports about its popup. Independent of `dom` on purpose: the whole defect
@@ -302,6 +308,21 @@ class FakePage:
                 "placeholderChat": bool(self.toggles) and not on,
                 "placeholder": "what do you want to research" if on else "ask chatgpt",
             }
+        if "__srReport" in _js:
+            # The ChatGPT report fetch. Answered from `report_text` so a test can model the whole
+            # spread: a completed report, a fetch that errored, and a conversation with none.
+            # A slice request. Checked FIRST: the slice expression names the stash but not
+            # `state`, so a dispatch keyed on both fell through to the generic branch and returned
+            # None — which read as a truncated report.
+            import re as _re
+            m = _re.search(r"slice\((\d+), (\d+)\)", _js)
+            if m:
+                a, b = int(m.group(1)), int(m.group(2))
+                return (self.report_text or "")[a:b]
+            if "r.state" in _js:
+                return dict(self.report_state or
+                            {"state": "ok", "chars": len(self.report_text or "")})
+            return "started"
         return "DIV" if self.focused else None
 
 
@@ -328,6 +349,29 @@ MANIFEST = {
 #: a unit test nobody will run.
 FAST_RESPONSE_TIMEOUT = 1.0
 
+#: A synthetic P1 brief, long enough to clear `phases._BRIEF_FLOOR_CHARS`.
+#:
+#: ⚠ The fake used to answer with the 6-character string "answer", and P1 accepted it — which is the
+#: same shape as the 15-character `"ChatGPT said:"` measured on the real page mid-generation. Now
+#: that P1 has a floor, the fake has to produce something a brief could plausibly be, or every
+#: phase-level test asserts against a stub the real pipeline would refuse.
+#: A synthetic P2 report, over `report_extract.REPORT_FLOOR_CHARS` and structured enough to pass the
+#: wrong-document guards. P2's ChatGPT path does not read the DOM at all, so a fixture that only
+#: filled `#resp` would exercise a path production never takes.
+FAKE_REPORT = (
+    "# Findings\n\n## Executive summary\n\n"
+    + ("The technology has moved from laboratory demonstration into pilot production, with "
+       "several manufacturers now operating automotive-scale lines and validating B-sample "
+       "cells against published test data.\n\n") * 25
+)
+
+FAKE_BRIEF = (
+    "Research brief: assess the state of the subject as of today, covering the leading "
+    "approaches and their trade-offs, who has reached production, the remaining obstacles at "
+    "scale, and how it compares with the incumbent on cost, performance and reliability. "
+) * 3
+
+
 
 def _deps(tmp_path, *, sources=3, toggle="false", response=False):
     path = tmp_path / "m.json"
@@ -343,13 +387,14 @@ def _deps(tmp_path, *, sources=3, toggle="false", response=False):
     for h in page.dom["#prompt-textarea"]:
         h.page = page
     page.dom["#send"] = [FakeHandle(page, "#send")]
+    page.report_text = FAKE_REPORT
     page.dom[".src"] = [FakeHandle(page, ".src", f"source {i}") for i in range(sources)]
     if response:
         # A completed response already on the page, for tests that exercise P3 WITHOUT running P1/P2 to
         # produce one. Without it the wait is what fails, and an assertion about the harvest silently
         # becomes an assertion about the wait.
         page.dom["#resp"] = [
-            FakeHandle(page, "#resp", "answer", attrs={"data-state": "complete"})
+            FakeHandle(page, "#resp", FAKE_BRIEF, attrs={"data-state": "complete"})
         ]
     return phases.PhaseDeps(
         manifest=manifest,
@@ -378,8 +423,18 @@ def test_all_four_phases_run_against_a_synthetic_manifest(tmp_path):
     assert "p1:chatgpt:brief_sent" in deps.log
     assert "p2:chatgpt:dispatched" in deps.log
     assert any(entry.startswith("p3:chatgpt:ok:") for entry in deps.log)
-    assert deps.topic in page.typed
     assert "#send" in page.clicks
+
+    # ⭐ P1 sends the WRAPPER, not the bare topic. The bare topic gets a chat answer, and P2 is then
+    # fed a conversation instead of a brief — a wrong product, with nothing failing.
+    assert page.typed[0] != deps.topic
+    assert page.typed[0].startswith("Please create a detailed research report brief")
+    assert deps.topic in page.typed[0], "the wrapper must still carry the topic"
+
+    # ...and P1's product is CAPTURED and becomes P2's input, rather than P2 re-asking the topic.
+    assert deps.brief
+    assert any(e.startswith("p1:chatgpt:brief_captured:") for e in deps.log)
+    assert page.typed[1] == deps.brief, "P2 must send the brief, not the topic"
 
 
 def test_p0_fails_loudly_when_a_platform_is_not_logged_in(tmp_path):
@@ -820,6 +875,11 @@ def test_p2_re_establishes_composer_readiness_after_enabling_deep_research(tmp_p
     Typing into the pre-navigation handle succeeds silently and sends nothing.
     """
     deps, page = _deps(tmp_path, toggle="false")
+    # P2 now REFUSES to run without P1's brief, so this test — which exercises P2 alone — supplies
+    # one. Falling back to the topic is exactly the defect P2's guard exists to prevent, and letting
+    # this test run without a brief would have meant asserting P2's readiness behaviour against the
+    # wrong prompt.
+    deps.brief = FAKE_BRIEF
     bodies = phases.build_phase_bodies(
         deps, ("chatgpt",), response_timeout=FAST_RESPONSE_TIMEOUT
     )
@@ -841,7 +901,9 @@ def test_p2_re_establishes_composer_readiness_after_enabling_deep_research(tmp_p
     asyncio.run(bodies[2](None))
     assert "p2:chatgpt:dispatched" in deps.log
     assert state["reads"] >= 2, "P2 must WAIT for the re-mounted composer, not read once"
-    assert deps.topic in page.typed, "and then actually type into it"
+    # ...and then types the BRIEF into it. Asserting the topic here would pass against the very
+    # defect P2's guard exists to prevent.
+    assert page.typed == [deps.brief], "and then actually type the brief into it"
 
 
 def test_mutating_steps_go_through_the_guarded_wrapper(tmp_path):
@@ -977,7 +1039,10 @@ def test_typing_uses_the_editor_aware_fill_path(tmp_path):
         deps, ("chatgpt",), response_timeout=FAST_RESPONSE_TIMEOUT
     )
     asyncio.run(bodies[1](None))
-    assert page.typed == [deps.topic]
+    # The wrapper prompt, not the bare topic — see the P1 contract.
+    assert len(page.typed) == 1
+    assert page.typed[0].startswith("Please create a detailed research report brief")
+    assert deps.topic in page.typed[0]
     assert page.clicks.count("#prompt-textarea") >= 1, "fill focuses by a real tap first"
 
 
@@ -996,7 +1061,7 @@ def test_a_single_platform_manifest_is_measured_against_that_platform(tmp_path):
         }}})
     )
     manifest = selectors.load_manifest(path)
-    assert manifest.coverage() == (7, 7), "one platform named -> one platform's denominator"
+    assert manifest.coverage() == (8, 8), "one platform named -> one platform's denominator"
     assert manifest.missing() == []
 
 
@@ -1010,11 +1075,15 @@ def test_a_multi_platform_manifest_still_counts_every_platform_it_names(tmp_path
         }})
     )
     done, total = selectors.load_manifest(path).coverage()
-    assert (done, total) == (4, 25)
+    # 34, not 25: notebooklm gained create_notebook / source_textarea / insert_source for the
+    # source flow and `share` for the public link, the three research platforms each gained
+    # model_selector, and claude gained mode_chat / mode_cowork — the segments whose state an
+    # earlier measurement never consulted.
+    assert (done, total) == (4, 34)
 
 
 def test_the_baseline_alone_still_covers_every_platform(tmp_path):
-    assert selectors.load_manifest(path=tmp_path / "nope.json").coverage() == (0, 25)
+    assert selectors.load_manifest(path=tmp_path / "nope.json").coverage() == (0, 34)
 
 
 def test_the_platforms_own_in_flight_control_VETOES_completion(tmp_path):

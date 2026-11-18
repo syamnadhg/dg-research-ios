@@ -155,3 +155,44 @@ final class PeopleResolutionTests: XCTestCase {
         XCTAssertEqual(DeviceBackend.busyWorkerIDs(from: [:]), [])
     }
 }
+
+/// The single character an avatar puts in a circle.
+///
+/// ⚠ Lives in the core rather than beside the view because **nothing in `ios/App` is compiled by
+/// `swift test`** — and this is a decision, not a layout choice.
+final class PersonAvatarGlyphTests: XCTestCase {
+
+    private func user(_ label: String, resolved: Bool) -> ConnectedUser {
+        ConnectedUser(id: "u1", label: label, isOwner: false, isResolved: resolved)
+    }
+
+    func testAResolvedNameGivesItsFirstLetterUppercased() {
+        XCTAssertEqual(user("rocky", resolved: true).avatarGlyph, "R")
+        XCTAssertEqual(user("Ada Lovelace", resolved: true).avatarGlyph, "A")
+    }
+
+    func testAnUNRESOLVEDUidGetsAQuestionMarkAndNOTALetter() {
+        // ⛔ `label` is a truncated uid here, so its first character is a hex digit. Putting that in
+        // a circle is a confident-looking initial for a person the device could not identify — and
+        // a glyph carries no caveat, unlike the "name not shared with this device" line beneath it.
+        let uid = user("a3f91c2e", resolved: false)
+        XCTAssertEqual(uid.avatarGlyph, "?")
+        XCTAssertNotEqual(uid.avatarGlyph, "A")
+    }
+
+    func testLeadingPunctuationIsSKIPPEDForTheFirstRealCharacter() {
+        // A quote or a bullet in a circle reads as a rendering fault rather than as a person.
+        XCTAssertEqual(user("\"Rocky\"", resolved: true).avatarGlyph, "R")
+        XCTAssertEqual(user("· nadia", resolved: true).avatarGlyph, "N")
+    }
+
+    func testADIGITIsAcceptableWhenThatIsWhatTheNameStartsWith() {
+        XCTAssertEqual(user("4th floor lab", resolved: true).avatarGlyph, "4")
+    }
+
+    func testALabelWithNoLetterOrDigitFallsBackRatherThanRenderingEmpty() {
+        // An empty circle looks broken; a `?` looks like missing information, which it is.
+        XCTAssertEqual(user("···", resolved: true).avatarGlyph, "?")
+        XCTAssertEqual(user("", resolved: true).avatarGlyph, "?")
+    }
+}

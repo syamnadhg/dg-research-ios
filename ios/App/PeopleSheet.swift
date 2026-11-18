@@ -14,13 +14,21 @@ import UIKit
 ///
 /// * **No "Free workers" tile.** The owner was explicit: the pills at the end ARE the control. The
 ///   boxed tile the old version had is gone, exactly as the web app removed its own.
-/// * **No Revoke, no Stop, no Cancel.** Those are owner-authenticated actions (`/api/devices/unshare`
-///   and the owner-control queue write). This app signs in as the *device*, so shipping them would
-///   ship three buttons that 403. The legend uses the web app's own non-owner wording for the same
-///   reason — it already had wording for a viewer who cannot perform them.
+/// * **No Revoke.** That is an owner-authenticated action (`/api/devices/unshare`), and this app
+///   signs in as the *device*, so the button would 403 every time. The legend uses the web app's own
+///   non-owner wording for the same reason — it already had wording for a viewer who cannot do it.
+///
+/// ⭐ **Stop DOES exist here now, and the reasoning that excluded it has changed rather than been
+/// overruled.** It was excluded because stopping meant an addDoc into `devices/{id}/queue`, whose
+/// `allow create` requires ownerUid or sharedWith — neither of which the synthetic device uid is.
+/// That is still true of that route, and it is no longer the route: a run claimed by this device
+/// executes *inside this process*, so holding its pill stops it with no Firestore write at all.
+/// Cancelling a QUEUED run is still absent, because that one really would need the write.
 struct PeoplePopup: View {
     let snapshot: DeviceSnapshot
     let onToggleRest: (Int, Bool) -> Void
+    /// Stop the run on a worker. Hold a busy pill.
+    var onStop: (Int) -> Void = { _ in }
     let onClose: () -> Void
 
     @Namespace private var pillSpace
@@ -31,7 +39,28 @@ struct PeoplePopup: View {
     // MARK: Derived state — mirrors the web app's own derivation
 
     /// Busy workers, from the `workers` map.
-    private var busy: [WorkerState] { snapshot.workers.filter(\.isBusy) }
+    /// Busy workers — from the device document, plus whatever this process is running RIGHT NOW.
+    ///
+    /// ⛔ **The document half lags by up to a beat (20s).** `workers` is published from the
+    /// heartbeat, so a run that has just been claimed has no entry yet — and a run that fails
+    /// quickly never gets one at all. The owner watched a run start and finish without a single
+    /// pill appearing on anyone's tile (2026-08-14). The live half is written by the run itself, in
+    /// this process, the instant it claims a worker.
+    ///
+    /// ⚠ The LIVE entry wins on conflict. Both describe the same worker, and the in-process one is
+    /// strictly fresher — the document is a copy of it that is at most one beat old.
+    private var busy: [WorkerState] {
+        let live = LiveRunActivity.shared.runs
+        var merged: [String: WorkerState] = [:]
+        for worker in snapshot.workers where worker.isBusy { merged[worker.id] = worker }
+        for (id, facts) in live {
+            merged[String(id)] = WorkerState(
+                id: String(id), uid: facts.uid, title: facts.title,
+                phase: facts.phase, totalPhases: facts.totalPhases
+            )
+        }
+        return merged.values.sorted { ($0.intID ?? 0) < ($1.intID ?? 0) }
+    }
 
     private var capacity: Int { min(max(snapshot.workerCount, busy.count), 16) }
 
@@ -167,8 +196,9 @@ struct PeoplePopup: View {
     private var legend: some View {
         VStack(alignment: .leading, spacing: DS.S.md) {
             legendRow(badge: AnyView(LegendBadge(glyph: "N", style: .running))) {
-                (Text("Running / Free").foregroundStyle(DS.C.ok)
-                 + Text("\nWhile running: tap for phase.\nWhile free: tap to rest.")
+                (Text("Running / Free").foregroundStyle(DS.C.worker)
+                 // Says BOTH gestures, because a long press is invisible until someone tries it.
+                 + Text("\nWhile running: tap for phase, hold to stop.\nWhile free: tap to rest.")
                     .foregroundStyle(DS.C.textTertiary))
                     .font(DS.F.label)
             }
@@ -203,14 +233,15 @@ struct PeoplePopup: View {
     // MARK: 3 — the people tiles
 
     private var peopleTiles: some View {
-        VStack(alignment: .leading, spacing: DS.S.md) {
+        VStack(alignment: .leading, spacing: DS.S.lg) {
             ForEach(snapshot.users) { user in
                 PersonTile(
                     user: user,
                     workers: busy.filter { $0.uid == user.id },
                     queued: snapshot.queue.filter { $0.uid == user.id },
                     namespace: pillSpace,
-                    openWorker: $openWorker
+                    openWorker: $openWorker,
+                    onStop: onStop
                 )
             }
         }
@@ -218,6 +249,12 @@ struct PeoplePopup: View {
 
     // MARK: 4 — the worker pills, last, and tappable
 
+    /// The worker slots nobody is using, as bare pills under the tiles.
+    ///
+    /// ⚠ **No heading.** An earlier version boxed and labelled these — which read fine in isolation
+    /// and was redundant on the page: the legend directly above already says what a green pill is
+    /// and that tapping it rests the worker. A second explanation of the same glyph is noise, and
+    /// it gave the pills more weight than the people they sit beneath.
     private var pillRow: some View {
         FlowRow(spacing: DS.S.sm) {
             ForEach(trailingPills, id: \.id) { pill in
@@ -235,7 +272,6 @@ struct PeoplePopup: View {
                 )
             }
         }
-        .padding(.horizontal, DS.S.xs)
     }
 }
 
@@ -247,15 +283,22 @@ private struct PersonTile: View {
     let queued: [QueuedRun]
     let namespace: Namespace.ID
     @Binding var openWorker: Int?
+    var onStop: (Int) -> Void = { _ in }
 
     var body: some View {
-        HStack(alignment: .center, spacing: DS.S.md) {
-            VStack(alignment: .leading, spacing: 3) {
-                // ⚠ The name is the point of this tile and it was set in the LABEL font — the same
-                // size as the captions beneath it — so a person read as a footnote. Body weight and
-                // size, on its own line, with the pills below rather than competing for the row.
+        HStack(alignment: .top, spacing: DS.S.lg) {
+            // ⛔ **No avatar here, deliberately — and it is a consistency decision, not a style
+            // one.** The web app's "Shared with" popup lists people as name-over-email with no
+            // badge, and this popup is the same surface for the same people: a circled initial
+            // here and none there makes one product look like two. The main-screen CARD keeps its
+            // avatar, because there the rows are a glance summary competing with platform tiles
+            // for attention rather than a list being read.
+            VStack(alignment: .leading, spacing: DS.S.sm) {
+                // ⚠ The name is the point of this tile. It was BODY size sitting above an 11pt
+                // email, which read as a caption with a heading rather than as a person; at title
+                // size the hierarchy matches what the tile is about.
                 Text(user.label)
-                    .font(DS.F.body.weight(.medium))
+                    .font(DS.F.title)
                     .foregroundStyle(DS.C.textPrimary)
                     .lineLimit(1)
                     // Middle truncation only matters for an unresolved uid; a name should truncate
@@ -263,9 +306,12 @@ private struct PersonTile: View {
                     .truncationMode(user.isResolved ? .tail : .middle)
 
                 if let second = secondLine {
+                    // ⚠ Body, not label. An email at 11pt on a 3x screen is legible only to
+                    // someone who already knows what it says — and telling two people apart is
+                    // precisely what this line is for.
                     Text(second)
-                        .font(DS.F.label)
-                        .foregroundStyle(DS.C.textTertiary)
+                        .font(DS.F.body)
+                        .foregroundStyle(DS.C.textSecondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
@@ -273,12 +319,15 @@ private struct PersonTile: View {
                 if !workers.isEmpty || !queued.isEmpty {
                     FlowRow(spacing: DS.S.sm) {
                         ForEach(workers) { worker in
-                            // ⚠ Tap-for-phase is the ONE web-app pill interaction a device
-                            // principal can actually perform: it writes nothing. Long-press to
-                            // Stop/Cancel addDoc's into devices/{id}/queue, whose `allow create`
-                            // requires ownerUid or sharedWith — the synthetic device uid is
-                            // neither, so those chips would 403 every time and are deliberately
-                            // not here.
+                            // ⭐ Tap shows the phase; HOLD stops the run — the same two gestures
+                            // the web app's own pill offers.
+                            //
+                            // ⚠ The old note here said Stop could not exist because stopping meant
+                            // an addDoc into `devices/{id}/queue`, whose `allow create` requires
+                            // ownerUid or sharedWith — which the synthetic device uid is not, so
+                            // the chip would 403 every time. That reasoning was right about THAT
+                            // route and is simply not the route any more: this run is executing
+                            // inside this process, so stopping it writes nothing at all.
                             WorkerSlotPill(
                                 id: worker.intID ?? 0,
                                 state: .busy,
@@ -289,24 +338,25 @@ private struct PersonTile: View {
                                 onTap: {
                                     let id = worker.intID
                                     openWorker = (openWorker == id) ? nil : id
-                                }
+                                },
+                                onLongPress: { onStop(worker.intID ?? 0) }
                             )
                         }
                         ForEach(queued) { run in
                             QueuePill(position: run.position)
                         }
                     }
-                    .padding(.top, 2)
+                    .padding(.top, DS.S.xs)
                 }
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, DS.S.lg)
-        .padding(.vertical, DS.S.lg)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(DS.C.surfaceRaised.opacity(0.6))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(DS.C.border, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(DS.C.border, lineWidth: 1))
     }
 
     /// Owner / their email / a warning that this is only a uid.
@@ -326,7 +376,43 @@ private struct PersonTile: View {
 /// `matchedGeometryEffect` on the slot id is what makes a pill *fly* between the person's row and
 /// the row at the end when a run starts or finishes — the same shared-layout trick the web app uses,
 /// and the reason a busy worker and a free one are the same object rather than two lookalikes.
-private struct WorkerSlotPill: View {
+/// Make whatever it wraps breathe, while `active`.
+///
+/// ⛔ **A child view rather than modifiers on the pill, and that is a compiler constraint rather
+/// than a preference.** The pill builds itself into a local `let` before deciding whether to wrap
+/// it in a Button — and a closure created inside a local binding captures `self` immutably, so
+/// `onAppear { breathing = true }` will not compile there however the state is declared. Owning the
+/// state in a child is the same shape `PulsingDot` already uses, for the same reason.
+private struct Breathing<Content: View>: View {
+    let active: Bool
+    @ViewBuilder var content: () -> Content
+
+    @State private var on = false
+
+    var body: some View {
+        content()
+            // ⭐ The web app's `animate-subtle-pulse`: a gentle opacity breath, nothing else.
+            //
+            // ⛔ **No glow and no scale.** Both were tried and both read as a RING drawn around the
+            // pill rather than as the pill itself pulsing — which is not what the web app does and
+            // not what a worker pill is. Subtlety is the point: this runs for ninety minutes.
+            .opacity(active && on ? 0.55 : 1)
+            .animation(
+                active ? .easeInOut(duration: 1.2).repeatForever(autoreverses: true) : .default,
+                value: on
+            )
+            .onAppear { if active { on = true } }
+            // ⚠ Reset on the way DOWN too. Without this the pill keeps breathing after the run
+            // ends — a worker that looks busy for ever is worse than one that never animated.
+            .onChange(of: active) { _, live in on = live }
+    }
+}
+
+/// ⚠ **Shared with Browser watch, deliberately.** It was private, and Browser watch grew its own
+/// "Worker N" mini-tile that meant the same thing and looked nothing like it — so the same worker
+/// in the same state read as two different objects on two screens. One component, so the two
+/// surfaces cannot drift.
+struct WorkerSlotPill: View {
     enum State { case busy, resting, ready }
 
     let id: Int
@@ -336,7 +422,19 @@ private struct WorkerSlotPill: View {
     var totalPhases: Int? = nil
     /// Busy pills expand to name their phase. Read-only — see PersonTile for why Stop is absent.
     var expanded: Bool = false
+    /// Pulse, because this worker is running something.
+    ///
+    /// ⚠ Matches the web app exactly: `animate-subtle-pulse` is on the BUSY pill and on no other.
+    /// An earlier version pulsed only while a platform page was live, which went still during the
+    /// gaps between platforms — a worker mid-run looking idle for minutes at a time.
+    var pulsing: Bool = false
     let onTap: (() -> Void)?
+    /// Park or wake, where `onTap` is already spoken for. Nil means this surface offers no rest.
+    var onLongPress: (() -> Void)? = nil
+
+    private var restHint: String {
+        state == .resting ? "Wake worker \(id)" : "Rest worker \(id)"
+    }
 
     /// The web app's own short labels, so the two surfaces name a phase identically.
     private static let phaseLabels = ["Init", "Brief", "Research", "NLM", "Youtube", "Email"]
@@ -352,35 +450,62 @@ private struct WorkerSlotPill: View {
     var body: some View {
         // 26pt, not 22 — the owner could not read these. Still a circle when collapsed.
         let side: CGFloat = 26
-        let pill = ZStack(alignment: .leading) {
+        let pill = Breathing(active: pulsing) { ZStack(alignment: .leading) {
             if expanded {
                 GeometryReader { geo in
                     Rectangle()
-                        .fill(DS.C.ok.opacity(0.55))
+                        .fill(DS.C.worker.opacity(0.55))
                         .frame(width: max(geo.size.width * CGFloat(step) / CGFloat(total), 8))
                 }
             }
             Text(expanded ? label : "\(id)")
                 .font(DS.F.mono(11, .semibold))
-                .foregroundStyle(state == .resting ? DS.C.ok : Color.white)
+                .foregroundStyle(state == .resting ? DS.C.worker : Color.white)
                 .lineLimit(1)
                 .padding(.horizontal, expanded ? 9 : 0)
                 .frame(minWidth: expanded ? 0 : side, alignment: expanded ? .leading : .center)
         }
         .frame(height: side)
         .frame(maxWidth: expanded ? 190 : side)
-        .background(state == .resting ? Color.clear : DS.C.ok.opacity(expanded ? 0.35 : 1))
+        // ⭐ **The web app's three states, transcribed rather than approximated.**
+        // `account/page.tsx`: busy and ready are both `bg-green-500 text-white`; resting is
+        // `bg-transparent border-2 border-green-500/80 text-green-500`. There is no fourth state
+        // and no ring for anything else — a halo for "this is the one Browser watch is showing"
+        // was an invention, and it read as a circle drawn around the pill.
+        .background(state == .resting ? Color.clear : DS.C.worker.opacity(expanded ? 0.35 : 1))
         .clipShape(Capsule())
         .overlay(
             Capsule().stroke(
-                state == .resting ? DS.C.ok.opacity(0.8) : .clear,
+                state == .resting ? DS.C.worker.opacity(0.8) : .clear,
                 lineWidth: state == .resting ? 2 : 0
             )
-        )
+        ) }
         .matchedGeometryEffect(id: "worker-\(id)", in: namespace)
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: expanded)
 
-        if let onTap {
+        if let onLongPress {
+            // ⛔ **A plain view with GESTURES, not a Button — and this is why hold did nothing.**
+            // `Button` installs its own recogniser, which claims the touch sequence; an
+            // `.onLongPressGesture` attached to the outside of it never reaches the threshold,
+            // so the press was silently swallowed and the pill just looked unresponsive. Attaching
+            // both gestures to a plain view lets SwiftUI arbitrate between them properly.
+            //
+            // ⚠ The long press is declared BEFORE the tap. Declared after, the tap recogniser wins
+            // the moment the finger lifts and the hold never completes — the same failure in a
+            // different costume.
+            pill
+                .contentShape(Capsule())
+                .onLongPressGesture(minimumDuration: 0.4) { onLongPress() }
+                .onTapGesture { onTap?() }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel(
+                    state == .resting ? "Worker \(id) is resting" : "Worker \(id) is ready"
+                )
+                .accessibilityHint("Hold to \(state == .resting ? "wake" : "rest")")
+                // Named so VoiceOver can reach rest without performing a long press, which it
+                // cannot do reliably.
+                .accessibilityAction(named: restHint) { onLongPress() }
+        } else if let onTap {
             Button(action: onTap) { pill }
                 .buttonStyle(.plain)
                 .accessibilityLabel(
@@ -426,7 +551,7 @@ private struct LegendBadge: View {
             .clipShape(Capsule())
             .overlay(
                 Capsule().stroke(
-                    style == .resting ? DS.C.ok.opacity(0.8) : .clear,
+                    style == .resting ? DS.C.worker.opacity(0.8) : .clear,
                     lineWidth: style == .resting ? 2 : 0
                 )
             )
@@ -435,14 +560,14 @@ private struct LegendBadge: View {
     private var foreground: Color {
         switch style {
         case .running: return .white
-        case .resting: return DS.C.ok
+        case .resting: return DS.C.worker
         case .queued: return DS.C.bg
         }
     }
 
     private var background: Color {
         switch style {
-        case .running: return DS.C.ok
+        case .running: return DS.C.worker
         case .resting: return .clear
         case .queued: return DS.C.warn
         }
@@ -499,5 +624,39 @@ private struct ContentHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
+    }
+}
+
+// MARK: - A person's avatar
+
+/// The initial in a circle — the visual anchor a person row needs.
+///
+/// ⭐ **Shared by the sheet and the main-screen card on purpose.** Both are showing the same people,
+/// and two different treatments of one person read as two different kinds of thing. The web app
+/// anchors its own rows the same way.
+///
+/// ⚠ The glyph rule lives on `ConnectedUser` in the core, not here: an unresolved uid must get a
+/// neutral marker rather than a letter pulled out of a hex string, and **nothing in `ios/App` is
+/// compiled by `swift test`** — a decision that matters cannot live where no test can reach it.
+struct PersonAvatar: View {
+    let user: ConnectedUser
+    var size: CGFloat = 34
+
+    private var tint: Color { user.isOwner ? DS.C.accent : DS.C.accent2 }
+
+    var body: some View {
+        Text(user.avatarGlyph)
+            .font(DS.F.sans(size * 0.42, .semibold))
+            .foregroundStyle(user.isResolved ? .white : DS.C.textTertiary)
+            .frame(width: size, height: size)
+            .background(user.isResolved ? tint : DS.C.surfaceHigh)
+            .clipShape(Circle())
+            .overlay(
+                Circle().stroke(
+                    user.isResolved ? .clear : DS.C.border,
+                    lineWidth: user.isResolved ? 0 : 1
+                )
+            )
+            .accessibilityHidden(true)
     }
 }

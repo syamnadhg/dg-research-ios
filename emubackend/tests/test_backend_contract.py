@@ -429,3 +429,24 @@ def test_wait_for_selector_times_out_with_a_useful_message():
     be.evaluate = only_missing  # type: ignore[assignment]
     with pytest.raises(TimeoutError, match="did not appear"):
         asyncio.run(page.wait_for_selector("#never", timeout=0.3, poll=0.05))
+
+
+def test_runtime_places_the_caret_in_the_last_block():
+    """The caret must land INSIDE a block, not between blocks.
+
+    ⛔ The real composer is ``<div id="prompt-textarea"><p><br …></p></div>``. A range collapsed on
+    the ROOT sits between block children — a position ProseMirror normalises away, so the insert
+    lands nowhere and ``execCommand`` reports false. Measured live 2026-08-14 with
+    ``document.hasFocus()`` already true, which is what ruled focus out as the remaining cause.
+    """
+    from emubackend.substrate.runtime_js import RUNTIME_JS
+
+    assert "el.lastElementChild" in RUNTIME_JS, (
+        "the caret is being placed on the composer root again — collapsing there lands between "
+        "block children and ProseMirror discards it"
+    )
+    # And the clear must not be a separate edit: insertText over a non-collapsed range replaces it,
+    # so two transactions give a controlled editor a chance to reconcile in between.
+    assert "execCommand('delete')" not in RUNTIME_JS, (
+        "the delete came back — clear-and-fill must stay ONE editing transaction"
+    )

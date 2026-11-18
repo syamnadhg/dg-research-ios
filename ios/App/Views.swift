@@ -6,6 +6,11 @@ import SwiftUI
 struct RootView: View {
     @StateObject var model: AppModel
     @ObservedObject var theme: ThemeManager
+    /// ⚠ Observed HERE, at the root, and not only inside Settings. The size multiplier is read
+    /// during every body evaluation, so the view that must re-render on a change is the one that
+    /// owns the whole tree — observing it only in the sheet would resize Settings and leave the
+    /// dashboard behind it at the old size until something else happened to redraw it.
+    @ObservedObject var size: AppSizeManager
 
     /// Which platform's login sheet is open, if any.
     @State private var loginTarget: PlatformState?
@@ -57,7 +62,11 @@ struct RootView: View {
                             BrowserWatchCard(
                                 snapshot: model.snapshot,
                                 workers: model.workers,
-                                selectedWorker: $watchWorker
+                                selectedWorker: $watchWorker,
+                                liveTick: model.liveTick,
+                                onToggleRest: { id, resting in
+                                    model.setWorkerResting(id, resting: resting)
+                                }
                             ) { platform in
                                 watchSelection = platform
                                 watching = true
@@ -109,7 +118,7 @@ struct RootView: View {
         .overlay(alignment: .bottom) { if !settingsOpen { Toast(text: model.toast) } }
         .overlay { if !settingsOpen { ConfirmSheet(model: model) } }
         .sheet(isPresented: $settingsOpen) {
-            SettingsSheet(theme: theme, model: model, onClose: { settingsOpen = false })
+            SettingsSheet(theme: theme, size: size, model: model, onClose: { settingsOpen = false })
         }
         // An overlay rather than a `.sheet`: a sheet brings its own full-height chrome and grabber,
         // and the frontend's equivalent is a bottom-anchored card floating over a blurred backdrop.
@@ -118,6 +127,7 @@ struct RootView: View {
                 PeoplePopup(
                     snapshot: model.snapshot,
                     onToggleRest: { id, resting in model.setWorkerResting(id, resting: resting) },
+                    onStop: { worker in model.stopRun(onWorker: worker) },
                     onClose: { peopleOpen = false }
                 )
             }
@@ -468,7 +478,8 @@ private struct WorkersCard: View {
                     // Colour AND glyph, so busy/idle survives without colour vision.
                     Text(worker.isBusy ? "●" : "○")
                         .font(DS.F.mono(11, .semibold))
-                        .foregroundStyle(worker.isBusy ? DS.C.ok : DS.C.textTertiary)
+                        // The worker green, same as its pill — this row names a WORKER.
+                        .foregroundStyle(worker.isBusy ? DS.C.worker : DS.C.textTertiary)
                     Text("w\(worker.id)")
                         .font(DS.F.mono(11)).foregroundStyle(DS.C.textTertiary)
                         .frame(width: 24, alignment: .leading)
@@ -541,39 +552,65 @@ struct WorkerWatchStrip: View {
     /// The run on a given worker, so a busy chip can name the phase instead of just saying "busy".
     var runFor: (Int) -> RunState? = { _ in nil }
 
+    /// Park or wake, on a long press. Nil where the caller offers no rest control.
+    var onToggleRest: ((Int, Bool) -> Void)?
+
+    @Namespace private var pillSpace
+
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: DS.S.md) {
+        // ⭐ **The People popup's pill, not a lookalike.** This was a row of "Worker N" mini-tiles
+        // that named the same worker in the same state as the popup and shared not one pixel with
+        // it — so the owner had to learn the device's worker vocabulary twice. Same component now,
+        // which also means a resting worker reads hollow on both screens without anyone
+        // remembering to keep them in step.
+        VStack(alignment: .leading, spacing: DS.S.sm) {
+            FlowRow(spacing: DS.S.sm) {
                 ForEach(workers) { worker in
-                    let isSelected = worker.id == selected
-                    Button { selected = worker.id } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: DS.S.sm) {
-                                Circle().fill(tone(worker.id)).frame(width: 6, height: 6)
-                                Text("Worker \(worker.id)")
-                                    .font(DS.F.label.weight(isSelected ? .semibold : .regular))
-                                    .foregroundStyle(DS.C.textPrimary)
-                            }
-                            Text(caption(worker.id))
-                                .font(DS.F.mono(9))
-                                .foregroundStyle(tone(worker.id))
+                    WorkerSlotPill(
+                        id: worker.id,
+                        state: state(worker.id),
+                        namespace: pillSpace,
+                        // ⚠ Pulses on BUSY, matching the web app's `animate-subtle-pulse`. It used
+                        // to pulse only while a platform page was live, which went still in the
+                        // gaps between platforms — a worker mid-run looking idle for minutes.
+                        pulsing: activity(worker.id) == .busy,
+                        // ⚠ Tap SELECTS here; in the People popup it rests the worker. Different
+                        // verbs on one component — which is safe only because this card has no
+                        // rest affordance at all, so there is nothing to confuse it with. A busy
+                        // pill stays tappable for the same reason: looking at a run cannot hurt it.
+                        onTap: { selected = worker.id },
+                        // ⚠ A BUSY worker is never parked — a run in flight always finishes.
+                        // Same rule as the People popup and as the web app, for the same reason:
+                        // parking mid-run would either do nothing or orphan the run.
+                        onLongPress: activity(worker.id) == .busy ? nil : {
+                            onToggleRest?(worker.id, !restingWorkerIDs.contains(worker.id))
                         }
-                        .padding(.horizontal, DS.S.md)
-                        .padding(.vertical, DS.S.sm)
-                        .frame(minHeight: DS.S.touch)
-                        .background(isSelected ? DS.C.accent.opacity(0.12) : DS.C.bg)
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10)
-                                .stroke(isSelected ? DS.C.accent : DS.C.border, lineWidth: 1)
-                        )
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
+                    )
                     .accessibilityLabel("Worker \(worker.id), \(caption(worker.id))")
-                    .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+                    .accessibilityAddTraits(worker.id == selected ? [.isSelected] : [])
                 }
             }
+            // ⚠ ONE caption, for the selected worker, rather than one under every pill. Per-pill
+            // captions are what made the old row bulky, and they answered a question nobody asks
+            // about four workers at once — the card shows one worker's browser at a time.
+            Text(
+                onToggleRest == nil
+                    ? "Worker \(selected) · \(caption(selected))"
+                    // Long-press is not discoverable on its own, so the caption says it. It names
+                    // the state AND the way to change it, in the one line that was already here.
+                    : "Worker \(selected) · \(caption(selected)) · hold to "
+                        + (restingWorkerIDs.contains(selected) ? "wake" : "rest")
+            )
+            .font(DS.F.mono(9))
+            .foregroundStyle(tone(selected))
+        }
+    }
+
+    private func state(_ id: Int) -> WorkerSlotPill.State {
+        switch activity(id) {
+        case .busy: return .busy
+        case .resting: return .resting
+        case .idle: return .ready
         }
     }
 
@@ -597,7 +634,10 @@ struct WorkerWatchStrip: View {
         switch activity(id) {
         case .busy: return DS.C.accent
         case .resting: return DS.C.textTertiary
-        case .idle: return DS.C.ok
+        // ⚠ The PILL's green, not the generic `ok` teal. This caption sits directly under the pill
+        // it describes, so two greens a few percent apart read as a rendering fault rather than as
+        // two different things — which is how it was reported.
+        case .idle: return DS.C.worker
         }
     }
 }
@@ -606,6 +646,15 @@ struct BrowserWatchCard: View {
     let snapshot: DeviceSnapshot
     let workers: [WorkerProfile]
     @Binding var selectedWorker: Int
+    /// Republished by `AppModel` so a change redraws this card.
+    ///
+    /// ⚠ Unused in the body ON PURPOSE — it exists so SwiftUI re-evaluates when the run moves to
+    /// another platform. `LiveRunActivity` is a plain core class with no Combine, so nothing else
+    /// would tell this view to redraw and the glow would freeze on the first platform touched.
+    var liveTick: Int = 0
+    var liveActivity: LiveRunActivity = .shared
+    /// Park or wake a worker from here, so the pill means the same thing on both surfaces.
+    var onToggleRest: ((Int, Bool) -> Void)?
     let onOpen: (String) -> Void
 
     var body: some View {
@@ -618,22 +667,6 @@ struct BrowserWatchCard: View {
                 )
             }
 
-            // ⚠ Every worker, always — this used to be a MENU shown only when `workers.count > 1`.
-            // Two things were wrong with that. A menu shows one worker at a time, so "watch the
-            // browsers" could not answer "what is each worker doing right now" without tapping
-            // through them one by one; and hiding it at one worker meant a device that had just
-            // added a second had no visible sign of it here. A strip shows all of them at once and
-            // still selects, which is what the card is for.
-            //
-            // Still no Add: this card is for looking, not configuring.
-            WorkerWatchStrip(
-                workers: workers,
-                selected: $selectedWorker,
-                busyWorkerIDs: snapshot.busyWorkerIDs,
-                restingWorkerIDs: snapshot.restingWorkerIDs,
-                runFor: { snapshot.run(forWorker: $0) }
-            )
-
             // A grid rather than a list: four platforms read as a set of equals, and the whole point
             // is to compare them at a glance.
             LazyVGrid(
@@ -642,6 +675,7 @@ struct BrowserWatchCard: View {
                 spacing: DS.S.md
             ) {
                 ForEach(snapshot.platforms) { platform in
+                    let live = platform.id == livePlatform
                     Button { onOpen(platform.id) } label: {
                         HStack(spacing: DS.S.md) {
                             AgentIcon(id: platform.id, size: 18)
@@ -657,16 +691,62 @@ struct BrowserWatchCard: View {
                         }
                         .padding(DS.S.md)
                         .frame(maxWidth: .infinity, minHeight: DS.S.touch, alignment: .leading)
-                        .background(DS.C.bg)
+                        // ⭐ **The tile the run is typing into right now.** This is the one question
+                        // Browser watch exists to answer — *which tab do I open to see it happen* —
+                        // and until now the card gave four identical tiles and no way to tell.
+                        .background(live ? DS.C.accent.opacity(0.14) : DS.C.bg)
                         .clipShape(RoundedRectangle(cornerRadius: 10))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 10).stroke(DS.C.border, lineWidth: 1)
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(live ? DS.C.accent : DS.C.border, lineWidth: live ? 2 : 1)
                         )
+                        // ⚠ A glow, not a jitter: the tile is a TAP TARGET, and a moving one is
+                        // harder to hit. The pulsing lives on the worker dot, which nobody taps.
+                        .shadow(color: live ? DS.C.accent.opacity(0.45) : .clear, radius: live ? 8 : 0)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }
             }
+
+            // ⚠ Every worker, always — this used to be a MENU shown only when `workers.count > 1`.
+            // Two things were wrong with that. A menu shows one worker at a time, so "watch the
+            // browsers" could not answer "what is each worker doing right now" without tapping
+            // through them one by one; and hiding it at one worker meant a device that had just
+            // added a second had no visible sign of it here. A row shows all of them at once and
+            // still selects, which is what the card is for.
+            //
+            // ⭐ **Below the platforms, not above them.** The platforms are what this card is for
+            // looking at; the workers are the filter you reach for once you have seen something
+            // worth switching. Putting the filter first made the eye start on a control rather
+            // than on the content it controls.
+            //
+            // Still no Add: this card is for looking, not configuring.
+            WorkerWatchStrip(
+                workers: workers,
+                selected: $selectedWorker,
+                // ⛔ **UNIONED with what this process is running RIGHT NOW.**
+                // `snapshot.busyWorkerIDs` is read from the device document and only refreshes on
+                // the 20-second beat, so a pill could not start pulsing until up to a beat after
+                // the run began — and a run that failed in twelve seconds never pulsed at all,
+                // which is exactly what the owner reported on 2026-08-14. `LiveRunActivity` is
+                // updated by the run itself, in-process, the instant it claims a worker.
+                busyWorkerIDs: snapshot.busyWorkerIDs.union(liveActivity.runs.keys),
+                restingWorkerIDs: snapshot.restingWorkerIDs,
+                // Same precedence for the per-worker pills: this process knows first.
+                runFor: { worker in
+                    if let live = liveActivity.runState(forWorker: worker) {
+                        return RunState(
+                            researchTitle: live.title, phase: live.phase,
+                            phaseName: DeviceSnapshot.phaseName(live.phase),
+                            elapsedSeconds: live.elapsedSeconds, agents: [:],
+                            startedAtMillis: live.startedAtMillis
+                        )
+                    }
+                    return snapshot.run(forWorker: worker)
+                },
+                onToggleRest: onToggleRest
+            )
 
             Text(snapshot.run == nil
                  ? "Nothing is running. Open any platform to check its session or sign in again."
@@ -676,12 +756,36 @@ struct BrowserWatchCard: View {
         .srCard()
     }
 
+    /// The platform the SELECTED worker is driving this second, or nil.
+    ///
+    /// ⚠ Reported by the run in this process, not read back from a document. `RunState.agents` is
+    /// empty on the per-worker path and the document's `currentRun*` fields describe worker 1 only,
+    /// so a glow driven off either would be blank on every other worker and stale on the first.
+    private var livePlatform: String? { liveActivity.platform(forWorker: selectedWorker) }
+
     /// The SELECTED worker's run, not the device's.
     ///
     /// ⚠ `snapshot.run` comes from the device doc's `currentRun*` fields, which only worker-1
     /// maintains. Reading it here labelled every worker with worker 1's run — so with two runs in
     /// flight the card confidently described the wrong one.
-    private var selectedRun: RunState? { snapshot.run(forWorker: selectedWorker) }
+    /// ⭐ **The live fact FIRST, the document second.** The document's `workers` map is republished
+    /// once per 20-second beat, so reading it alone means the strip lags the start of a run and
+    /// says "No runs live" for the whole gap between a run ending and the next publish — which is
+    /// what the owner saw while ChatGPT was visibly still researching. This process is the one
+    /// driving the run; asking Firestore what it is doing is a round trip for its own knowledge.
+    private var selectedRun: RunState? {
+        if let live = liveActivity.runState(forWorker: selectedWorker) {
+            return RunState(
+                researchTitle: live.title,
+                phase: live.phase,
+                phaseName: DeviceSnapshot.phaseName(live.phase),
+                elapsedSeconds: live.elapsedSeconds,
+                agents: [:],
+                startedAtMillis: live.startedAtMillis
+            )
+        }
+        return snapshot.run(forWorker: selectedWorker)
+    }
 
     /// Says "No runs live" rather than rendering nothing, so an idle device reads as idle instead of
     /// as a card that failed to load.
@@ -937,6 +1041,12 @@ struct PeopleButton: View {
 
     private var busyCount: Int { snapshot.workers.filter(\.isBusy).count }
 
+    /// How many people are named before the card starts counting instead.
+    ///
+    /// ⚠ Three, so the card cannot grow without bound on a device shared widely — this is a glance
+    /// screen, and the full list is one tap away in the sheet.
+    static let namedRows = 3
+
     var body: some View {
         Button(action: onOpen) {
             VStack(alignment: .leading, spacing: DS.S.lg) {
@@ -962,11 +1072,34 @@ struct PeopleButton: View {
                     }
                     Spacer()
                 }
-                // Named faces, so the card is not purely numeric — the point of it is the people.
+                // ⭐ **Named ROWS, not a comma-joined line.** The people are the point of this
+                // card and they were an 11pt tertiary string at the bottom of it — smaller and
+                // fainter than the numbers above them, and unreadable at a glance on a 3x screen.
+                // Rows with an avatar give each person the same presence a platform tile gets in
+                // the card above, which is what makes the page look like one design rather than
+                // two.
                 if !snapshot.users.isEmpty {
-                    Text(snapshot.users.map(\.label).joined(separator: ", "))
-                        .font(DS.F.label).foregroundStyle(DS.C.textTertiary)
-                        .lineLimit(1).truncationMode(.middle)
+                    VStack(alignment: .leading, spacing: DS.S.md) {
+                        ForEach(snapshot.users.prefix(Self.namedRows)) { user in
+                            HStack(spacing: DS.S.lg) {
+                                PersonAvatar(user: user, size: 28)
+                                Text(user.label)
+                                    .font(DS.F.body)
+                                    .foregroundStyle(DS.C.textPrimary)
+                                    .lineLimit(1)
+                                    .truncationMode(user.isResolved ? .tail : .middle)
+                                Spacer(minLength: 0)
+                            }
+                        }
+                        // ⚠ Counted rather than truncated into the last row. "+3 more" is a fact;
+                        // a name cut off mid-word is a rendering accident that looks like one.
+                        if snapshot.users.count > Self.namedRows {
+                            Text("+\(snapshot.users.count - Self.namedRows) more")
+                                .font(DS.F.label)
+                                .foregroundStyle(DS.C.textTertiary)
+                                .padding(.leading, 28 + DS.S.lg)
+                        }
+                    }
                 }
             }
             .srCard()

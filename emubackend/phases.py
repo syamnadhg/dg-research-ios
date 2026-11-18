@@ -28,8 +28,23 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from emubackend import harvest, intents
+from emubackend import harvest, intents, prompts, report_extract
 from emubackend.selectors import ManifestError, SelectorEntry, SelectorManifest
+
+#: A brief shorter than this is not a brief.
+#:
+#: Well under P2's 2000-char report floor, because a brief legitimately is much shorter than a
+#: report — but not zero, and not a refusal. The number this guards against is the one measured on
+#: the live page: a 15-character assistant turn reading ``"ChatGPT said:"``, which is what an
+#: unfinished response looks like and which would otherwise be sent to three deep-research agents.
+_BRIEF_FLOOR_CHARS = 400
+
+#: The sentinel meaning "no explicit override — use the phase's own timeout".
+#:
+#: The historical default, kept as the sentinel value so every existing caller that does not pass
+#: one now gets the PHASE-appropriate wait instead of 240 seconds for everything — which is the
+#: number that expired mid-deep-research and produced gate zero's bad read.
+_DEFAULT_RESPONSE_TIMEOUT = 240.0
 
 #: Reads the deep-research toggle's real state. Ported from the backend's ``_GEMINI_DR_STATE_JS`` and
 #: ``_cgpt_state_js`` rather than reinvented, because both carry fixes for failures already observed on
@@ -71,6 +86,7 @@ _TOGGLE_STATE_JS = """((name) => {
     // guard that can never say "off" is only half a guard.
     const placeholderChat = placeholder.includes('ask gemini') || placeholder.includes('ask chatgpt')
         || placeholder.includes('chat with') || placeholder.includes('write a message')
+        || placeholder.includes('write your prompt')
         || placeholder.includes('message ');
 
     // Scoped to the form: an unscoped text search matches tooltips and help copy, which the backend
@@ -215,7 +231,99 @@ RECOVERY_LABELS = ("retry", "try again", "regenerate", "reload")
 #:
 #: Measured: six minutes of `'ChatGPT said: '` and nothing else. Stripped before the emptiness test,
 #: because a naive `len(text) > 0` reads that as an answer — which is the whole trap.
+#: The backend's literal modal sweep, ported verbatim (`BE research.py:33598-33599`).
+#:
+#: ⭐ **Deliberately small.** The backend has NO cookie-banner, consent, onboarding, "Not now" or
+#: "Try Pro" dismissal either — it explicitly tells its vision agent that a cookie banner is *not* a
+#: login wall. So the missing general dismisser is a far smaller gap than a repo-wide grep for
+#: `modal|dialog|overlay|consent` suggests, and building a general one would be inventing behaviour
+#: the reference implementation deliberately does not have.
+SWEEP_LABELS = ("okay", "got it", "dismiss")
+
+#: ...plus the one attribute selector the backend sweeps alongside those labels.
+SWEEP_CSS = '[aria-label="Close"]'
+
+#: The gates that actually matter, because they BLOCK a phase rather than merely cover it.
+#:
+#: ⚠ These are not modals to be swept away — they are controls the run must PRESS to proceed, and
+#: pressing the wrong one skips the research instead of starting it. Gemini shows "Start research"
+#: after accepting a deep-research prompt and does nothing until it is pressed; Claude offers "Skip"
+#: on its own setup step. Sweeping them with the generic dismisser would be the worst outcome: the
+#: phase reports success and no research ever starts.
+PLATFORM_GATES = {
+    "gemini": "Start research",
+    "claude": "Skip",
+}
+
+
+def sweep_targets(labels: list[str], platform: str) -> list[str]:
+    """Which visible control labels the sweep should press, in order.
+
+    ⚠ **A platform GATE is never swept.** It is returned as a gate for the caller to press
+    deliberately, not lumped in with dismissals — see `PLATFORM_GATES`.
+
+    ⚠ **The gate exclusion below is currently REDUNDANT, and is kept anyway — say so rather than
+    pretend it is live.** No gate label appears in `SWEEP_LABELS` today, so nothing can reach it and
+    no mutation of it can be caught. It is a second lock on the door because the first one is easy
+    to open by accident: "Skip" looks exactly like a dismissal, and adding it to the sweep list is a
+    plausible future edit that would make a phase report success while no research ever started.
+    The invariant that keeps this honest — no gate may appear in the sweep list — IS tested.
+    """
+    gate = PLATFORM_GATES.get(platform, "").lower()
+    out = []
+    for label in labels:
+        low = " ".join((label or "").split()).lower()
+        if not low or low == gate:
+            continue
+        if low in SWEEP_LABELS:
+            out.append(label)
+    return out
+
+
+def gate_for(platform: str, labels: list[str]) -> str | None:
+    """The blocking control this platform is showing, if it is on screen."""
+    gate = PLATFORM_GATES.get(platform)
+    if not gate:
+        return None
+    for label in labels:
+        if " ".join((label or "").split()).lower() == gate.lower():
+            return label
+    return None
+
+
 SPEAKER_PREFIXES = ("chatgpt said:", "claude said:", "gemini said:", "you said:")
+
+#: Deep research often replies with a CLARIFYING QUESTION before starting, and today that answer
+#: passes every check: it is content, it is stable, and generation has stopped. The harvest then
+#: finds no report and the run reports a SELECTOR problem — when the platform simply asked something
+#: and is waiting.
+#:
+#: ⚠ Matched near the END of the text, not anywhere in it. A finished report legitimately contains
+#: question marks and the phrase "before I begin" inside its own prose; a clarifying question is
+#: the LAST thing on screen. Matching anywhere would classify a real report as a question and
+#: discard it — the expensive direction, since the report cost a deep-research unit.
+CLARIFYING_MARKERS = (
+    "before i start",
+    "before i begin",
+    "could you clarify",
+    "can you clarify",
+    "a few questions",
+    "some questions",
+    "to make sure i",
+    "which of these",
+    "would you like me to",
+    "should i focus",
+    "let me know",
+)
+
+#: How much of the tail is examined for those markers.
+CLARIFYING_TAIL_CHARS = 400
+
+#: A clarifying question is SHORT. A 60,000-character report ending with "let me know if you'd like
+#: more detail" is a report, and treating it as a question throws away the run's product.
+CLARIFYING_MAX_CHARS = 2500
+
+
 
 
 def classify_response(text: str) -> dict:
@@ -244,6 +352,19 @@ def classify_response(text: str) -> dict:
             stripped = stripped[len(prefix):].strip()
     if not stripped:
         return {"state": "empty", "text": raw[:200]}
+
+    # ⭐ The FOURTH state. Checked before `content` because a clarifying question IS content by every
+    # structural measure — that is precisely why it slipped through and got reported as read drift.
+    if len(stripped) <= CLARIFYING_MAX_CHARS:
+        tail = stripped[-CLARIFYING_TAIL_CHARS:]
+        for marker in CLARIFYING_MARKERS:
+            if marker in tail:
+                return {
+                    "state": "question",
+                    "matched": marker,
+                    "chars": len(stripped),
+                    "text": raw[:200],
+                }
     return {"state": "content", "chars": len(stripped), "text": raw[:200]}
 
 
@@ -266,8 +387,15 @@ async def resolve(page: Any, entry: SelectorEntry) -> Any | None:
         # `[role=menuitem]` inside the composer's plus menu, carrying no testid and no id — text is the
         # ONLY handle it has. With the old `button, a, [role=button]` list it could never be found, so
         # the one platform whose control had just been located would still have reported "no selector".
+        #
+        # ⛔ `menuitemcheckbox` is here because Claude's Research control IS one — measured in-app
+        # 2026-08-08, `role=menuitemcheckbox aria-checked=false`, with a generated `id` that must
+        # never be used as a handle. Omitting the role made the entry unresolvable no matter how
+        # correct the manifest was, and the failure presents as "this platform has no Research
+        # mode" — which is exactly the wrong conclusion this project already drew once.
         candidates = await page.query_selector_all(
-            "button, a, [role=button], [role=menuitem], [role=menuitemradio], [role=option]"
+            "button, a, [role=button], [role=menuitem], [role=menuitemradio], "
+            "[role=menuitemcheckbox], [role=option]"
         )
         for handle in candidates:
             try:
@@ -289,6 +417,16 @@ class PhaseDeps:
     #: platform key -> a PageShim-shaped object.
     pages: dict[str, Any] = field(default_factory=dict)
     topic: str = ""
+    #: Optional owner feedback, appended to P1's wrapper prompt.
+    feedback: str = ""
+    #: ⭐ P1's product and P2's input. Empty until P1 has captured it — and P2 refuses to run
+    #: without it rather than falling back to the topic, because that fallback is invisible: three
+    #: deep-research units get spent and the run reports success on the wrong prompt.
+    brief: str = ""
+    #: platform -> its P2 markdown report. Populated one platform at a time as P2 completes each.
+    reports: dict[str, str] = field(default_factory=dict)
+    #: The three reports merged — the fifth document, and the one P3 uploads.
+    consolidated: str = ""
     #: Recorded per platform so a caller can see what actually happened rather than inferring it.
     log: list[str] = field(default_factory=list)
 
@@ -738,12 +876,223 @@ class PlatformDriver:
             )
         return None
 
+    async def start_research_if_offered(self, timeout: float = 90.0, poll: float = 2.0) -> bool:
+        """Press the plan-confirmation control, if this platform has one.
+
+        ⛔ **Measured on a live Gemini deep-research run.** Sending does not start the research: the
+        platform replies with a ~1,200-character research PLAN and stops. Generation ends, the text
+        is stable and entirely plausible, so the wait completes and the extractor harvests the plan
+        as the report — a document about what it was going to research, shipped as research.
+
+        ⚠ **Polled, not read once.** The plan takes tens of seconds to arrive, so a single look right
+        after send finds nothing and concludes the platform has no such step — which is precisely
+        how this went unnoticed until a run was watched end to end.
+
+        ⚠ **Absence is not a failure.** ChatGPT and Claude have no plan stage, so a platform with no
+        captured entry returns False immediately. Returning False also covers "the control never
+        appeared", and the caller treats both as "carry on" — the wait and the report judge are what
+        catch a genuinely stalled run.
+        """
+        # ⚠ Membership first. `entry()` RAISES for an unknown key, and `start_research` is not even
+        # an allowed key on the platforms that have no plan stage — so asking directly turns "this
+        # platform starts on send" into a manifest error mid-run.
+        if "start_research" not in self.deps.manifest.platforms.get(self.platform, {}):
+            return False
+        entry = self.deps.manifest.entry(self.platform, "start_research")
+        if not entry.resolvable:
+            return False
+        deadline = time.monotonic() + timeout
+        while True:
+            handle = await resolve(self.page, entry)
+            if handle is not None:
+                # ⚠ This NAVIGATES — the URL gains a conversation id and the inspector connection
+                # drops. That is the success path, not an error, so the click is not treated as
+                # fatal if the transport dies underneath it.
+                try:
+                    await handle.click()
+                except Exception:
+                    pass
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(poll)
+
+    async def extract_response(self) -> str:
+        """The assistant's answer as text — P1's brief.
+
+        ⚠ **This is the P1 path only, and it is a different mechanism from P2's.** With deep
+        research OFF the answer is an ordinary chat turn in the main document, so reading the
+        response container is right. With it ON the answer is not in the main document at all
+        (gate zero: 499 chars of chrome, the report in a cross-origin frame) and P2 uses the
+        conversation fetch instead. One `extract` for both would work in testing — where the
+        composer is driven with DR off — and return a speaker prefix in production.
+        """
+        entry = self.deps.manifest.entry(self.platform, "response_container")
+        if entry is None:
+            raise ManifestError(
+                f"{self.platform}: no response_container captured, so there is nothing to read "
+                f"the brief out of."
+            )
+        for css in entry.css:
+            handles = await self.page.query_selector_all(css)
+            if not handles:
+                continue
+            # The LAST turn: the container matches every assistant turn in the conversation, and on
+            # a re-run the earlier ones are still there.
+            text = await handles[-1].inner_text()
+            if text and text.strip():
+                return text.strip()
+        return ""
+
+    async def extract_report(self, poll: float = 1.0, timeout: float = 45.0) -> str:
+        """P2's product: the full markdown report.
+
+        ⭐ **ChatGPT takes a different route from the other two, and that is measured, not
+        stylistic.** Gate zero established that with Deep Research ON the report is not in the main
+        document at all — 499 characters of chrome, the report inside a cross-origin frame whose
+        targets accept no script. It IS reachable as markdown over a same-origin fetch, so ChatGPT
+        goes that way and needs no HTML conversion.
+
+        ⚠ **Claude and Gemini have NOT been measured**, so they keep the DOM read. That is an
+        assumption, and it is written down as one rather than hidden: if their reports also live
+        somewhere the response container cannot see, this returns something short and the floor
+        rejects it — which is a visible failure rather than a plausible wrong report.
+        """
+        if self.platform == "chatgpt":
+            await self.page.evaluate(report_extract.START_JS)
+            waited = 0.0
+            state: dict = {}
+            while waited < timeout:
+                await asyncio.sleep(poll)
+                waited += poll
+                raw = await self.page.evaluate(report_extract.POLL_JS)
+                # ⚠ Defensive on purpose: a page that answers with something other than the stash
+                # object — an older injection, a navigation mid-poll — must not crash the run with
+                # an AttributeError three frames down. Anything unreadable is "keep waiting", never
+                # "done".
+                state = raw if isinstance(raw, dict) else {}
+                if state.get("state") not in ("pending", "missing", None):
+                    break
+            if state.get("state") != "ok":
+                self.deps.log.append(
+                    f"p2:{self.platform}:fetch_failed:"
+                    f"{state.get('state')}:{state.get('error') or state.get('reason')}"
+                )
+                return ""
+            chars = int(state.get("chars") or 0)
+            out = []
+            offset = 0
+            while offset < chars:
+                chunk = await self.page.evaluate(report_extract.slice_js(offset, 40_000))
+                if not chunk:
+                    break
+                out.append(chunk)
+                offset += len(chunk)
+            text = "".join(out)
+            # A truncated report is still markdown and still clears the floor — it would ship as
+            # research with its conclusions missing.
+            if len(text) != chars:
+                self.deps.log.append(
+                    f"p2:{self.platform}:short_read:{len(text)}/{chars}"
+                )
+                return ""
+            return text
+        return await self.extract_response()
+
+    async def disable_deep_research(self) -> intents.IntentOutcome | None:
+        """Ensure deep research is OFF, for P1. **Idempotent, and NOT a second tap.**
+
+        ⛔ **Tapping the toggle again ADDS A SECOND TOOL.** The backend's own hotspot hint
+        (`1a-disable-dr`, `BE research.py:11396-11399`) says it in as many words: *"REMOVE it by
+        pressing Backspace in the empty message box; do NOT click the 'Deep research' tool (clicking
+        adds a second one)"*. A mirror-of-enable implementation leaves P1 in a worse state than it
+        started, and every symptom of that is downstream and confusing.
+
+        ⚠ **This is a live bug, not a gap.** Deep-research state persists across sessions — that is
+        the premise of persistent login — so run 2's P1 begins with DR still on from run 1's P2, and
+        a P1 that runs in deep-research mode returns a 30-minute report where a brief was wanted.
+        The run does not fail; it produces the wrong artefact and continues.
+
+        Checked before acting with the same predicate that judges the result, so "already off"
+        cannot drift from "off now".
+        """
+        for key in ("deep_research_toggle", "research_toggle"):
+            if key not in self.deps.manifest.platforms.get(self.platform, {}):
+                continue
+            # ⚠ Reuses the SHARED state reader — the one that already knows a research control
+            # carries no reliable `aria-pressed`, and that a positive off-signal is not `not on`.
+            # A second, simpler reader written here would be a fourth opinion on a question three
+            # platforms already answer differently, and it shadowed the real one when I tried.
+            state = await self._toggle_state(key)
+            if state.get("off"):
+                return intents.IntentOutcome(
+                    intent_id=f"{self.platform}.{key}.disable",
+                    predicate_passed=True,
+                    reason="already off — not touched, because tapping would add a second tool",
+                )
+            if not state.get("on"):
+                # Neither a positive on nor a positive off. **Refuse.** Proceeding on "cannot tell"
+                # is how P1 runs in deep-research mode and returns a 30-minute report where a brief
+                # was wanted — the run does not fail, it produces the wrong artefact.
+                return intents.IntentOutcome(
+                    intent_id=f"{self.platform}.{key}.disable",
+                    predicate_passed=False,
+                    reason=(
+                        "the platform reports neither deep-research ON nor a positive OFF, so this "
+                        "cannot tell whether P1 would run in the wrong mode "
+                        f"(placeholder={state.get('placeholder')!r})"
+                    ),
+                )
+            # Backspace into the EMPTY composer. Empty matters: with text present the keystroke
+            # deletes a character of the prompt instead of the pill, which looks like nothing
+            # happening and quietly corrupts what gets sent.
+            await self.focus_composer()
+            for _ in range(3):
+                await self.page.key("Backspace")
+                state = await self._toggle_state(key)
+                if state.get("off"):
+                    return intents.IntentOutcome(
+                        intent_id=f"{self.platform}.{key}.disable",
+                        predicate_passed=True,
+                        reason="pill removed with Backspace",
+                    )
+            return intents.IntentOutcome(
+                intent_id=f"{self.platform}.{key}.disable",
+                predicate_passed=False,
+                reason=(
+                    "the Deep research pill survived three Backspaces. NOT falling back to a tap: "
+                    "a tap adds a second tool rather than removing this one."
+                ),
+            )
+        return None
+
     async def is_generating(self) -> bool:
-        """Is the platform still producing the answer? Its own controls decide, not our text reading."""
+        """Is the platform still producing the answer? Its own controls decide, not our text reading.
+
+        ⛔ **VISIBILITY, not mere presence — measured on a COMPLETED Gemini deep-research run.** The
+        page said "I've completed your research" and the finished report was in the DOM, while a
+        `Stop response` button was *still present* at **height 0**. A selector-only check therefore
+        reported "still generating" forever: the wait can never complete, the run burns its entire
+        timeout on a report that is already sitting there, and it then reports a timeout — which
+        invites someone to raise the budget for a condition no amount of waiting fixes.
+
+        ⚠ This is the in-flight probe, so its failure direction matters: a false POSITIVE stalls a
+        healthy run. A retired control left in the DOM is common enough that presence alone cannot
+        mean in-flight.
+        """
         if self.page is None:
             return False
         css = _GENERATING_SELECTORS.get(self.platform, _GENERATING_FALLBACK)
-        return bool(await self.page.evaluate(f"!!document.querySelector({json.dumps(css)})"))
+        # Rendered-size test rather than `offsetParent`: a `position: fixed` control has a null
+        # offsetParent while being perfectly visible, and stop buttons are routinely fixed.
+        js = (
+            "(() => [...document.querySelectorAll(%s)].some(e => {"
+            "  const r = e.getBoundingClientRect();"
+            "  const s = getComputedStyle(e);"
+            "  return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';"
+            "}))()" % json.dumps(css)
+        )
+        return bool(await self.page.evaluate(js))
 
     async def await_response(
         self,
@@ -824,7 +1173,18 @@ class PlatformDriver:
                     last_text, stable_since = text, time.monotonic()
                 elif (
                     stable_since is not None
-                    and text.strip()  # ⚠ the empty guard — see the docstring
+                    # ⛔ The empty guard, and it asks the CLASSIFIER rather than `text.strip()`.
+                    # A bare strip only catches whitespace, but the shape measured on the live page
+                    # was a speaker prefix — "ChatGPT said:" — which is non-empty text that stays
+                    # perfectly stable forever. It sailed through stability, was accepted as the
+                    # answer, and became the brief three deep-research agents were given.
+                    #
+                    # ⚠ ONLY `empty` is refused here. `question` and `error` are deliberately allowed
+                    # to complete the wait, because each has a caller downstream that raises a
+                    # SPECIFIC, actionable diagnosis — a clarifying question waiting for an answer,
+                    # or a platform error with its recovery control. Refusing them here would replace
+                    # both with a generic timeout and lose the reason.
+                    and classify_response(text)["state"] != "empty"
                     and time.monotonic() - stable_since >= stable_for
                 ):
                     return {
@@ -844,7 +1204,13 @@ class PlatformDriver:
                             if generating
                             else " — the container is present but EMPTY, which is the shape of a"
                             " platform-side stall rather than a slow answer"
-                            if last_text is not None and not last_text.strip()
+                            # ⚠ Classified, not stripped, for the same reason the completion gate
+                            # is: the measured stall is a SPEAKER PREFIX, which is non-empty text.
+                            # A strip-based test here blames the clock ("still not complete after
+                            # Ns"), which invites a longer timeout for a condition that no amount of
+                            # waiting resolves.
+                            if last_text is not None
+                            and classify_response(last_text)["state"] == "empty"
                             else ""
                         )
                     ),
@@ -867,6 +1233,17 @@ class PlatformDriver:
         # verdict has to say so. `recovery_offered` travels with it because the platform gave a Retry
         # control, and "it failed, and there was a Retry" is actionable where "it failed" is not.
         health = await self.response_health()
+        # ⭐ A clarifying question is not a harvest failure, and saying so is the whole point.
+        #
+        # It passes the wait — it is content, it is stable, generation has stopped — and then finds
+        # no report. Reported as read drift, that sends the next session to repair selectors which
+        # are working perfectly, while the platform sits waiting for an answer nobody gave it.
+        if health["state"] == "question":
+            raise PlatformStateError(
+                f"{self.platform}: the platform asked a CLARIFYING QUESTION and is waiting for an "
+                f"answer — it did not fail (matched {health.get('matched')!r}). Text: "
+                f"{health.get('text')!r}"
+            )
         if health["state"] == "error":
             raise PlatformStateError(
                 f"{self.platform}: the platform reported an error instead of a response "
@@ -877,6 +1254,17 @@ class PlatformDriver:
                     else ", no recovery control offered"
                 )
                 + f"). Text: {health['text']!r}"
+            )
+        # ⛔ An EMPTY turn is not something to harvest sources out of, and it is not read drift.
+        #
+        # The measured shape is a container holding only a speaker prefix. Harvesting it finds zero
+        # sources, which reports as a selector problem and sends the next session to repair selectors
+        # that are working perfectly — the same misdiagnosis the question and error branches above
+        # exist to prevent. The page produced nothing; say that.
+        if health["state"] == "empty":
+            raise PlatformStateError(
+                f"{self.platform}: the response container is EMPTY — there is nothing to harvest. "
+                f"This is a platform-side stall, not a selector failure. Text: {health.get('text')!r}"
             )
         entry = self.deps.manifest.require(self.platform, "sources")
 
@@ -907,7 +1295,7 @@ def build_phase_bodies(
     deps: PhaseDeps,
     platforms: tuple[str, ...],
     *,
-    response_timeout: float = 240.0,
+    response_timeout: float = _DEFAULT_RESPONSE_TIMEOUT,
 ):
     """Return P0–P3 bodies bound to *deps*, suitable for :func:`emubackend.pipeline.run_pipeline`.
 
@@ -918,6 +1306,18 @@ def build_phase_bodies(
     """
 
     drivers = {p: PlatformDriver(p, deps) for p in platforms}
+
+    def _phase_timeout(phase: int) -> float:
+        """The wait for *phase*, honouring an explicit override.
+
+        ⚠ Hardcoding `prompts.response_timeout(phase)` here — which the first version of the
+        phase-keyed timeouts did — silently disables the injected value that exists so a mock gate
+        does not wait forty minutes to fail. It does not break a run; it makes every failing test
+        hang, which is worse than a wrong number because nobody reads it as a defect.
+        """
+        if response_timeout != _DEFAULT_RESPONSE_TIMEOUT:
+            return response_timeout
+        return prompts.response_timeout(phase)
 
     async def p0_verify(_ctx) -> None:
         """P0 — confirm every platform is logged in before committing to a run.
@@ -936,17 +1336,48 @@ def build_phase_bodies(
             deps.log.append(f"p0:{name}:logged_in")
 
     async def p1_brief(_ctx) -> None:
-        """P1 — put the topic into one platform and capture the brief."""
+        """P1 — produce the BRIEF. Deep Research must be OFF.
+
+        ⚠ Three things this used to get wrong, each of which produced a plausible wrong artefact
+        rather than a failure:
+
+        1. It typed the bare topic. The backend sends a **wrapper** asking for a research brief; the
+           bare topic gets a chat answer, and P2 is then fed a conversation instead of a brief.
+        2. It never disabled deep research, which persists across runs — so run 2's P1 produced a
+           30-minute deep-research report where a brief was wanted.
+        3. It captured nothing. The docstring said "capture the brief"; the body had no read and no
+           return value, so P1's product did not exist.
+        """
         driver = drivers[platforms[0]]
+        # OFF before anything is typed: the disable path needs an EMPTY composer.
+        outcome = await driver.disable_deep_research()
+        if outcome is not None and not outcome.predicate_passed:
+            raise ManifestError(
+                f"{driver.platform}: deep research could not be turned off for P1 "
+                f"({outcome.reason}). Continuing would spend a deep-research unit producing a "
+                f"report where a brief was wanted."
+            )
         if not await driver.await_composer_ready():
             raise ManifestError(
                 f"{driver.platform}: the composer never became ready, so there is nothing to type "
                 f"into. A page that renders is not a page that is interactable."
             )
         await driver.focus_composer()
-        await driver.type_brief(deps.topic)
+        await driver.type_brief(prompts.brief_prompt(deps.topic, deps.feedback))
         await driver.send()
         deps.log.append(f"p1:{driver.platform}:brief_sent")
+
+        # ⭐ And CAPTURE it — this is P1's product and P2's only input.
+        await driver.await_response(timeout=_phase_timeout(1))
+        brief = await driver.extract_response()
+        if not brief or len(brief) < _BRIEF_FLOOR_CHARS:
+            raise ManifestError(
+                f"{driver.platform}: P1 returned {len(brief or '')} chars, under the "
+                f"{_BRIEF_FLOOR_CHARS}-char floor. Feeding that to three deep-research agents "
+                f"would spend three units of a monthly cap on a stub."
+            )
+        deps.brief = brief
+        deps.log.append(f"p1:{driver.platform}:brief_captured:{len(brief)}")
 
     async def p2_deep_research(_ctx) -> None:
         """P2 — enable deep research per platform and dispatch.
@@ -955,17 +1386,90 @@ def build_phase_bodies(
         On ChatGPT that step navigates and the composer re-mounts, so the pre-navigation composer is a
         dead handle — typing into it succeeds silently and sends nothing.
         """
-        for name, driver in drivers.items():
-            await driver.enable_deep_research()
+        # ⛔ P2's input is the BRIEF, not the topic. Re-typing the topic makes P2 three independent
+        # answers to the same question rather than three deep-research runs against one brief — the
+        # product changes completely and nothing fails.
+        if not deps.brief:
+            raise ManifestError(
+                "P2 has no brief to send. P1's product is P2's input; without it this would "
+                "re-ask the topic and spend three deep-research units on the wrong prompt."
+            )
+        # ⚠ **SEQUENTIAL, one platform carried to completion before the next is started** (B1).
+        #
+        # Not a simplification: MobileSafari has one foreground tab and HID taps reach only it, so
+        # `open_isolated_tab` / `switch_to` raise `BackendUnsupported` by design. Dispatching all
+        # three and then collecting — which is what this used to do — leaves two runs generating on
+        # pages nothing is watching, and on a platform whose report is only reachable from the page
+        # that holds the conversation.
+        #
+        # The cost is real and is the accepted trade: wall-clock is the SUM of three deep-research
+        # runs rather than the slowest of the three.
+        for name in prompts.P2_PLATFORMS:
+            driver = drivers.get(name)
+            if driver is None:
+                continue
+            if prompts.deep_research_available(name):
+                await driver.enable_deep_research()
+            else:
+                # Measured absent on this surface. Attempting it anyway would tap whatever the
+                # opener's menu happens to contain — files, connectors, plugins — and the outcome
+                # predicate would fail for a reason that reads as a broken selector.
+                deps.log.append(f"p2:{name}:standard-mode:no-deep-research-on-this-surface")
             if not await driver.await_composer_ready():
                 raise ManifestError(
                     f"{name}: the composer did not come back after enabling deep research. That step "
                     f"navigates, so readiness has to be re-established rather than assumed."
                 )
             await driver.focus_composer()
-            await driver.type_brief(deps.topic)
+            await driver.type_brief(deps.brief)
             await driver.send()
             deps.log.append(f"p2:{name}:dispatched")
+
+            # ⛔ THE STEP NOBODY KNEW WAS THERE, measured on a live run 2026-08-09.
+            #
+            # Gemini's Deep Research does not start on send. It answers with a research PLAN of
+            # roughly 1,200 characters and STOPS — generation ends, the text is stable, and it reads
+            # like a perfectly good response. The wait therefore completes, the extractor harvests
+            # the plan, and the run ships a document describing what it was *going to* research.
+            # Nothing fails, nothing is empty, and the report is plausible: the exact silent shape
+            # this pipeline keeps being bitten by.
+            started = await driver.start_research_if_offered()
+            if started:
+                deps.log.append(f"p2:{name}:plan_confirmed")
+
+            # Carried to completion HERE, before the next platform is touched.
+            #
+            # ⚠ The wait is LOGGED, and that is not decoration. Without a record of it the only
+            # evidence of sequencing is "dispatch, report, dispatch, report" — which a run that
+            # skipped the wait entirely also produces whenever extraction happens to succeed
+            # immediately. A mutation deleting this wait went uncaught for exactly that reason.
+            waited = await driver.await_response(timeout=_phase_timeout(2))
+            deps.log.append(f"p2:{name}:waited:{(waited or {}).get('reason', 'done')}")
+            report = await driver.extract_report()
+            verdict = report_extract.judge_report(report)
+            if not verdict.ok:
+                # Recorded and skipped rather than raised: two good reports and one failure is a
+                # degraded run worth finishing, and the backend's own consolidated builder simply
+                # omits an agent with no text. Raising would throw away the units already spent.
+                deps.log.append(f"p2:{name}:rejected:{verdict.reason}")
+                continue
+            # ⚠ Labelled at the point it is STORED, so every downstream consumer — the document
+            # writer, the consolidated report, the NotebookLM upload — carries the caveat. Applying
+            # it only at render time would leave the uploaded .md unlabelled, and that file outlives
+            # this process.
+            deps.reports[name] = prompts.annotate_report(name, report)
+            deps.log.append(
+                f"p2:{name}:report:{verdict.chars}"
+                + ("" if prompts.deep_research_available(name) else ":standard-mode")
+            )
+
+        if not deps.reports:
+            raise ManifestError(
+                "P2 produced no usable report on any platform. Continuing would hand P3 an empty "
+                "consolidated document and produce a podcast about nothing."
+            )
+        deps.consolidated = prompts.consolidated_report(deps.topic, deps.reports)
+        deps.log.append(f"p2:consolidated:{len(deps.consolidated)}")
 
     async def p3_harvest(_ctx) -> None:
         """P3 — wait for the answer, then harvest, and judge the harvest rather than collect it.

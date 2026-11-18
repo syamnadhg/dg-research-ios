@@ -134,7 +134,11 @@ def test_a_non_queued_start_wipes_the_decision_slot_in_the_same_patch():
     pipeline.start_patch(ctx, queued=False)
     rec = capture.records[0]
     assert rec.op == "patch"
-    assert set(rec.fields) == {"status", "backendRunId"}
+    # ⚠ `deviceId` joined this set deliberately (item 18): the rules judge the resource being
+    # WRITTEN, so a patch without it 403s even though the stored document already has one. The
+    # exact-set assertion is kept — it is what would catch an unintended field joining the patch —
+    # but the expected set is now the shape the rules actually accept.
+    assert set(rec.fields) == {"status", "backendRunId", "deviceId"}
     assert rec.delete_paths == ["pendingDecision"], "same patch, as a field delete"
 
 
@@ -452,3 +456,93 @@ def test_the_fixture_is_stable_against_the_volatile_fields():
     assert ev.fields["timestamp"] == "<int>"
     assert ev.fields["expireAt"] == "<iso8601>"
     assert ev.fields["deviceId"] == "{deviceId}", "identifiers are tokenised, not markered"
+
+
+# --------------------------------------------------------------------------------------------
+# Item 18 — `deviceId` on the RESEARCH PATCH, which the rules require and this half was missing.
+#
+# ⛔ The rule is `request.resource.data.deviceId == request.auth.token.deviceId`, evaluated on the
+# resource being WRITTEN. A patch that omits the field 403s even when the stored document already
+# carries it from an earlier write — so every status write on this half failed.
+#
+# ⚠ THE TRAP, and the reason the recipe calls this row "a correction of a correction": the
+# `deviceId` on the pipeline EVENT is a different write and BOTH halves have always had it. Seeing
+# it there and concluding "the patch is covered" is exactly how the app half got fixed while this
+# one stayed broken.
+
+
+def _item18_recorder():
+    class _Client:
+        def __init__(self):
+            self.patches = []
+
+        def patch(self, path, fields, delete_paths=None):
+            self.patches.append((path, dict(fields)))
+
+        def create_with_auto_id(self, *a, **k):
+            return "id"
+
+    return _Client()
+
+
+def _item18_ctx(client):
+    from emubackend import pipeline as pl
+
+    return pl.RunContext(
+        uid="u1", research_id="r1", device_id="dev-abc", run_id="run-1", client=client
+    )
+
+
+def test_the_START_patch_carries_the_deviceId_the_rules_require():
+    from emubackend import pipeline as pl
+
+    client = _item18_recorder()
+    fields = pl.start_patch(_item18_ctx(client), queued=False)
+
+    assert fields["deviceId"] == "dev-abc", (
+        "without this the very first status write 403s and the run dies before P0"
+    )
+    # ⚠ Asserted on what was SENT, not only on the returned dict — a return value the client never
+    # sees would satisfy a presence check while the wire stayed wrong.
+    assert client.patches[-1][1]["deviceId"] == "dev-abc"
+
+
+def test_the_QUEUED_start_patch_carries_it_too():
+    from emubackend import pipeline as pl
+
+    client = _item18_recorder()
+    fields = pl.start_patch(_item18_ctx(client), queued=True)
+    assert fields["status"] == "queued"
+    assert fields["deviceId"] == "dev-abc"
+
+
+def test_the_deviceId_is_the_CONTEXTS_and_not_a_constant():
+    from emubackend import pipeline as pl
+
+    client = _item18_recorder()
+    ctx = pl.RunContext(
+        uid="u", research_id="r", device_id="a-different-device", run_id="x", client=client
+    )
+    assert pl.start_patch(ctx, queued=False)["deviceId"] == "a-different-device"
+
+
+def test_the_TERMINAL_patch_carries_the_deviceId_too():
+    """⛔ Fixing only the start patch produces a run that begins correctly and 403s at the finish.
+
+    The document then sits on `ongoing` forever while the run itself succeeded — the web app shows a
+    run that never ends, and nothing in the logs says why. Asserted on the terminal write's actual
+    fields, not on the run's return value: the return value is right in both worlds.
+    """
+    ctx, capture = _ctx()
+    phases, _ = _phases()
+    result = asyncio.run(pipeline.run_pipeline(ctx, phases))
+    assert result.status == "complete"
+
+    terminal = [
+        r for r in capture.records
+        if r.op == "patch" and r.fields.get("status") in ("complete", "stopped")
+    ]
+    assert terminal, "no terminal status patch was written at all"
+    assert terminal[-1].fields.get("deviceId"), (
+        "the finish patch omits deviceId, so it 403s and the run never leaves `ongoing`"
+    )

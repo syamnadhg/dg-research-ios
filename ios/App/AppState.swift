@@ -29,6 +29,15 @@ final class AppModel: ObservableObject {
     /// diagnostics bundle. Nil when there is nothing more than the toast already said.
     @Published var opDetail: OpDetail? = nil
 
+    /// Bumped whenever the run in this process moves to another platform.
+    ///
+    /// ⚠ A counter rather than the value itself: `LiveRunActivity` is a plain class in the core
+    /// (which does not import Combine, on purpose), so SwiftUI cannot observe it directly. The tick
+    /// is what makes the glow MOVE — without a republish the card would render the first platform
+    /// the run touched and then never change, which is exactly the stale-glow failure the activity
+    /// store is careful to avoid on its own side.
+    @Published var liveTick: Int = 0
+
     struct OpDetail: Identifiable {
         let title: String
         let body: String
@@ -42,7 +51,18 @@ final class AppModel: ObservableObject {
 
     init(backend: AppBackend) {
         self.backend = backend
+        LiveRunActivity.shared.onChange = { [weak self] in
+            Task { @MainActor in self?.liveTick &+= 1 }
+        }
         if let device = backend as? DeviceBackend {
+            // ⭐ **The FE→device direction, which did not exist.** The web app parks a worker by
+            // writing `restingWorkerIds` straight onto `devices/{id}` — no command addressed to this
+            // device — so the phone can only learn by looking again. `refresh()` runs on explicit
+            // actions only, so a worker parked from the web app stayed awake here until the owner
+            // happened to tap something. This is the beat handing the UI what it just read.
+            device.onSnapshot = { [weak self] snapshot in
+                Task { @MainActor in self?.apply(snapshot) }
+            }
             pairing = PairingController(
                 backend: device,
                 platforms: [
@@ -122,6 +142,30 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Stop the run a worker is executing, from the People popup.
+    ///
+    /// ⭐ **Possible now, and it was not before.** The popup deliberately shipped without Stop
+    /// because stopping used to mean writing into `devices/{id}/queue`, whose `allow create`
+    /// requires ownerUid or sharedWith — the synthetic device uid is neither, so the chip would
+    /// have 403'd every time. This route writes nothing: the run is executing *inside this
+    /// process*, so stopping it is a local signal the pipeline reads at its next check.
+    ///
+    /// ⚠ Silent when the worker has no run this process is driving. A busy pill can also come from
+    /// the device document — describing a run some earlier process started — and pretending to stop
+    /// that would be a button that reports success and does nothing.
+    func stopRun(onWorker worker: Int) {
+        guard let facts = LiveRunActivity.shared.run(forWorker: worker),
+              !facts.researchID.isEmpty else {
+            toast = "Worker \(worker) has no run this device is driving."
+            return
+        }
+        Task {
+            await (backend as? DeviceBackend)?.stopActiveRun(researchID: facts.researchID)
+            toast = "Stopping worker \(worker) — it ends at its next checkpoint."
+            await refresh()
+        }
+    }
+
     /// Record a login observation against the worker whose jar was used, and republish.
     func reportLogin(platform: String, signedIn: Bool, worker: Int) async {
         await (backend as? DeviceBackend)?
@@ -150,8 +194,42 @@ final class AppModel: ObservableObject {
         (backend as? DeviceBackend)?.resumeIfPaired()
     }
 
+    /// The newest snapshot this screen has shown, by issue order.
+    ///
+    /// ⛔ **Completion order is not issue order.** Two things load snapshots now — the owner's own
+    /// actions and the 20-second beat — and a beat load issued a second before the owner parked a
+    /// worker can land a second after that toggle's own refresh. A bare assignment would put the
+    /// stale value back: the pill flips, then flips back, and stays wrong for a whole beat. Dropping
+    /// anything older than what is already on screen is the entire fix.
+    private var appliedSnapshotSequence: UInt64 = 0
+
     func refresh() async {
-        snapshot = await backend.loadSnapshot()
+        apply(await backend.loadSnapshot())
+    }
+
+    /// Apply a snapshot **if it is newer than what is already shown**.
+    ///
+    /// ⚠ The rule itself lives in `SnapshotOrdering` so it can be tested — this is the one caller,
+    /// and a three-line comparison inlined here is a three-line comparison nobody can exercise.
+    func apply(_ incoming: DeviceSnapshot) {
+        guard SnapshotOrdering.shouldApply(
+            incoming: incoming.sequence, applied: appliedSnapshotSequence
+        ) else {
+            // ⚠ Say so. A silently dropped snapshot and a snapshot that never arrived look the same
+            // from the outside, and the ordering guard is new enough that "the screen ignored it"
+            // has to stay a visible possibility while the FE→device direction is being trusted.
+            NSLog("[SR] ui: DROPPED snapshot #%@ — screen already shows #%@",
+                  String(incoming.sequence), String(appliedSnapshotSequence))
+            return
+        }
+        // The screen moving is the event worth a line — this is the far end of the web app's toggle.
+        if incoming.restingWorkerIDs != snapshot.restingWorkerIDs {
+            NSLog("[SR] ui: resting pills now %@ (were %@)",
+                  String(describing: incoming.restingWorkerIDs.sorted()),
+                  String(describing: snapshot.restingWorkerIDs.sorted()))
+        }
+        appliedSnapshotSequence = incoming.sequence
+        snapshot = incoming
     }
 
     /// Route an operation, inserting the confirmation gate for anything that is not `.safe`.

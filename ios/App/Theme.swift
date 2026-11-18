@@ -63,6 +63,89 @@ final class ThemeManager: ObservableObject {
     }
 }
 
+/// How large the app draws itself.
+///
+/// ⭐ Its own manager rather than a second field on `ThemeManager`: the two are stored under
+/// different keys, and a reader that only wanted the colour scheme should not be re-rendered by a
+/// size change (or the reverse).
+final class AppSizeManager: ObservableObject {
+    enum Choice: String, CaseIterable, Identifiable {
+        case xs, s, m, l, xl
+        var id: String { rawValue }
+
+        /// Shown uppercased; stored lowercased. The stored form is the contract.
+        var label: String { rawValue.uppercased() }
+
+        /// ⚠ Deliberately gentle at the ends. A phone propped on a desk is read from further away
+        /// than a phone in the hand, so the useful range is "a bit smaller" to "noticeably bigger"
+        /// — not a range that makes the ids unreadable at one end and reflows every card at the
+        /// other. XL is +25%, which is about as far as the two-column platform grid goes before
+        /// its captions wrap.
+        var scale: CGFloat {
+            switch self {
+            case .xs: return 0.85
+            case .s: return 0.925
+            case .m: return 1
+            case .l: return 1.12
+            case .xl: return 1.25
+            }
+        }
+    }
+
+    @Published var choice: Choice {
+        didSet {
+            UserDefaults.standard.set(choice.rawValue, forKey: Self.key)
+            DS.F.scale = choice.scale
+        }
+    }
+
+    private static let key = "sr.textSize"
+
+    /// Separate and static for the same reason `ThemeManager.resolve` is: the risk is a silent
+    /// reset to a size the owner did not choose, which a running app cannot report.
+    static func resolve(stored: String?) -> Choice {
+        Choice(rawValue: stored ?? "") ?? .m
+    }
+
+    init() {
+        choice = Self.resolve(stored: UserDefaults.standard.string(forKey: Self.key))
+        // ⛔ Applied in `init`, not only in `didSet`. A stored size would otherwise take effect
+        // only after the owner touched the control again — so the app would relaunch at medium
+        // every time and look like the setting had not saved.
+        DS.F.scale = choice.scale
+    }
+}
+
+/// The XS–XL control, beside light/dark in Appearance.
+struct SizeToggle: View {
+    @ObservedObject var size: AppSizeManager
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(AppSizeManager.Choice.allCases) { choice in
+                Button { size.choice = choice } label: {
+                    Text(choice.label)
+                        // ⚠ A FIXED size, not a scaled one. Every other label in the app grows
+                        // with the setting; if this one did too, the control would resize itself
+                        // as you used it and the segment under your thumb would move.
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(size.choice == choice ? DS.C.accent : DS.C.textTertiary)
+                        .frame(minWidth: 30)
+                        .padding(.vertical, DS.S.sm)
+                        .background(size.choice == choice ? DS.C.accent.opacity(0.15) : .clear)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Text size \(choice.label)")
+                .accessibilityAddTraits(size.choice == choice ? [.isSelected] : [])
+            }
+        }
+        .padding(2)
+        .background(DS.C.surfaceRaised)
+        .clipShape(Capsule())
+    }
+}
+
 /// The segmented light/dark control. Used at the top of the landing page and in Settings — the same
 /// two places the web app offers it, and now offering the same two options in both.
 struct ThemeToggle: View {

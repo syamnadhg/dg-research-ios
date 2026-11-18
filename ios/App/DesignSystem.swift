@@ -59,6 +59,15 @@ enum DS {
         /// Status colours are derived from the palette rather than invented, so a "good" green here
         /// is the same green as the ChatGPT brand mark the user already reads as positive.
         static let ok = chatgpt
+
+        /// The web app's worker-pill green — Tailwind `green-500`, read off
+        /// `account/page.tsx`'s own `bg-green-500`.
+        ///
+        /// ⛔ **NOT `ok`.** `ok` is the ChatGPT teal (`#10A37F`), and a worker pill drawn in it sits
+        /// beside the same pill in the web app's Shared-with popup drawn in `#22C55E`. They are
+        /// close enough to look like a rendering bug rather than a decision — which is exactly how
+        /// this was reported. Anything that names a WORKER uses this; everything else keeps `ok`.
+        static let worker = Color(hex: 0x22C55E)
         static let warn = claude
         static let danger = Color(hex: 0xEF4444)
 
@@ -96,21 +105,44 @@ enum DS {
     // MARK: - Type  (globals.css `--font-sans` / `--font-mono`)
 
     enum F {
+        /// Every type size in the app is multiplied by this.
+        ///
+        /// ⭐ **One multiplier here rather than an edit at several hundred call sites.** The design
+        /// system hands out fonts by point size, so scaling the app means scaling this function —
+        /// and `.dynamicTypeSize` cannot help, because it only moves text that asked for a text
+        /// STYLE, and none of these did.
+        ///
+        /// ⚠ Set from `AppSizeManager`, which owns the persistence. A plain global is enough
+        /// because it is read during body evaluation: the manager is `@Published`, so changing the
+        /// size re-renders, and the re-render reads the new value.
+        static var scale: CGFloat = 1
+
         /// Inter and JetBrains Mono are not on iOS, and bundling them into a Simulator-only harness
         /// buys little. The system faces are the closest available match — SF for Inter's role,
         /// SF Mono via `.monospaced` for JetBrains Mono. Noted so nobody thinks the fonts shipped.
         static func sans(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
-            .system(size: size, weight: weight, design: .default)
+            .system(size: scaled(size), weight: weight, design: .default)
         }
         static func mono(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
-            .system(size: size, weight: weight, design: .monospaced)
+            .system(size: scaled(size), weight: weight, design: .monospaced)
         }
 
-        static let title = sans(17, .semibold)
-        static let body = sans(14)
-        static let label = sans(11, .medium)
-        static let code = mono(13)
-        static let codeLarge = mono(28, .semibold)
+        /// ⚠ Rounded, and floored at 1pt. A fractional point size renders on a half-pixel and the
+        /// mono columns stop lining up — which is most visible in exactly the places this app uses
+        /// mono for, the ids and the counters.
+        static func scaled(_ size: CGFloat) -> CGFloat {
+            max(1, (size * scale).rounded())
+        }
+
+        // ⛔ **`var`, not `let`, and that is the whole reason the control works.** As stored
+        // constants these were evaluated once, at first access, and captured whatever the scale
+        // happened to be then — so changing the size moved every call to `mono(_:)` and left every
+        // use of `.label`, `.title` and `.code` at the old size. Half the app would resize.
+        static var title: Font { sans(17, .semibold) }
+        static var body: Font { sans(14) }
+        static var label: Font { sans(11, .medium) }
+        static var code: Font { mono(13) }
+        static var codeLarge: Font { mono(28, .semibold) }
     }
 }
 
@@ -174,6 +206,34 @@ struct StatusPill: View {
         }
         .onAppear { if live { pulsing = true } }
         .onChange(of: live) { _, isLive in pulsing = isLive }
+    }
+}
+
+/// The breathing dot, on its own.
+///
+/// ⚠ Extracted from `StatusPill` rather than copied, so the two cannot drift into two different
+/// ideas of what "live" looks like. Same restraint as the pill: the motion is tied to something it
+/// is honest about — a worker breathes *because a run is moving through it* — and a still dot means
+/// still. Decorative animation on an idle worker would imply activity where there is none.
+struct PulsingDot: View {
+    let colour: Color
+    var live: Bool = false
+    var size: CGFloat = 6
+
+    @State private var pulsing = false
+
+    var body: some View {
+        Circle()
+            .fill(colour)
+            .frame(width: size, height: size)
+            .scaleEffect(live && pulsing ? 1.45 : 1)
+            .opacity(live && pulsing ? 0.5 : 1)
+            .animation(
+                live ? .easeInOut(duration: 1.1).repeatForever(autoreverses: true) : .default,
+                value: pulsing
+            )
+            .onAppear { if live { pulsing = true } }
+            .onChange(of: live) { _, isLive in pulsing = isLive }
     }
 }
 

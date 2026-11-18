@@ -33,7 +33,11 @@ SDK="$(xcrun --sdk iphonesimulator --show-sdk-path)"
 # actually under test is chosen by bin/c1_in_app.sh when it regenerates them.
 echo "==> generating the C1 constants (SR_C1 mode needs them at compile time)"
 C1PLATFORM="${SR_C1_PLATFORM:-mockplatform}"
+# ⚠ TWO constants from one generator, and the second is not optional for a real run: SRManifest
+# carries ONE platform (the C1 gate drives one), while a production run drives four and needs them
+# all at launch. Generating only the first is how the app comes to gate a platform it cannot run.
 "$REPO/.venv/bin/python" "$REPO/bin/c1_gen_manifest.py" "$C1PLATFORM" "$BUILD/SRManifest.swift" \
+  --all-out "$BUILD/SRAllManifests.swift" \
   ${SR_C1_MANIFEST:+--manifest "$SR_C1_MANIFEST"} ${SR_C1_URL:+--url "$SR_C1_URL"} >/dev/null
 "$REPO/.venv/bin/python" - "$BUILD/SRRuntime.swift" <<'GENPY'
 import sys
@@ -58,6 +62,7 @@ xcrun swiftc \
   -o "$APP/SuperResearch" \
   "$BUILD/SRRuntime.swift" \
   "$BUILD/SRManifest.swift" \
+  "$BUILD/SRAllManifests.swift" \
   "$REPO"/ios/Sources/SuperResearchDeviceCore/*.swift \
   "$REPO"/ios/Shared/*.swift \
   "$REPO"/ios/App/*.swift
@@ -103,6 +108,16 @@ cat > "$APP/Info.plist" <<PLIST
   </dict>
   <key>LSRequiresIPhoneOS</key><true/>
   <key>MinimumOSVersion</key><string>17.0</string>
+  <!-- ⭐ P3 uploads the three phase-2 markdown files to NotebookLM, and on mobile that control opens
+       the NATIVE iOS document picker: the page carries ZERO input[type=file], so there is no
+       Playwright-style set_input_files equivalent to reach for. The picker only sees the Files
+       domain, so the app's Documents directory has to BE in it. Both keys are needed and they do
+       different things: UIFileSharingEnabled publishes the directory to the Files app, and
+       LSSupportsOpeningDocumentsInPlace lets the picker open a file where it lies instead of
+       handing back a sandboxed copy. Without them the picker opens onto somewhere the run's own
+       files do not exist, which reads as "the upload does nothing". -->
+  <key>UIFileSharingEnabled</key><true/>
+  <key>LSSupportsOpeningDocumentsInPlace</key><true/>
   <key>UIUserInterfaceStyle</key><string>Dark</string>
   <!-- ⚠ Without a launch-screen declaration iOS renders the app at a LEGACY screen size and
        letterboxes it — black bars top and bottom, which look like a layout bug in the app rather
@@ -205,6 +220,13 @@ if [ "$SHOTS" = "--shots" ]; then
     echo "==> shot: artifacts/app/shots/$state.png"
   done
 else
+  # ⛔ TERMINATE FIRST. `simctl launch` on an app that is ALREADY RUNNING is a no-op that returns
+  # the existing pid — it does not reload the bundle. So this script would install new code, print
+  # "launched", and leave the OLD process serving: every later observation is then made against a
+  # build that no longer exists on disk. Measured 2026-08-14, and it cost a round of "is the fix
+  # live?" — the installed bundle carried the new symbols while the running process was 2h old.
+  # The `--shots` path above always terminated, which is why only this branch had the hole.
+  xcrun simctl terminate "$UDID" "$BUNDLE_ID" >/dev/null 2>&1 || true
   xcrun simctl launch "$UDID" "$BUNDLE_ID" >/dev/null
-  echo "==> launched. open -a Simulator to see it."
+  echo "==> launched (previous instance terminated first). open -a Simulator to see it."
 fi

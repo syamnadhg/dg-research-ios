@@ -19,6 +19,9 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
     var model: AppModel?
     let theme = ThemeManager()
+    /// ⚠ Constructed at launch, before the first view exists, because its `init` is what applies
+    /// the stored size. Building it lazily would draw the first frame at the default and then jump.
+    let size = AppSizeManager()
     /// Retained only in C1 mode. Held so the runner and its web view outlive `didFinishLaunching`.
     var c1: C1Runner?
 
@@ -95,7 +98,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
 
         let window = UIWindow(frame: UIScreen.main.bounds)
         window.rootViewController = UIHostingController(
-            rootView: RootView(model: model, theme: theme)
+            rootView: RootView(model: model, theme: theme, size: size)
         )
         window.backgroundColor = .black
         window.makeKeyAndVisible()
@@ -142,7 +145,31 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             )
             // Set here so the QR and the pairing POST cannot disagree about which frontend this is.
             AppConfig.frontendBaseURL = base
-            return DeviceBackend(config: config)
+            let backend = DeviceBackend(config: config)
+            // ⛔ **The join that makes a claimed run actually run.** Without it `pollQueue` claims an
+            // entry — stamping the queue document so no sibling backend will touch it — and then
+            // calls through a nil launcher: the run sits `ongoing` for ever and the owner's next run
+            // queues behind it.
+            //
+            // ⚠ All four platforms, from `SRAllManifests`. `SRManifest` carries one (the C1 gate
+            // drives one); a real run drives four, and handing it the single-platform constant would
+            // give it three platforms with no selectors at all.
+            backend.attachRunLauncher(
+                apiBaseURL: URL(string: base)!,
+                storageBucket: config.storageBucket,
+                pages: { platform, worker in
+                    AppWebPages.page(platform: platform, worker: worker)
+                },
+                // ⛔ Called when a run ends, however it ends. Without it the run's web views stay
+                // attached to the window at full size, so their WebContent processes stay in the
+                // foreground regime and can never suspend — which is what the crash report's
+                // 452MB of IOSurface was.
+                releasePages: { AppWebPages.releaseAll() },
+                manifest: SRAllManifests.selectors,
+                texts: SRAllManifests.texts,
+                openers: SRAllManifests.openers
+            )
+            return backend
         } catch {
             // Reported and degraded rather than fatal: a malformed plist is a configuration problem
             // the UI can state, and a crash on launch would say nothing about which key was missing.

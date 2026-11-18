@@ -12,9 +12,20 @@
 # Usage:
 #   bin/all_gates.sh                 # unit tests + emulator gates + coverage (no Simulator)
 #   bin/all_gates.sh <UDID>          # everything, including the Simulator and in-app gates
+#   bin/all_gates.sh <UDID> <PLATFORM>
+#                                    # ...and run the P0–P3 e2e against a REAL platform instead of
+#                                    # the mock, using selectors_mobile.json
+#
+# ⚠ **The real-platform e2e opens a SAFARI tab, and only the APP is signed in.** Measured
+# 2026-08-08: the app's web view carries the platform sessions; Safari does not. So a real-platform
+# run here fails at the logged-in marker for a reason that reads as a broken selector rather than as
+# a signed-out browser. It is wired because the recipe asks for it and because it is the right shape
+# once the e2e can drive the app's own web view — but until then, expect it to fail on P0 and do not
+# read that as selector rot. The in-app gates below are the ones that exercise a signed-in surface.
 set -uo pipefail
 
 UDID="${1:-}"
+PLATFORM="${2:-}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="$REPO/.venv/bin/python"
 FAILED=()
@@ -72,7 +83,15 @@ run "C0-FE pairing (real rules)" bash "$REPO/bin/c0fe_gate.sh"
 if [ -n "$UDID" ]; then
   run "B0a substrate (trusted taps)" "$PY" "$REPO/bin/b0a_gate.py" --udid "$UDID"
   run "B1 smoke" "$PY" "$REPO/bin/b1_smoke.py" --udid "$UDID"
-  run "e2e P0-P3 + reboot survival" "$PY" "$REPO/bin/e2e_simulator.py" --udid "$UDID"
+  if [ -n "$PLATFORM" ]; then
+    # The real manifest, not the mock one — the whole point of the flag.
+    run "e2e P0-P3 + reboot survival ($PLATFORM, real manifest)" \
+      "$PY" "$REPO/bin/e2e_simulator.py" --udid "$UDID" \
+      --platform "$PLATFORM" --manifest "$REPO/selectors_mobile.json"
+  else
+    run "e2e P0-P3 + reboot survival (mock platform)" \
+      "$PY" "$REPO/bin/e2e_simulator.py" --udid "$UDID"
+  fi
   run "C0 in-app (WKWebView)" bash "$REPO/bin/c0_in_app.sh" "$UDID"
   run "C1 in-app P0-P3" bash "$REPO/bin/c1_in_app.sh" "$UDID"
   run "C1 contract vs golden fixture" bash "$REPO/bin/c1_contract_gate.sh" "$UDID"

@@ -129,13 +129,13 @@ private struct WorkerRow: View {
         HStack(alignment: .center, spacing: DS.S.md) {
             Text("\(id)")
                 .font(DS.F.mono(11, .semibold))
-                .foregroundStyle(state == .resting ? DS.C.ok : .white)
+                .foregroundStyle(state == .resting ? DS.C.worker : .white)
                 .frame(width: 26, height: 26)
-                .background(state == .resting ? Color.clear : (state == .running ? DS.C.ok : DS.C.textTertiary))
+                .background(state == .resting ? Color.clear : (state == .running ? DS.C.worker : DS.C.textTertiary))
                 .clipShape(Circle())
                 .overlay(
                     Circle().stroke(
-                        state == .resting ? DS.C.ok.opacity(0.8) : .clear,
+                        state == .resting ? DS.C.worker.opacity(0.8) : .clear,
                         lineWidth: state == .resting ? 2 : 0
                     )
                 )

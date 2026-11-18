@@ -209,6 +209,31 @@ def main() -> int:
         f"HTTP {status} — the rule pins request.auth.uid to syntheticDeviceUid",
     )
 
+    # ---- the OWNER's rest toggle: the web app's ONLY write to this document -----------
+    #
+    # ⛔ The Shared-with pill writes `restingWorkerIds` straight onto `devices/{id}` with no command
+    # document, so the rules are the entire gate — and when this write is refused the web app shows
+    # nothing: `toggleRest` is fire-and-forget with a `console.warn` catch, latency compensation
+    # flips the pill locally, and Firestore silently rolls it back. "The phone never synced" and
+    # "the browser was never allowed to write" look identical from both ends.
+    status, _ = patch_as(OWNER_UID, f"devices/{DEVICE_ID}", {"restingWorkerIds": [1]})
+    check(
+        "THE OWNER MAY PARK A WORKER (the web app's Shared-with pill)",
+        status == 200,
+        f"HTTP {status} — restingWorkerIds is in the owner allow-list",
+    )
+
+    # ⚠ The asymmetry that explains the symptom when the browser is signed in as someone else: the
+    # web app gates the pill on `device.ownerUid === user.uid` and renders it WITHOUT a click
+    # handler when that is false — so a sharer's click does nothing at all, silently, and never
+    # reaches this rule.
+    status, _ = patch_as("not-the-owner-uid", f"devices/{DEVICE_ID}", {"restingWorkerIds": [1]})
+    check(
+        "a NON-OWNER may not park a worker",
+        status == 403,
+        f"HTTP {status} — the owner branch pins request.auth.uid to ownerUid",
+    )
+
     # ---- pipeline_events, built by our real writer ------------------------------------
     built = events_mod.build_event(
         event_type="phase_start", device_id=DEVICE_ID, seq=int(time.time() * 1000), phase=0
